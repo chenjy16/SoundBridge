@@ -44,10 +44,11 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          # Extract version from release tag (e.g., v1.0.0 -> 1.0.0)
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Extract version from release tag (strip refs/tags/ and optional v prefix)
+          RAW_TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${RAW_TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

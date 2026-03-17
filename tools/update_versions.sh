@@ -102,10 +102,9 @@ if [ "$UPDATE_DRIVER" = true ]; then
         CMAKE_VERSION=$(echo "$VERSION" | sed 's/-.*//')
         # Use sed to replace the version in project() line
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS sed requires -i with extension or '' and different regex syntax
-            sed -i '' "s/project(SoundBridgeDriver VERSION [0-9a-zA-Z._-]*/project(SoundBridgeDriver VERSION $CMAKE_VERSION/" "$DRIVER_CMAKE"
+            sed -i '' "s/project(SoundBridgeDriver VERSION [0-9][0-9.]*/project(SoundBridgeDriver VERSION $CMAKE_VERSION/" "$DRIVER_CMAKE"
         else
-            sed -i "s/project(SoundBridgeDriver VERSION [0-9a-zA-Z._-]\+/project(SoundBridgeDriver VERSION $CMAKE_VERSION/" "$DRIVER_CMAKE"
+            sed -i "s/project(SoundBridgeDriver VERSION [0-9][0-9.]*/project(SoundBridgeDriver VERSION $CMAKE_VERSION/" "$DRIVER_CMAKE"
         fi
         echo "OK: Updated packages/driver/CMakeLists.txt"
     else
