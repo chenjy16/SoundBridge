@@ -35,12 +35,17 @@ jobs:
         run: |
           cd packages/driver/vendor/libASPL
           git fetch --tags --force --prune origin 2>/dev/null || true
-          # If no tags available locally, create one from remote
+          # If no tags available locally, create a fallback tag
           if ! git describe --tags HEAD >/dev/null 2>&1; then
-            LATEST_TAG=$(git ls-remote --tags origin | grep -oP 'refs/tags/\K[^{}]+$' | sort -V | tail -1)
+            # Try to get latest tag from remote (macOS-compatible grep)
+            LATEST_TAG=$(git ls-remote --tags origin | sed -n 's|.*refs/tags/\([^{}]*\)$|\1|p' | sort -V | tail -1)
             if [ -n "$LATEST_TAG" ]; then
               git tag "$LATEST_TAG" HEAD 2>/dev/null || true
-              echo "Created local tag: $LATEST_TAG"
+              echo "Created local tag from remote: $LATEST_TAG"
+            else
+              # Absolute fallback: create a dummy version tag
+              git tag "v3.0.0" HEAD 2>/dev/null || true
+              echo "Created fallback tag: v3.0.0"
             fi
           fi
           echo "libASPL version: $(git describe --tags --always HEAD 2>/dev/null || echo 'unknown')"
