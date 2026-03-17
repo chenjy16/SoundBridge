@@ -51,6 +51,8 @@ class VolumeController: ObservableObject {
     // MARK: - Private
 
     private var proxyDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var physicalDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var listenedDeviceID: AudioObjectID = kAudioObjectUnknown
 
     // Block references for proper listener removal (P0 fix: prevents listener leak)
     private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
@@ -121,6 +123,7 @@ class VolumeController: ObservableObject {
         if name.contains("SoundBridge") {
             // Current default is a proxy device
             proxyDeviceID = defaultDeviceID
+            physicalDeviceID = kAudioObjectUnknown
 
             // Extract physical device info from proxy UID
             let physicalUID = uid.components(separatedBy: "-soundbridge").first ?? uid
@@ -138,12 +141,24 @@ class VolumeController: ObservableObject {
         } else {
             // Current default is a physical device (no proxy)
             proxyDeviceID = kAudioObjectUnknown
-            let isFixed = !deviceHasVolumeControl(defaultDeviceID)
+            let hasVolume = deviceHasVolumeControl(defaultDeviceID)
+
+            if hasVolume {
+                physicalDeviceID = defaultDeviceID
+            } else {
+                physicalDeviceID = kAudioObjectUnknown
+            }
 
             DispatchQueue.main.async { [weak self] in
                 self?.activeDeviceName = name
                 self?.activeDeviceUID = uid
-                self?.isFixedVolumeDevice = isFixed
+                self?.isFixedVolumeDevice = hasVolume
+            }
+
+            if hasVolume {
+                readCurrentVolume()
+                readCurrentMute()
+                startListening()
             }
         }
     }
@@ -153,52 +168,104 @@ class VolumeController: ObservableObject {
     /// Set volume on the proxy device via CoreAudio API.
     /// UI → Driver → Shared Memory → Host (zero file I/O).
     func setVolume(_ value: Float) {
-        guard proxyDeviceID != kAudioObjectUnknown else { return }
+        let targetDevice: AudioObjectID
+        if proxyDeviceID != kAudioObjectUnknown {
+            targetDevice = proxyDeviceID
+        } else if physicalDeviceID != kAudioObjectUnknown {
+            targetDevice = physicalDeviceID
+        } else {
+            return
+        }
+
         let clamped = max(0.0, min(1.0, value))
+        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
+        var succeeded = false
 
-        var volume = clamped
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        for element in elements {
+            var volume = clamped
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
 
-        let status = AudioObjectSetPropertyData(
-            proxyDeviceID, &address, 0, nil,
-            UInt32(MemoryLayout<Float>.size), &volume
-        )
+            let status = AudioObjectSetPropertyData(
+                targetDevice, &address, 0, nil,
+                UInt32(MemoryLayout<Float>.size), &volume
+            )
 
-        if status == noErr {
+            if status == noErr {
+                succeeded = true
+                if element != kAudioObjectPropertyElementMain {
+                    logger.info("setVolume succeeded on per-channel element \(element) for device \(targetDevice)")
+                }
+                // For per-channel elements, continue to set all channels
+                if element == kAudioObjectPropertyElementMain { break }
+            }
+        }
+
+        if succeeded {
             DispatchQueue.main.async { [weak self] in
                 self?.currentVolume = clamped
             }
         } else {
-            logger.error("setVolume failed: \(formatOSStatus(status))")
+            logger.error("setVolume failed on all elements for device \(targetDevice)")
+            // Diagnostic: check settable status for each element
+            for element in elements {
+                var diagAddress = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyVolumeScalar,
+                    mScope: kAudioObjectPropertyScopeOutput,
+                    mElement: element
+                )
+                var isSettable: DarwinBoolean = false
+                let settableStatus = AudioObjectIsPropertySettable(targetDevice, &diagAddress, &isSettable)
+                logger.error("  Diagnostic: device=\(targetDevice) element=\(element) settable=\(isSettable.boolValue) settableQueryStatus=\(formatOSStatus(settableStatus))")
+            }
         }
     }
 
-    /// Toggle mute on the proxy device.
+    /// Toggle mute on the target device (proxy or physical).
     func setMute(_ muted: Bool) {
-        guard proxyDeviceID != kAudioObjectUnknown else { return }
+        let targetDevice: AudioObjectID
+        if proxyDeviceID != kAudioObjectUnknown {
+            targetDevice = proxyDeviceID
+        } else if physicalDeviceID != kAudioObjectUnknown {
+            targetDevice = physicalDeviceID
+        } else {
+            return
+        }
 
-        var value: UInt32 = muted ? 1 : 0
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
+        var succeeded = false
 
-        let status = AudioObjectSetPropertyData(
-            proxyDeviceID, &address, 0, nil,
-            UInt32(MemoryLayout<UInt32>.size), &value
-        )
+        for element in elements {
+            var value: UInt32 = muted ? 1 : 0
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
 
-        if status == noErr {
+            let status = AudioObjectSetPropertyData(
+                targetDevice, &address, 0, nil,
+                UInt32(MemoryLayout<UInt32>.size), &value
+            )
+
+            if status == noErr {
+                succeeded = true
+                if element != kAudioObjectPropertyElementMain {
+                    logger.info("setMute succeeded on per-channel element \(element) for device \(targetDevice)")
+                }
+                if element == kAudioObjectPropertyElementMain { break }
+            }
+        }
+
+        if succeeded {
             DispatchQueue.main.async { [weak self] in
                 self?.isMuted = muted
             }
         } else {
-            logger.error("setMute failed: \(formatOSStatus(status))")
+            logger.error("setMute failed on all elements for device \(targetDevice)")
         }
     }
 
@@ -207,7 +274,16 @@ class VolumeController: ObservableObject {
     /// Register AudioObjectPropertyListenerBlock for volume and mute changes
     /// on the proxy device. Keyboard volume key changes update the slider within 100ms.
     private func startListening() {
-        guard proxyDeviceID != kAudioObjectUnknown else { return }
+        let targetDevice: AudioObjectID
+        if proxyDeviceID != kAudioObjectUnknown {
+            targetDevice = proxyDeviceID
+        } else if physicalDeviceID != kAudioObjectUnknown {
+            targetDevice = physicalDeviceID
+        } else {
+            return
+        }
+
+        listenedDeviceID = targetDevice
 
         // Volume listener
         let volBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -216,7 +292,7 @@ class VolumeController: ObservableObject {
         volumeListenerBlock = volBlock
 
         let volumeStatus = AudioObjectAddPropertyListenerBlock(
-            proxyDeviceID, &volumeAddress, DispatchQueue.main, volBlock
+            targetDevice, &volumeAddress, DispatchQueue.main, volBlock
         )
         if volumeStatus != noErr {
             logger.error("Failed to add volume listener: \(formatOSStatus(volumeStatus))")
@@ -230,7 +306,7 @@ class VolumeController: ObservableObject {
         muteListenerBlock = mtBlock
 
         let muteStatus = AudioObjectAddPropertyListenerBlock(
-            proxyDeviceID, &muteAddress, DispatchQueue.main, mtBlock
+            targetDevice, &muteAddress, DispatchQueue.main, mtBlock
         )
         if muteStatus != noErr {
             logger.error("Failed to add mute listener: \(formatOSStatus(muteStatus))")
@@ -239,9 +315,10 @@ class VolumeController: ObservableObject {
     }
 
     private func stopListening() {
+        guard listenedDeviceID != kAudioObjectUnknown else { return }
         if let block = volumeListenerBlock {
             let status = AudioObjectRemovePropertyListenerBlock(
-                proxyDeviceID, &volumeAddress, DispatchQueue.main, block
+                listenedDeviceID, &volumeAddress, DispatchQueue.main, block
             )
             if status != noErr {
                 logger.warning("Failed to remove volume listener: \(formatOSStatus(status))")
@@ -250,13 +327,14 @@ class VolumeController: ObservableObject {
         }
         if let block = muteListenerBlock {
             let status = AudioObjectRemovePropertyListenerBlock(
-                proxyDeviceID, &muteAddress, DispatchQueue.main, block
+                listenedDeviceID, &muteAddress, DispatchQueue.main, block
             )
             if status != noErr {
                 logger.warning("Failed to remove mute listener: \(formatOSStatus(status))")
             }
             muteListenerBlock = nil
         }
+        listenedDeviceID = kAudioObjectUnknown
     }
 
     // MARK: - Hardware Device List Listener (P0 fix: hot-plug + startup race)
@@ -334,56 +412,80 @@ class VolumeController: ObservableObject {
         stopHardwareListener()
     }
 
-    /// Read current volume from the proxy device.
+    /// Read current volume from the target device (proxy or physical).
     private func readCurrentVolume() {
-        guard proxyDeviceID != kAudioObjectUnknown else { return }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var volume: Float = 0
-        var dataSize = UInt32(MemoryLayout<Float>.size)
-
-        let status = AudioObjectGetPropertyData(
-            proxyDeviceID, &address, 0, nil, &dataSize, &volume
-        )
-
-        if status == noErr {
-            DispatchQueue.main.async { [weak self] in
-                self?.currentVolume = volume
-            }
+        let targetDevice: AudioObjectID
+        if proxyDeviceID != kAudioObjectUnknown {
+            targetDevice = proxyDeviceID
+        } else if physicalDeviceID != kAudioObjectUnknown {
+            targetDevice = physicalDeviceID
         } else {
-            logger.error("readCurrentVolume failed: \(formatOSStatus(status))")
+            return
         }
+
+        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
+
+        for element in elements {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+
+            var volume: Float = 0
+            var dataSize = UInt32(MemoryLayout<Float>.size)
+
+            let status = AudioObjectGetPropertyData(
+                targetDevice, &address, 0, nil, &dataSize, &volume
+            )
+
+            if status == noErr {
+                DispatchQueue.main.async { [weak self] in
+                    self?.currentVolume = volume
+                }
+                return
+            }
+        }
+
+        logger.error("readCurrentVolume failed on all elements for device \(targetDevice)")
     }
 
-    /// Read current mute state from the proxy device.
+    /// Read current mute state from the target device (proxy or physical).
     private func readCurrentMute() {
-        guard proxyDeviceID != kAudioObjectUnknown else { return }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var muted: UInt32 = 0
-        var dataSize = UInt32(MemoryLayout<UInt32>.size)
-
-        let status = AudioObjectGetPropertyData(
-            proxyDeviceID, &address, 0, nil, &dataSize, &muted
-        )
-
-        if status == noErr {
-            DispatchQueue.main.async { [weak self] in
-                self?.isMuted = muted != 0
-            }
+        let targetDevice: AudioObjectID
+        if proxyDeviceID != kAudioObjectUnknown {
+            targetDevice = proxyDeviceID
+        } else if physicalDeviceID != kAudioObjectUnknown {
+            targetDevice = physicalDeviceID
         } else {
-            logger.error("readCurrentMute failed: \(formatOSStatus(status))")
+            return
         }
+
+        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
+
+        for element in elements {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+
+            var muted: UInt32 = 0
+            var dataSize = UInt32(MemoryLayout<UInt32>.size)
+
+            let status = AudioObjectGetPropertyData(
+                targetDevice, &address, 0, nil, &dataSize, &muted
+            )
+
+            if status == noErr {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isMuted = muted != 0
+                }
+                return
+            }
+        }
+
+        logger.error("readCurrentMute failed on all elements for device \(targetDevice)")
     }
 
     // MARK: - Device Switching (Task 10.5)
