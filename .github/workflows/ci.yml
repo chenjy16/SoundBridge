@@ -63,11 +63,18 @@ jobs:
           submodules: recursive
       - name: Fetch libASPL tags
         run: |
-          git -C packages/driver/vendor/libASPL fetch --tags --force --prune --update-shallow
+          cd packages/driver/vendor/libASPL
+          git fetch --tags --force --prune origin 2>/dev/null || true
+          # Verify tags are available
+          if git describe --tags --always HEAD >/dev/null 2>&1; then
+            echo "✓ libASPL version: $(git describe --tags --always HEAD)"
+          else
+            echo "⚠️ No tags found, will use fallback version"
+          fi
       - name: Detect libASPL vendor drop
         id: libaspl
         run: |
-          if [ -d packages/driver/vendor/libASPL ]; then
+          if [ -d packages/driver/vendor/libASPL ] && [ -f packages/driver/vendor/libASPL/CMakeLists.txt ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -78,6 +85,16 @@ jobs:
       - name: Build HAL driver (universal)
         if: steps.libaspl.outputs.present == 'true'
         run: |
+          # Ensure libASPL has a version tag for CMake
+          cd packages/driver/vendor/libASPL
+          if ! git describe --tags HEAD >/dev/null 2>&1; then
+            LATEST_TAG=$(git ls-remote --tags origin | grep -oP 'refs/tags/\K[^{}]+$' | sort -V | tail -1)
+            if [ -n "$LATEST_TAG" ]; then
+              git tag "$LATEST_TAG" HEAD 2>/dev/null || true
+              echo "Created local tag: $LATEST_TAG"
+            fi
+          fi
+          cd "$GITHUB_WORKSPACE"
           cmake -S packages/driver -B packages/driver/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"

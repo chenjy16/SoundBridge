@@ -33,7 +33,17 @@ jobs:
 
       - name: Fetch libASPL tags
         run: |
-          git -C packages/driver/vendor/libASPL fetch --tags --force --prune --update-shallow || true
+          cd packages/driver/vendor/libASPL
+          git fetch --tags --force --prune origin 2>/dev/null || true
+          # If no tags available locally, create one from remote
+          if ! git describe --tags HEAD >/dev/null 2>&1; then
+            LATEST_TAG=$(git ls-remote --tags origin | grep -oP 'refs/tags/\K[^{}]+$' | sort -V | tail -1)
+            if [ -n "$LATEST_TAG" ]; then
+              git tag "$LATEST_TAG" HEAD 2>/dev/null || true
+              echo "Created local tag: $LATEST_TAG"
+            fi
+          fi
+          echo "libASPL version: $(git describe --tags --always HEAD 2>/dev/null || echo 'unknown')"
 
       - name: Determine version
         id: version
