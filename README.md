@@ -36,7 +36,7 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later
+- macOS 13.0+ (Ventura) or later
 - HDMI or DisplayPort audio output
 
 ## Installation
@@ -114,52 +114,125 @@ SoundBridge/
 
 ### Prerequisites
 
-- macOS 13.0+
+- macOS 13.0 (Ventura) or later
 - Xcode Command Line Tools (`xcode-select --install`)
 - CMake (`brew install cmake`)
+- Git (for submodule management)
+
+检查依赖是否就绪：
+
+```bash
+make install-deps
+```
+
+### Clone & Initialize
+
+项目依赖 git submodule（HAL 驱动使用的 [libASPL](https://github.com/gavv/libASPL) 库），克隆后必须初始化：
+
+```bash
+git clone https://github.com/chenjy16/SoundBridge.git
+cd SoundBridge
+git submodule update --init --recursive
+```
+
+> ⚠️ 如果跳过 submodule 初始化，构建 HAL Driver 时会报错：`does not contain a CMakeLists.txt file`。
 
 ### Quick Build
 
 ```bash
-# Build all components (DSP, driver, host, app) as universal binaries
+# 构建所有组件（DSP、Driver、Host、App），输出 universal binary（arm64 + x86_64）
 make build
 
-# Create the .app bundle
-make bundle
-
-# Run the app
+# 运行应用
 make run
 ```
 
-### Other Commands
+`make build` 会自动完成以下步骤：
+1. 从 git tag 更新版本号到各组件的 Info.plist / CMakeLists.txt
+2. 构建 DSP 库（C++，universal）
+3. 构建 HAL 虚拟驱动（C++，universal，依赖 libASPL）
+4. 构建 Audio Host（Swift，universal）
+5. 构建 Menu Bar App（Swift，universal）
+6. 创建 `dist/SoundBridge.app` 应用包
+
+构建产物位于 `dist/SoundBridge.app`。
+
+### 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `make build` | 构建所有组件（DSP、Driver、Host、App） |
+| `make bundle` | 仅创建 .app 包（需先 build） |
+| `make run` | 运行已构建的应用 |
+| `make dev` | 重置状态 + 构建 + 运行（完整的开发流程，会触发 onboarding） |
+| `make clean` | 清理所有构建产物 |
+| `make rebuild` | clean + 完整重新构建 |
+| `make quick` | 仅重新构建 Swift 代码（更快的迭代速度） |
+| `make test` | 运行 DSP 测试套件 |
+| `make update-version` | 从 git tag 更新各组件版本号 |
+
+### 打包与分发
 
 ```bash
-make dev          # Reset state + build + run (fresh onboarding)
-make clean        # Remove all build artifacts
-make rebuild      # Clean + full rebuild
-make test         # Run DSP test suite
-make quick        # Rebuild Swift code only (faster iteration)
-make sign         # Code sign the app bundle
-make dmg          # Create distributable DMG
-make full-release # Build + sign + DMG (complete pipeline)
+# 代码签名
+make sign
+
+# 验证签名
+make verify
+
+# 创建 DMG 安装包（含拖拽到 Applications 的布局）
+make dmg
+
+# 完整发布流程：构建 → 签名 → 验证 → DMG
+make full-release
 ```
 
-### Manual Build Steps
+| 命令 | 说明 |
+|------|------|
+| `make sign` | 使用 Developer ID 证书对 .app 进行代码签名 |
+| `make verify` | 验证所有组件的代码签名 |
+| `make dmg` | 创建带拖拽安装布局的 DMG 文件 |
+| `make release` | 构建 + 签名 + 验证 |
+| `make full-release` | 构建 + 签名 + 验证 + DMG（完整流水线） |
+| `make test-release` | 测试已签名的 release 构建 |
+
+> 代码签名需要有效的 Apple Developer ID 证书。如果仅本地开发测试，可以跳过签名步骤直接使用 `make build` + `make run`。
+
+### 手动构建各组件
+
+如果需要单独构建某个组件：
 
 ```bash
-# 1. DSP library
-cmake -S packages/dsp -B packages/dsp/build -DCMAKE_BUILD_TYPE=Release
+# 1. DSP 库（C++）
+cmake -S packages/dsp -B packages/dsp/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 cmake --build packages/dsp/build
 
-# 2. HAL driver
-cmake -S packages/driver -B packages/driver/build -DCMAKE_BUILD_TYPE=Release
+# 2. HAL 驱动（C++，依赖 libASPL submodule）
+cmake -S packages/driver -B packages/driver/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 cmake --build packages/driver/build
 
-# 3. Host engine
+# 3. Host 引擎（Swift）
 cd packages/host && swift build -c release
 
-# 4. Menu bar app
+# 4. Menu Bar 应用（Swift）
 cd apps/mac/SoundBridgeApp && swift build -c release
+```
+
+### 构建产物
+
+```
+dist/
+└── SoundBridge.app/
+    └── Contents/
+        ├── MacOS/
+        │   ├── SoundBridgeApp          # 主程序（Menu Bar 应用）
+        │   └── SoundBridgeHost         # 后台音频引擎
+        ├── Resources/
+        │   ├── SoundBridgeDriver.driver/  # HAL 虚拟驱动
+        │   └── ...                        # 图标、字体等资源
+        └── Info.plist
 ```
 
 ## Release Pipeline
