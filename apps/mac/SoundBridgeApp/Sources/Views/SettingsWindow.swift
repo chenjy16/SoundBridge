@@ -31,9 +31,7 @@ struct SettingsView: View {
 		VStack(spacing: 0) {
 			// Header
 			VStack(spacing: 12) {
-				Image(systemName: "waveform.circle.fill")
-					.font(.system(size: 52))
-					.foregroundColor(.accentColor)
+				AppIconView(size: 64)
 
 				Text("SoundBridge")
 					.font(.title)
@@ -172,6 +170,50 @@ struct SettingsView: View {
 		formatter.dateStyle = .medium
 		formatter.timeStyle = .none
 		return formatter.string(from: date)
+	}
+}
+
+/// Loads app-icon.png from the bundle Resources directory
+struct AppIconView: View {
+	let size: CGFloat
+
+	var body: some View {
+		Group {
+			if let image = loadAppIcon() {
+				Image(nsImage: image)
+					.resizable()
+					.aspectRatio(contentMode: .fit)
+					.frame(width: size, height: size)
+					.clipShape(RoundedRectangle(cornerRadius: size * 0.2, style: .continuous))
+			} else {
+				Image(systemName: "waveform.circle.fill")
+					.font(.system(size: size * 0.8))
+					.foregroundColor(.accentColor)
+			}
+		}
+	}
+
+	private func loadAppIcon() -> NSImage? {
+		// Try resource bundle first
+		if let resourceBundleURL = Bundle.main.url(forResource: "SoundBridgeApp_SoundBridgeApp", withExtension: "bundle"),
+		   let resourceBundle = Bundle(url: resourceBundleURL),
+		   let path = resourceBundle.url(forResource: "app-icon", withExtension: "png") {
+			return NSImage(contentsOf: path)
+		}
+		// Try main bundle Resources
+		if let path = Bundle.main.url(forResource: "app-icon", withExtension: "png") {
+			return NSImage(contentsOf: path)
+		}
+		// Try resourcePath directly
+		if let resourcePath = Bundle.main.resourcePath {
+			for subpath in ["Resources/app-icon.png", "app-icon.png"] {
+				let fullPath = (resourcePath as NSString).appendingPathComponent(subpath)
+				if FileManager.default.fileExists(atPath: fullPath) {
+					return NSImage(contentsOfFile: fullPath)
+				}
+			}
+		}
+		return nil
 	}
 }
 

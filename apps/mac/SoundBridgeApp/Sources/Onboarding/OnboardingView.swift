@@ -56,9 +56,7 @@ private struct WelcomeStepView: View {
             Spacer()
 
             // App icon / brand
-            Image(systemName: "speaker.wave.3.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
+            AppIconView(size: 64)
 
             VStack(spacing: 12) {
                 Text("欢迎使用 SoundBridge")
