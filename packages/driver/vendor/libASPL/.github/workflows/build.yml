@@ -1,0 +1,57 @@
+name: "build"
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - v*
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+  schedule:
+    - cron: '0 0 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+
+jobs:
+  main:
+    strategy:
+      matrix:
+        macos: [latest, 15, 14, 13]
+
+    runs-on: macos-${{ matrix.macos }}
+    name: macos-${{ matrix.macos }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install doxygen
+        run: |
+          brew install --formula doxygen graphviz
+
+      - name: Release build
+        run: make release_build
+
+      - name: Debug build
+        run: make debug_build
+
+      - name: Test
+        run: make test
+
+      - name: Examples
+        run: make examples
+
+      - name: Install
+        run: sudo make install

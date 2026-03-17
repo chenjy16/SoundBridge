@@ -1,0 +1,375 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., 1.0.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  build-and-release:
+    name: Build, Sign, Notarize & Release
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Fetch libASPL tags
+        run: |
+          git -C packages/driver/vendor/libASPL fetch --tags --force --prune --update-shallow || true
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Update Component Versions
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Update Component Versions
+        run: |
+          # Check if driver code has changed since last release
+          CURRENT_DRIVER_VERSION=$(cat packages/driver/VERSION 2>/dev/null || echo "1.0.0")
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+
+          # Check if driver files changed since last tag
+          DRIVER_CHANGED=$(git diff --name-only "$LAST_TAG" HEAD -- packages/driver/src packages/driver/include packages/driver/CMakeLists.txt 2>/dev/null | wc -l || echo "1")
+
+          if [ "$DRIVER_CHANGED" -gt 0 ]; then
+            echo "🔧 Driver code changed - updating all components to ${{ steps.version.outputs.version }}"
+            ./tools/update_versions.sh ${{ steps.version.outputs.version }}
+          else
+            echo "📱 Driver unchanged - updating app only to ${{ steps.version.outputs.version }}"
+            ./tools/update_versions.sh ${{ steps.version.outputs.version }} --app-only
+            echo "   Driver remains at version: $CURRENT_DRIVER_VERSION"
+          fi
+
+          echo "✓ Version update complete"
+
+          # Show what changed for verification
+          git diff apps/mac/SoundBridgeApp/Info.plist packages/driver/Info.plist packages/host/Info.plist
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Install Apple Certificate
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Install Apple Certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # Decode certificate from base64
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Verify certificate installed
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+
+          echo "✓ Apple certificate installed"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Build All Components
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Build DSP Library (universal)
+        run: |
+          cmake -S packages/dsp -B packages/dsp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build packages/dsp/build --config Release --parallel
+          echo "✓ DSP library built (universal)"
+
+      - name: Build HAL Driver (universal)
+        run: |
+          cmake -S packages/driver -B packages/driver/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build packages/driver/build --config Release --parallel
+          echo "✓ HAL driver built (universal)"
+
+      - name: Build Host Engine (universal)
+        run: |
+          swift build --configuration release --package-path packages/host \
+            --triple arm64-apple-macosx
+          swift build --configuration release --package-path packages/host \
+            --triple x86_64-apple-macosx
+          mkdir -p packages/host/.build/universal/release
+          lipo -create -output packages/host/.build/universal/release/SoundBridgeHost \
+            packages/host/.build/arm64-apple-macosx/release/SoundBridgeHost \
+            packages/host/.build/x86_64-apple-macosx/release/SoundBridgeHost
+          echo "✓ Host engine built (universal)"
+
+      - name: Build Menu Bar App (universal)
+        run: |
+          swift build --configuration release --package-path apps/mac/SoundBridgeApp \
+            --triple arm64-apple-macosx
+          swift build --configuration release --package-path apps/mac/SoundBridgeApp \
+            --triple x86_64-apple-macosx
+          mkdir -p apps/mac/SoundBridgeApp/.build/universal/release
+          lipo -create -output apps/mac/SoundBridgeApp/.build/universal/release/SoundBridgeApp \
+            apps/mac/SoundBridgeApp/.build/arm64-apple-macosx/release/SoundBridgeApp \
+            apps/mac/SoundBridgeApp/.build/x86_64-apple-macosx/release/SoundBridgeApp
+          echo "✓ Menu bar app built (universal)"
+
+      - name: Verify universal architectures
+        run: |
+          echo "Verifying universal binary architectures..."
+          lipo -archs packages/dsp/build/libsoundbridge_dsp.a
+          lipo -archs packages/driver/build/SoundBridgeDriver.driver/Contents/MacOS/SoundBridgeDriver
+          lipo -archs packages/host/.build/universal/release/SoundBridgeHost
+          lipo -archs apps/mac/SoundBridgeApp/.build/universal/release/SoundBridgeApp
+          echo "✓ All binaries are universal"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Create App Bundle
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Create App Bundle
+        run: |
+          make bundle
+          echo "✓ App bundle created"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Code Sign
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Code Sign App
+        run: |
+          make sign
+          echo "✓ App signed"
+
+      - name: Verify Signatures
+        run: |
+          ./tools/verify_signatures.sh
+          echo "✓ Signatures verified"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Notarize
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Notarize App
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Create zip for notarization
+          ditto -c -k --keepParent dist/SoundBridge.app dist/SoundBridge.zip
+
+          RESULT_JSON=$(mktemp)
+
+          # Submit for notarization and capture the result
+          if ! xcrun notarytool submit dist/SoundBridge.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --output-format json > "$RESULT_JSON"; then
+            echo "Notary submission failed"
+            cat "$RESULT_JSON" || true
+            SUBMISSION_ID=$(python -c 'import json,sys, pathlib; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text()) if p.exists() else {}; print(data.get("id",""))' "$RESULT_JSON")
+            if [ -n "$SUBMISSION_ID" ]; then
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit 1
+          fi
+
+          STATUS=$(python -c 'import json,sys, pathlib; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text()) if p.exists() else {}; print(data.get("status",""))' "$RESULT_JSON")
+          SUBMISSION_ID=$(python -c 'import json,sys, pathlib; p=pathlib.Path(sys.argv[1]); data=json.loads(p.read_text()) if p.exists() else {}; print(data.get("id",""))' "$RESULT_JSON")
+
+          echo "Submission ID: ${SUBMISSION_ID}"
+          echo "Status: ${STATUS}"
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "Notary submission returned status: $STATUS"
+            if [ -n "$SUBMISSION_ID" ]; then
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+            fi
+            exit 1
+          fi
+
+          # Staple the ticket
+          xcrun stapler staple dist/SoundBridge.app
+
+          # Clean up
+          rm dist/SoundBridge.zip "$RESULT_JSON"
+
+          echo "✓ App notarized and stapled"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Create DMG
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Install DMG Tools
+        run: |
+          brew install create-dmg
+          echo "✓ create-dmg installed"
+
+      - name: Create DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_NAME="SoundBridge.dmg"
+
+          # Use the create_dmg.sh script for proper layout (app + Applications symlink)
+          ./tools/create_dmg.sh
+
+          # Sign the DMG — search all keychains (including the CI temporary one)
+          IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          if [ -z "$IDENTITY" ]; then
+            echo "ERROR: No Developer ID Application certificate found"
+            security list-keychains
+            security find-identity -v -p codesigning
+            exit 1
+          fi
+          codesign --force --sign "$IDENTITY" --timestamp "dist/${DMG_NAME}"
+
+          # Notarize the DMG
+          xcrun notarytool submit "dist/${DMG_NAME}" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          xcrun stapler staple "dist/${DMG_NAME}"
+
+          echo "dmg_name=${DMG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "✓ DMG created, signed, notarized, and stapled: ${DMG_NAME}"
+        id: dmg
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Sparkle Appcast (optional)
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Install Sparkle Tools
+        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        run: |
+          brew install sparkle
+          SPARKLE_BIN=$(find "$(brew --prefix)/Caskroom/sparkle" -name generate_appcast -type f | head -1)
+          if [ -z "$SPARKLE_BIN" ]; then
+            SPARKLE_BIN=$(find /Applications -path "*Sparkle*bin/generate_appcast" -type f | head -1)
+          fi
+          if [ -z "$SPARKLE_BIN" ]; then
+            echo "⚠️ generate_appcast not found"
+            exit 1
+          fi
+          echo "Found generate_appcast at $SPARKLE_BIN"
+          echo "SPARKLE_BIN=$SPARKLE_BIN" >> $GITHUB_ENV
+
+      - name: Generate Sparkle Appcast
+        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          DMG_NAME: ${{ steps.dmg.outputs.dmg_name }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/sparkle_ed25519.key"
+          printf "%s" "$SPARKLE_PRIVATE_KEY" > "$KEY_PATH"
+
+          DOWNLOAD_PREFIX="https://github.com/${{ github.repository }}/releases/download/v${APP_VERSION}"
+
+          "${SPARKLE_BIN}" \
+            --ed-key-file "$KEY_PATH" \
+            --download-url-prefix "$DOWNLOAD_PREFIX/" \
+            dist
+
+          if [ -f dist/appcast.xml ]; then
+            echo "✓ Appcast generated"
+          else
+            echo "⚠️ generate_appcast did not produce appcast.xml"
+            exit 1
+          fi
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Generate Checksums
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Generate Checksums
+        run: |
+          cd dist
+          shasum -a 256 *.dmg > checksums.txt
+          cat checksums.txt
+          echo "✓ Checksums generated"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Generate Release Notes
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Install git-cliff
+        run: |
+          brew install git-cliff
+
+      - name: Get previous tag
+        id: previoustag
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "${GITHUB_REF#refs/tags/}" | head -n1)
+          echo "tag=${PREV_TAG:-$(git rev-list --max-parents=0 HEAD)}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        run: |
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          PREV_TAG=${{ steps.previoustag.outputs.tag }}
+
+          git cliff --config .github/cliff.toml --strip header --current ${PREV_TAG}..${CURRENT_TAG} > release_notes.md
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Create GitHub Release
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: SoundBridge v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'beta') || contains(steps.version.outputs.version, 'alpha') }}
+          body_path: release_notes.md
+          files: |
+            dist/*.dmg
+            dist/appcast.xml
+            dist/checksums.txt
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Cleanup
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Cleanup Keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true

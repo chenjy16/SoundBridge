@@ -1,0 +1,5 @@
+module CSoundBridgeAudio {
+    header "RFSharedAudio.h"
+    header "RFSharedMemoryWrapper.h"
+    export *
+}

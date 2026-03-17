@@ -1,0 +1,9 @@
+/build
+/html
+.cache
+compile_commands.json
+.unisonignore
+.ignore
+.justfile
+.dir-locals.el
+TODO.org

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>SoundBridge</string>
+	<key>CFBundleExecutable</key>
+	<string>SoundBridgeApp</string>
+	<key>CFBundleIconFile</key>
+	<string>MyIcon.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.soundbridge.menubar</string>
+	<key>CFBundleName</key>
+	<string>SoundBridge</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.1.2</string>
+	<key>CFBundleVersion</key>
+	<string>2.1.2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string></string>
+	<key>SUPublicEDKey</key>
+	<string></string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+</dict>
+</plist>

@@ -1,0 +1,5 @@
+module CSoundBridgeDSP {
+    header "soundbridge_types.h"
+    header "soundbridge_dsp.h"
+    export *
+}
