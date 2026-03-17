@@ -289,8 +289,20 @@ jobs:
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Sparkle Appcast (optional)
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Check Sparkle Key
+        id: sparkle
+        run: |
+          if [ -n "$SPARKLE_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ SPARKLE_PRIVATE_KEY not set, skipping appcast generation"
+          fi
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+
       - name: Install Sparkle Tools
-        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        if: steps.sparkle.outputs.available == 'true'
         run: |
           brew install sparkle
           SPARKLE_BIN=$(find "$(brew --prefix)/Caskroom/sparkle" -name generate_appcast -type f | head -1)
@@ -305,7 +317,7 @@ jobs:
           echo "SPARKLE_BIN=$SPARKLE_BIN" >> $GITHUB_ENV
 
       - name: Generate Sparkle Appcast
-        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        if: steps.sparkle.outputs.available == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           APP_VERSION: ${{ steps.version.outputs.version }}
