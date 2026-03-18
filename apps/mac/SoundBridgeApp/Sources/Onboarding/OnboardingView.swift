@@ -59,10 +59,10 @@ private struct WelcomeStepView: View {
             AppIconView(size: 64)
 
             VStack(spacing: 12) {
-                Text("欢迎使用 SoundBridge")
+                Text("Welcome to SoundBridge")
                     .font(.system(size: 28, weight: .bold))
 
-                Text("SoundBridge 让你用键盘音量键控制 HDMI 显示器的音量")
+                Text("SoundBridge lets you control HDMI monitor volume with your keyboard volume keys")
                     .font(.system(size: 15))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -72,7 +72,7 @@ private struct WelcomeStepView: View {
             Spacer()
 
             Button(action: onNext) {
-                Text("下一步")
+                Text("Next")
                     .font(.system(size: 14, weight: .medium))
                     .frame(width: 120)
             }
@@ -109,7 +109,7 @@ private struct DriverInstallStepView: View {
             // Bottom buttons
             HStack {
                 if !installer.state.isComplete {
-                    Button("返回") {
+                    Button("Back") {
                         onBack()
                     }
                     .buttonStyle(.plain)
@@ -120,7 +120,7 @@ private struct DriverInstallStepView: View {
 
                 if installer.state.isComplete {
                     Button(action: onComplete) {
-                        Text("打开 SoundBridge")
+                        Text("Open SoundBridge")
                             .font(.system(size: 14, weight: .medium))
                             .frame(width: 160)
                     }
@@ -129,7 +129,7 @@ private struct DriverInstallStepView: View {
                     .buttonStyle(.borderedProminent)
                 } else if installer.state == .notStarted {
                     Button(action: installDriver) {
-                        Text("安装驱动")
+                        Text("Install Driver")
                             .font(.system(size: 14, weight: .medium))
                             .frame(width: 120)
                     }
@@ -138,7 +138,7 @@ private struct DriverInstallStepView: View {
                     .buttonStyle(.borderedProminent)
                 } else if installer.state.isFailed {
                     Button(action: installDriver) {
-                        Text("重试")
+                        Text("Retry")
                             .font(.system(size: 14, weight: .medium))
                             .frame(width: 120)
                     }
@@ -168,10 +168,10 @@ private struct DriverInstallStepView: View {
                 .font(.system(size: 40))
                 .foregroundColor(.accentColor)
 
-            Text("安装音频驱动")
+            Text("Install Audio Driver")
                 .font(.system(size: 22, weight: .semibold))
 
-            Text("需要安装音频驱动以启用音量控制，这需要管理员密码")
+            Text("An audio driver is required to enable volume control. This requires an administrator password.")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -200,10 +200,10 @@ private struct DriverInstallStepView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.green)
 
-            Text("安装完成")
+            Text("Installation Complete")
                 .font(.system(size: 22, weight: .semibold))
 
-            Text("在系统控制中心的 Sound 面板中选择 SoundBridge 设备即可开始使用")
+            Text("Select the SoundBridge device in System Settings → Sound to get started")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

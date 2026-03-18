@@ -49,7 +49,7 @@ struct MenuBarView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
             } else {
-                Text("此设备已支持系统原生音量控制")
+                Text("This device supports native volume control")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 16)
@@ -248,7 +248,7 @@ struct UninstallButton: View {
 
     var body: some View {
         Button(action: performUninstall) {
-            Text("卸载驱动")
+            Text("Uninstall Driver")
                 .font(.system(size: 11, weight: .regular))
                 .foregroundColor(isHovered ? .white : .red.opacity(0.8))
                 .padding(.horizontal, 10)
@@ -264,11 +264,11 @@ struct UninstallButton: View {
 
     private func performUninstall() {
         let alert = NSAlert()
-        alert.messageText = "卸载 SoundBridge 驱动"
-        alert.informativeText = "这将卸载音频驱动、停止后台进程并清除配置数据。App 本身不会被删除，你可以随时重新安装驱动。"
+        alert.messageText = "Uninstall SoundBridge Driver"
+        alert.informativeText = "This will remove the audio driver, stop background processes, and clear configuration data. The app itself will not be deleted — you can reinstall the driver anytime."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "卸载驱动")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "Uninstall Driver")
+        alert.addButton(withTitle: "Cancel")
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
@@ -332,7 +332,7 @@ struct QuitButton: View {
         Button(action: {
             NSApp.terminate(nil)
         }) {
-            Text("退出 SoundBridge")
+            Text("Quit SoundBridge")
                 .font(.system(size: 11, weight: .regular))
                 .foregroundColor(isHovered ? .white : .primary)
                 .padding(.horizontal, 10)
