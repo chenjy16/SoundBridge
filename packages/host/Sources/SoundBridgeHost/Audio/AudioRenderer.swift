@@ -11,7 +11,6 @@ class AudioRenderer {
     private let memoryManager: SharedMemoryManager
     private let proxyManager: ProxyDeviceManager
     private var didLogRenderInfo = false
-    private var debugRenderCount: Int = 0
     private var testTonePhase: Float = 0
     private var tempBuffer: [Float] = []
     private let useTestTone: Bool
@@ -197,22 +196,6 @@ class AudioRenderer {
                     tempBuffer[i * channelCount + ch] *= currentGain
                 }
             }
-        }
-
-        if debugRenderCount < 5 || (debugRenderCount % 500 == 0) {
-            debugRenderCount += 1
-            if sampleCount > 0 {
-                var maxAbs: Float = 0
-                for i in 0..<sampleCount {
-                    let v = abs(tempBuffer[i])
-                    if v > maxAbs { maxAbs = v }
-                }
-                print("[AudioRenderer] Debug: framesRead=\(framesRead) maxAbs=\(String(format: "%.6f", maxAbs)) gain=\(String(format: "%.4f", currentGain)) volumeScalar=\(String(format: "%.4f", volumeScalar)) muted=\(isMuted)")
-            } else {
-                print("[AudioRenderer] Debug: framesRead=0")
-            }
-        } else {
-            debugRenderCount += 1
         }
 
         deinterleave(

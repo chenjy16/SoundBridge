@@ -496,14 +496,20 @@ class VolumeController: ObservableObject {
     // MARK: - Device Switching (Task 10.5)
 
     /// Switch the system default output device via CoreAudio API.
+    /// Prefers the SoundBridge proxy device for the target physical device
+    /// so audio continues to flow through the DSP pipeline.
     func switchDevice(to device: OutputDevice) {
+        // Try to find the corresponding SoundBridge proxy device first.
+        // Proxy UIDs follow the pattern: "<physicalUID>-soundbridge"
+        let targetDeviceID = findProxyDeviceID(forPhysicalUID: device.uid) ?? device.id
+
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
 
-        var deviceID = device.id
+        var deviceID = targetDeviceID
         let status = AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &propertyAddress,
@@ -515,9 +521,24 @@ class VolumeController: ObservableObject {
 
         if status != noErr {
             logger.error("switchDevice failed: \(formatOSStatus(status))")
+        } else if targetDeviceID != device.id {
+            logger.info("Switched to proxy device (ID: \(targetDeviceID)) for \(device.name)")
         }
         // 切换默认输出设备会触发 kAudioHardwarePropertyDefaultOutputDevice 监听器，
         // 该监听器会自动调用 findAndBindProxyDevice() 更新 UI 状态。
+    }
+
+    /// Find the SoundBridge proxy device ID for a given physical device UID.
+    /// Returns nil if no proxy exists (e.g. Host not running).
+    private func findProxyDeviceID(forPhysicalUID physicalUID: String) -> AudioDeviceID? {
+        let proxyUID = "\(physicalUID)-soundbridge"
+        let allIDs = getAllOutputDeviceIDs()
+        for id in allIDs {
+            if let uid = getDeviceUID(id), uid == proxyUID {
+                return id
+            }
+        }
+        return nil
     }
 
     // MARK: - CoreAudio Helpers
