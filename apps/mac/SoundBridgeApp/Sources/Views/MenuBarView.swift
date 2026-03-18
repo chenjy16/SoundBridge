@@ -77,7 +77,11 @@ struct MenuBarView: View {
                 )
             }
 
-            // 4. Footer: Uninstall + Quit
+            // 4. Reconnect audio + Footer
+            ReconnectAudioButton()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+
             FooterBar()
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
@@ -228,6 +232,53 @@ struct DeviceRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in isHovered = hovering }
+    }
+}
+
+// MARK: - Reconnect Audio
+
+struct ReconnectAudioButton: View {
+    @State private var isBouncing = false
+    @State private var showDone = false
+
+    var body: some View {
+        Button(action: reconnect) {
+            HStack(spacing: 6) {
+                if isBouncing {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: showDone ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11))
+                        .foregroundColor(showDone ? .green : .secondary)
+                }
+                Text(showDone ? "Reconnected" : "Reconnect Audio")
+                    .font(.system(size: 11))
+                    .foregroundColor(showDone ? .green : .primary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.1))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isBouncing)
+    }
+
+    private func reconnect() {
+        isBouncing = true
+        VolumeController.shared.bounceDevice()
+        // Show feedback after bounce completes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            isBouncing = false
+            showDone = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                showDone = false
+            }
+        }
     }
 }
 

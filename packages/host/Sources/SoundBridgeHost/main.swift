@@ -89,6 +89,13 @@ func main() {
     print("[Step 7] Auto-selecting proxy device...")
     proxyManager.autoSelectProxy()
 
+    // Bounce device to recapture audio from apps that were already running
+    if proxyManager.activeProxyDeviceID != 0 {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+            proxyManager.bounceDevice()
+        }
+    }
+
     print("[Step 7.5] Registering sleep/wake handler...")
     sleepWakeMonitor.onSleep = {
         print("[SleepWake] System entering sleep, stopping AudioEngine...")

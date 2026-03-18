@@ -95,7 +95,90 @@ class ProxyDeviceManager {
             &newDeviceID
         )
 
+        // Also set system output device (system sounds / alerts)
+        var systemAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var systemDeviceID = deviceID
+        let systemResult = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &systemAddress,
+            0,
+            nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size),
+            &systemDeviceID
+        )
+        if systemResult != noErr {
+            logger.warning("Failed to set system output device (OSStatus: \(systemResult))")
+        }
+
         return result == noErr
+    }
+
+    /// Bounce the default device: proxy → physical → proxy.
+    /// Forces apps that cache the device ID to re-bind to the new default.
+    func bounceDevice() {
+        let proxyID = activeProxyDeviceID
+        let physicalID = activePhysicalDeviceID
+        guard proxyID != 0, physicalID != 0 else {
+            logger.info("[Bounce] No active proxy/physical pair — skipping")
+            return
+        }
+
+        print("[Bounce] Triggering device bounce to recapture audio streams...")
+        isAutoSwitching = true
+
+        // Step 1: Switch to physical device
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var tempID = physicalID
+        AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &tempID
+        )
+
+        // Step 2: Wait briefly for apps to notice the change
+        Thread.sleep(forTimeInterval: 0.2)
+
+        // Step 3: Switch back to proxy
+        var proxyIDVar = proxyID
+        AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &proxyIDVar
+        )
+
+        // Also bounce system output
+        var systemAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sysTempID = physicalID
+        AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &systemAddress, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &sysTempID
+        )
+        Thread.sleep(forTimeInterval: 0.1)
+        var sysProxyID = proxyID
+        AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &systemAddress, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &sysProxyID
+        )
+
+        lastSwitchTime = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + switchCooldown) { [weak self] in
+            self?.isAutoSwitching = false
+        }
+        print("[Bounce] Device bounce complete")
     }
 
     func autoSelectProxy() {
