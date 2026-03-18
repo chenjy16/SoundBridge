@@ -169,6 +169,9 @@ class DeviceMonitor {
     }
 
     fileprivate func handleDefaultOutputChanged() {
+        // Skip during device bounce to prevent audio engine thrashing
+        guard !proxyManager.isDeviceBouncing else { return }
+
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
