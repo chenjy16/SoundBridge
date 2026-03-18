@@ -370,7 +370,7 @@ struct UninstallButton: View {
         defaults.synchronize()
 
         // Give coreaudiod time to restart, then quit
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             NSApp.terminate(nil)
         }
     }

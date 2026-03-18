@@ -79,13 +79,12 @@ class DriverInstaller: ObservableObject {
 
         // Update progress through the stages
         await MainActor.run { state = .settingPermissions; progress = 0.5 }
-        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
 
         await MainActor.run { state = .restartingAudio; progress = 0.7 }
 
         // Wait for audio system to restart
         print("Waiting for audio system to restart...")
-        try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+        try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
 
         await MainActor.run { state = .verifying; progress = 0.9 }
 

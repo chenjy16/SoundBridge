@@ -249,19 +249,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let logFile = logsDir.appendingPathComponent("app.log").path
 
+        // Open log file handle once and reuse for all messages
+        let logHandle: FileHandle? = {
+            if !FileManager.default.fileExists(atPath: logFile) {
+                FileManager.default.createFile(atPath: logFile, contents: nil)
+            }
+            let handle = FileHandle(forWritingAtPath: logFile)
+            handle?.seekToEndOfFile()
+            return handle
+        }()
+
         func log(_ message: String) {
-            let timestamp = Date()
-            let logMessage = "[\(timestamp)] \(message)\n"
+            let logMessage = "[\(Date())] \(message)\n"
             if let data = logMessage.data(using: .utf8) {
-                if FileManager.default.fileExists(atPath: logFile) {
-                    if let handle = FileHandle(forWritingAtPath: logFile) {
-                        handle.seekToEndOfFile()
-                        handle.write(data)
-                        handle.closeFile()
-                    }
-                } else {
-                    try? data.write(to: URL(fileURLWithPath: logFile))
-                }
+                logHandle?.write(data)
             }
             print(message)
         }
@@ -279,7 +280,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         terminateHostAndProxies(logger: log)
 
-        log("=== applicationWillTerminate COMPLETE ===")
+        logHandle?.closeFile()
+        print("=== applicationWillTerminate COMPLETE ===")
     }
 
     /// Best-effort fallback to stop any running SoundBridgeHost even if we did not launch it.
@@ -287,7 +289,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let process = hostProcess, process.isRunning {
             logger("Terminating tracked host process (pid \(process.processIdentifier))...")
             process.terminate()
-            waitForProcessExit(process, timeout: 0.3, logger: logger)
+            waitForProcessExit(process, timeout: 0.15, logger: logger)
             if process.isRunning {
                 logger("Host still running, sending SIGKILL")
                 kill(process.processIdentifier, SIGKILL)
@@ -325,7 +327,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard pid != getpid() else { continue }
             logger("Sending SIGTERM to SoundBridgeHost pid \(pid)")
             kill(pid, SIGTERM)
-            if !waitForPIDExit(pid, timeout: 0.3) {
+            if !waitForPIDExit(pid, timeout: 0.15) {
                 logger("PID \(pid) still alive, sending SIGKILL")
                 kill(pid, SIGKILL)
             }
@@ -468,8 +470,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
                                 if result == noErr {
                                     logger("[Cleanup] Restored to physical device")
-                                    // Give system time to switch
-                                    Thread.sleep(forTimeInterval: 0.3)
+                                    // CoreAudio device switch is synchronous, no sleep needed
                                 } else {
                                     logger("[Cleanup] WARNING: Failed to restore device (error \(result))")
                                 }
@@ -489,9 +490,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logger("[Cleanup] Removing control file: \(controlFilePath)")
         unlink(controlFilePath)
 
-        // 3. Wait for driver to remove devices (driver checks every 1 second)
+        // 3. Wait for driver to remove devices (driver polls every 100ms)
         logger("[Cleanup] Waiting for driver to remove proxy devices...")
-        Thread.sleep(forTimeInterval: 1.5)
+        Thread.sleep(forTimeInterval: 0.5)
 
         logger("[Cleanup] Cleanup complete")
     }
