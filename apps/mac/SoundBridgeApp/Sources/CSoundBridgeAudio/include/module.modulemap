@@ -1,0 +1,4 @@
+module CSoundBridgeAudio {
+    header "RFSharedAudio.h"
+    export *
+}

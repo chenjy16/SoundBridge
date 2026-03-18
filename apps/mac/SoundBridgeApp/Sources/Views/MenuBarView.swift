@@ -20,6 +20,7 @@ private let soundbridgeFont: Font = {
 
 struct MenuBarView: View {
     @StateObject private var volumeController = VolumeController.shared
+    @StateObject private var eqController = EQController(deviceUID: "default")
     @State private var showDeviceList = false
 
     var body: some View {
@@ -58,6 +59,12 @@ struct MenuBarView: View {
             Divider()
                 .padding(.horizontal, 12)
 
+            // 2.5 EQ controls
+            BasicEQView(eqController: eqController)
+
+            Divider()
+                .padding(.horizontal, 12)
+
             // 3. Device list (expandable)
             if showDeviceList {
                 DeviceListSection(
@@ -78,6 +85,10 @@ struct MenuBarView: View {
         .frame(width: 300)
         .fixedSize(horizontal: false, vertical: true)
         .transaction { $0.animation = nil }
+        .onReceive(volumeController.$activeDeviceUID) { uid in
+            guard !uid.isEmpty else { return }
+            eqController.attachSharedMemory(for: uid)
+        }
     }
 }
 

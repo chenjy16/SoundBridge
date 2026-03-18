@@ -51,19 +51,36 @@ let package = Package(
     ],
     dependencies: [
         // Sparkle 2.x for auto-updates
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.0")
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.0"),
+        // SwiftCheck for property-based testing
+        .package(url: "https://github.com/typelift/SwiftCheck", from: "0.12.0")
     ],
     targets: [
+        .target(
+            name: "CSoundBridgeAudio",
+            path: "Sources/CSoundBridgeAudio",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "SoundBridgeApp",
             dependencies: [
-                .product(name: "Sparkle", package: "Sparkle")
+                .product(name: "Sparkle", package: "Sparkle"),
+                "CSoundBridgeAudio"
             ],
             path: "Sources",
+            exclude: ["CSoundBridgeAudio"],
             resources: [
                 .copy("Resources")
             ],
             swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "SoundBridgeAppTests",
+            dependencies: [
+                "SoundBridgeApp",
+                .product(name: "SwiftCheck", package: "SwiftCheck")
+            ],
+            path: "Tests/SoundBridgeAppTests"
         )
     ]
 )

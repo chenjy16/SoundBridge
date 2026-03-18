@@ -2,6 +2,7 @@ import Foundation
 import CoreAudio
 import AudioToolbox
 import CSoundBridgeAudio
+import CSoundBridgeDSP
 import os.log
 
 private let logger = Logger(subsystem: "com.soundbridge.host", category: "AudioRenderer")
@@ -14,10 +15,15 @@ class AudioRenderer {
     private var testTonePhase: Float = 0
     private var tempBuffer: [Float] = []
     private let useTestTone: Bool
+    private var dspEngine: OpaquePointer?
 
     // Gain Stage state
     private var currentGain: Float = -1.0  // negative = uninitialized, snap on first frame
     private let smoothingCoeff: Float = 0.995  // ~10ms at 48kHz
+
+    // EQ state
+    private var lastEQSnapshot = RFEQSnapshot()
+    private var presetApplied = false
 
     init(
         memoryManager: SharedMemoryManager,
@@ -26,6 +32,19 @@ class AudioRenderer {
         self.memoryManager = memoryManager
         self.proxyManager = proxyManager
         self.useTestTone = (ProcessInfo.processInfo.environment["RF_TEST_TONE"] == "1")
+        self.dspEngine = soundbridge_dsp_create(SoundBridgeConfig.activeSampleRate)
+
+        // Apply initial preset immediately so DSP is always active
+        if let engine = dspEngine {
+            applyInitialPreset(engine: engine)
+            presetApplied = true
+        }
+    }
+
+    deinit {
+        if let engine = dspEngine {
+            soundbridge_dsp_destroy(engine)
+        }
     }
 
     func createRenderCallback() -> AURenderCallback {
@@ -103,6 +122,37 @@ class AudioRenderer {
             framesRead = rf_ring_read(mem, &tempBuffer, frameCount)
         }
 
+        // === EQ Processing ===
+        if let engine = dspEngine, framesRead > 0 {
+            var eqSnapshot = RFEQSnapshot()
+            rf_load_eq_snapshot(mem, &eqSnapshot)
+
+            // Detect changes from last snapshot and update DSP parameters
+            let changed = withUnsafeBytes(of: &eqSnapshot) { newBytes in
+                withUnsafeBytes(of: &lastEQSnapshot) { oldBytes in
+                    memcmp(newBytes.baseAddress!, oldBytes.baseAddress!, MemoryLayout<RFEQSnapshot>.size) != 0
+                }
+            }
+
+            if changed {
+                withUnsafePointer(to: &eqSnapshot.bands) { ptr in
+                    ptr.withMemoryRebound(to: Float.self, capacity: 10) { floatPtr in
+                        for i in 0..<10 {
+                            soundbridge_dsp_update_band_gain(engine, UInt32(i), floatPtr[i])
+                        }
+                    }
+                }
+                soundbridge_dsp_update_preamp(engine, eqSnapshot.preamp)
+                soundbridge_dsp_set_bypass(engine, eqSnapshot.bypass)
+                lastEQSnapshot = eqSnapshot
+            }
+
+            // Process audio through DSP (in-place on tempBuffer)
+            tempBuffer.withUnsafeMutableBufferPointer { bufPtr in
+                soundbridge_dsp_process_interleaved(engine, bufPtr.baseAddress!, bufPtr.baseAddress!, framesRead)
+            }
+        }
+
         // === Gain Stage (Linear Passthrough) ===
         // macOS volumeScalar is already perceptually mapped (Weber-Fechner),
         // so we use it directly as the physical gain — no additional curve.
@@ -164,6 +214,85 @@ class AudioRenderer {
             framesRead: framesRead,
             totalFrames: frameCount
         )
+    }
+
+    private func applyInitialPreset(engine: OpaquePointer) {
+        var preset = soundbridge_preset_t()
+        preset.num_bands = 10
+        preset.preamp_db = 0.0
+        preset.limiter_enabled = true
+
+        // Band 0: lowShelf, 32 Hz, enabled
+        preset.bands.0.frequency_hz = 32.0
+        preset.bands.0.gain_db = 0.0
+        preset.bands.0.q_factor = 0.7
+        preset.bands.0.type = SOUNDBRIDGE_FILTER_LOW_SHELF
+        preset.bands.0.enabled = true
+
+        // Band 1: lowShelf, 64 Hz, enabled
+        preset.bands.1.frequency_hz = 64.0
+        preset.bands.1.gain_db = 0.0
+        preset.bands.1.q_factor = 0.7
+        preset.bands.1.type = SOUNDBRIDGE_FILTER_LOW_SHELF
+        preset.bands.1.enabled = true
+
+        // Band 2: lowShelf, 125 Hz, enabled
+        preset.bands.2.frequency_hz = 125.0
+        preset.bands.2.gain_db = 0.0
+        preset.bands.2.q_factor = 0.7
+        preset.bands.2.type = SOUNDBRIDGE_FILTER_LOW_SHELF
+        preset.bands.2.enabled = true
+
+        // Band 3: peak, 250 Hz, DISABLED
+        preset.bands.3.frequency_hz = 250.0
+        preset.bands.3.gain_db = 0.0
+        preset.bands.3.q_factor = 1.0
+        preset.bands.3.type = SOUNDBRIDGE_FILTER_PEAK
+        preset.bands.3.enabled = false
+
+        // Band 4: peak, 500 Hz, enabled
+        preset.bands.4.frequency_hz = 500.0
+        preset.bands.4.gain_db = 0.0
+        preset.bands.4.q_factor = 1.2
+        preset.bands.4.type = SOUNDBRIDGE_FILTER_PEAK
+        preset.bands.4.enabled = true
+
+        // Band 5: peak, 1000 Hz, enabled
+        preset.bands.5.frequency_hz = 1000.0
+        preset.bands.5.gain_db = 0.0
+        preset.bands.5.q_factor = 1.2
+        preset.bands.5.type = SOUNDBRIDGE_FILTER_PEAK
+        preset.bands.5.enabled = true
+
+        // Band 6: peak, 2000 Hz, DISABLED
+        preset.bands.6.frequency_hz = 2000.0
+        preset.bands.6.gain_db = 0.0
+        preset.bands.6.q_factor = 1.0
+        preset.bands.6.type = SOUNDBRIDGE_FILTER_PEAK
+        preset.bands.6.enabled = false
+
+        // Band 7: peak, 4000 Hz, DISABLED
+        preset.bands.7.frequency_hz = 4000.0
+        preset.bands.7.gain_db = 0.0
+        preset.bands.7.q_factor = 1.0
+        preset.bands.7.type = SOUNDBRIDGE_FILTER_PEAK
+        preset.bands.7.enabled = false
+
+        // Band 8: highShelf, 8000 Hz, enabled
+        preset.bands.8.frequency_hz = 8000.0
+        preset.bands.8.gain_db = 0.0
+        preset.bands.8.q_factor = 0.7
+        preset.bands.8.type = SOUNDBRIDGE_FILTER_HIGH_SHELF
+        preset.bands.8.enabled = true
+
+        // Band 9: highShelf, 16000 Hz, enabled
+        preset.bands.9.frequency_hz = 16000.0
+        preset.bands.9.gain_db = 0.0
+        preset.bands.9.q_factor = 0.7
+        preset.bands.9.type = SOUNDBRIDGE_FILTER_HIGH_SHELF
+        preset.bands.9.enabled = true
+
+        soundbridge_dsp_apply_preset(engine, &preset)
     }
 
     private func outputSilence(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: UInt32) {
