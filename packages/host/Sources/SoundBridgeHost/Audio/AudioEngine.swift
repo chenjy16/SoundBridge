@@ -114,6 +114,7 @@ class AudioEngine {
             print("[AudioEngine] Sample rate mismatch detected: proxy=\(proxySampleRate)Hz, physical=\(physicalSampleRate)Hz (\(device.name))")
             print("[AudioEngine] Updating activeSampleRate to \(physicalSampleRate)Hz to match physical device")
             SoundBridgeConfig.activeSampleRate = physicalSampleRate
+            renderer.updateSampleRate(physicalSampleRate)
         } else {
             print("[AudioEngine] Sample rate matched: \(physicalSampleRate)Hz (\(device.name))")
         }
@@ -191,6 +192,7 @@ class AudioEngine {
         if needsFormatUpdate {
             print("[AudioEngine] Sample rate change detected: \(SoundBridgeConfig.activeSampleRate)Hz → \(newSampleRate)Hz")
             SoundBridgeConfig.activeSampleRate = newSampleRate
+            renderer.updateSampleRate(newSampleRate)
         }
 
         var isRunning: UInt32 = 0

@@ -47,6 +47,18 @@ class AudioRenderer {
         }
     }
 
+    /// Update DSP engine sample rate when physical device changes.
+    /// Called from AudioEngine when a sample rate mismatch is detected.
+    func updateSampleRate(_ sampleRate: UInt32) {
+        guard let engine = dspEngine else { return }
+        let result = soundbridge_dsp_set_sample_rate(engine, sampleRate)
+        if result == SOUNDBRIDGE_OK {
+            print("[AudioRenderer] DSP sample rate updated to \(sampleRate)Hz")
+        } else {
+            print("[AudioRenderer] Failed to update DSP sample rate (error: \(result.rawValue))")
+        }
+    }
+
     func createRenderCallback() -> AURenderCallback {
         return { (
             inRefCon,
@@ -184,11 +196,6 @@ class AudioRenderer {
                 for ch in 0..<channelCount {
                     tempBuffer[i * channelCount + ch] *= currentGain
                 }
-            }
-
-            // === Soft Clipper: tanh smooth limiting ===
-            for i in 0..<sampleCount {
-                tempBuffer[i] = tanhf(tempBuffer[i])
             }
         }
 
