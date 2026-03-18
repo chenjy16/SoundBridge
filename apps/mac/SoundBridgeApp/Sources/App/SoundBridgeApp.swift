@@ -17,6 +17,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var onboardingCoordinator: OnboardingCoordinator?
     var updaterController: SPUStandardUpdaterController?
     var driverUpdateWindow: DriverUpdateWindow?
+    /// Set to true during uninstall to suppress Host terminationHandler from
+    /// calling NSApp.terminate prematurely.
+    var isUninstalling = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Register custom font
@@ -238,6 +241,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // If uninstalling, driver and host are already gone — skip heavy cleanup
+        if isUninstalling {
+            print("=== applicationWillTerminate (uninstall mode, skipping cleanup) ===")
+            return
+        }
+
         let logsDir = FileManager.default.urls(
             for: .libraryDirectory,
             in: .userDomainMask
@@ -738,9 +747,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         hostProcess?.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
-                guard self != nil else { return }
+                guard let self = self else { return }
                 print("SoundBridgeHost terminated (status: \(process.terminationStatus), reason: \(process.terminationReason.rawValue))")
-                NSApp.terminate(nil)
+                // During uninstall, Host is killed intentionally — don't auto-quit
+                if !self.isUninstalling {
+                    NSApp.terminate(nil)
+                }
             }
         }
 

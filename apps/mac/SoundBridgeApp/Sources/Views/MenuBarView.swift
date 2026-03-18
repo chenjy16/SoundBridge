@@ -324,6 +324,12 @@ struct UninstallButton: View {
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
 
+        // Tell AppDelegate we're uninstalling so Host's terminationHandler
+        // won't call NSApp.terminate prematurely.
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.isUninstalling = true
+        }
+
         // Step 1: Kill host and remove driver (requires admin).
         // Each command is guarded with "|| true" so a single failure
         // (e.g. coreaudiod restart returning non-zero) does not abort
