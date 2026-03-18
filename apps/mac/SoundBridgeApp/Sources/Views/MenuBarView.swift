@@ -248,7 +248,7 @@ struct UninstallButton: View {
 
     var body: some View {
         Button(action: performUninstall) {
-            Text("完全卸载")
+            Text("卸载驱动")
                 .font(.system(size: 11, weight: .regular))
                 .foregroundColor(isHovered ? .white : .red.opacity(0.8))
                 .padding(.horizontal, 10)
@@ -264,10 +264,10 @@ struct UninstallButton: View {
 
     private func performUninstall() {
         let alert = NSAlert()
-        alert.messageText = "完全卸载 SoundBridge"
-        alert.informativeText = "这将删除音频驱动、停止后台进程并清除所有数据。此操作需要管理员权限。"
+        alert.messageText = "卸载 SoundBridge 驱动"
+        alert.informativeText = "这将卸载音频驱动、停止后台进程并清除配置数据。App 本身不会被删除，你可以随时重新安装驱动。"
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "卸载")
+        alert.addButton(withTitle: "卸载驱动")
         alert.addButton(withTitle: "取消")
 
         let response = alert.runModal()
