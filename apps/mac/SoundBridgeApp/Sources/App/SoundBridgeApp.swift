@@ -48,6 +48,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         IPCController.shared.startMonitoring()
 
+        // Retry proxy device binding after a short delay to handle the race
+        // where Host hasn't created the proxy device yet at startup.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            VolumeController.shared.refreshDeviceList()
+            VolumeController.shared.findAndBindProxyDevice()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+            VolumeController.shared.refreshDeviceList()
+            VolumeController.shared.findAndBindProxyDevice()
+        }
+
         // Set up menu bar UI
         setupMenuBar()
     }
@@ -167,6 +178,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("Onboarding completion callback called")
             self?.launchHostIfNeeded()
             self?.setupMenuBar()
+            // Retry proxy binding after host has time to start
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                VolumeController.shared.refreshDeviceList()
+                VolumeController.shared.findAndBindProxyDevice()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                VolumeController.shared.refreshDeviceList()
+                VolumeController.shared.findAndBindProxyDevice()
+            }
             print("Host and menu bar setup complete")
         })
 
