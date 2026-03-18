@@ -10,6 +10,7 @@ concurrency:
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "13.0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-release:
@@ -242,7 +243,7 @@ jobs:
       #  Upload to GitHub Release
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.dmg
