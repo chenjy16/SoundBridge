@@ -50,11 +50,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Retry proxy device binding after a short delay to handle the race
         // where Host hasn't created the proxy device yet at startup.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        // Run on background queue to avoid blocking main thread if CoreAudio HAL
+        // is slow to respond (e.g. coreaudiod proxy system not ready).
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
             VolumeController.shared.refreshDeviceList()
             VolumeController.shared.findAndBindProxyDevice()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 5.0) {
             VolumeController.shared.refreshDeviceList()
             VolumeController.shared.findAndBindProxyDevice()
         }
@@ -179,11 +181,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.launchHostIfNeeded()
             self?.setupMenuBar()
             // Retry proxy binding after host has time to start
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
                 VolumeController.shared.refreshDeviceList()
                 VolumeController.shared.findAndBindProxyDevice()
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 5.0) {
                 VolumeController.shared.refreshDeviceList()
                 VolumeController.shared.findAndBindProxyDevice()
             }
