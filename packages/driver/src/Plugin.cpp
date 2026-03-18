@@ -66,14 +66,14 @@ constexpr UInt32 HAL_PRESENTATION_LATENCY_FRAMES = 512;
 static_assert(HAL_ZERO_TIMESTAMP_PERIOD_FRAMES >= 10923,
     "ZeroTimeStampPeriod must satisfy CoreAudio minimum (10923 frames)");
 constexpr int ADAPTIVE_FILL_TARGET_DIVISOR = 2;     // Keep ring near 50% full
-constexpr int ADAPTIVE_FILL_DEADBAND_PERCENT = 8;   // Ignore small fill variance
+constexpr int ADAPTIVE_FILL_DEADBAND_PERCENT = 20;  // Ignore fill variance within ±20%
 constexpr double ADAPTIVE_MAX_ADJUST_PPM = 1500.0;  // +/-0.15% drift correction
 
 // Health and heartbeat timing constants.
 constexpr int HEALTH_CHECK_INTERVAL_SEC = 3;
 constexpr int HEARTBEAT_INTERVAL_SEC = 1;
 constexpr int STATS_LOG_INTERVAL_SEC = 30;
-constexpr int HEARTBEAT_TIMEOUT_SEC = 5;
+constexpr int HEARTBEAT_TIMEOUT_SEC = 15;
 
 // Device cycling prevention - minimum time between remove and re-add
 constexpr int DEVICE_COOLDOWN_SEC = 10;

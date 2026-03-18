@@ -108,10 +108,11 @@ typedef struct {
     _Atomic int32_t mute_state;          // 0 = unmuted, 1 = muted
 
     // ===== EQ CONTROL =====
+    _Atomic uint32_t eq_sequence;        // SeqLock: even = idle, odd = writing
     RFEQSnapshot eq_snapshot;            // 48 bytes — written by App, read by Host
 
     // Reserved bytes for forward-compatible header growth.
-    uint8_t _reserved[256 - 144 - sizeof(RFEQSnapshot)];
+    uint8_t _reserved[256 - 148 - sizeof(RFEQSnapshot)];
 
     // ===== RING BUFFER DATA =====
     // Interleaved audio data in the negotiated format
@@ -204,6 +205,9 @@ static inline void rf_shared_audio_init(
     // Volume control defaults
     atomic_init(&mem->volume_scalar, 0.35f);
     atomic_init(&mem->mute_state, 0);
+
+    // EQ SeqLock
+    atomic_init(&mem->eq_sequence, 0);
 }
 
 /**
@@ -457,17 +461,38 @@ static inline void rf_store_mute_state(RFSharedAudio* mem, int32_t value) {
 // ===== EQ SNAPSHOT ACCESSORS =====
 
 /**
- * Write EQ snapshot (App/writer side) — simple memcpy, no locking.
+ * Write EQ snapshot with SeqLock (App/writer side).
+ * Odd sequence = write in progress; even = idle.
  */
 static inline void rf_store_eq_snapshot(RFSharedAudio* mem, const RFEQSnapshot* snapshot) {
-    memcpy(&mem->eq_snapshot, snapshot, sizeof(RFEQSnapshot));
+    uint32_t seq = atomic_load_explicit(&mem->eq_sequence, memory_order_relaxed);
+    atomic_store_explicit(&mem->eq_sequence, seq + 1, memory_order_release);
+    memcpy((void*)&mem->eq_snapshot, snapshot, sizeof(RFEQSnapshot));
+    atomic_store_explicit(&mem->eq_sequence, seq + 2, memory_order_release);
 }
 
 /**
- * Read EQ snapshot (Host/reader side) — simple memcpy, no locking.
+ * Read EQ snapshot with SeqLock (Host/reader side).
+ * Retries if a write was in progress. Returns false if stuck (should not happen).
+ */
+static inline bool rf_load_eq_snapshot_safe(const RFSharedAudio* mem, RFEQSnapshot* out) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        uint32_t seq1 = atomic_load_explicit(
+            (_Atomic uint32_t*)&mem->eq_sequence, memory_order_acquire);
+        if (seq1 & 1) continue;  // Writer active, retry
+        memcpy(out, (const void*)&mem->eq_snapshot, sizeof(RFEQSnapshot));
+        uint32_t seq2 = atomic_load_explicit(
+            (_Atomic uint32_t*)&mem->eq_sequence, memory_order_acquire);
+        if (seq1 == seq2) return true;  // Consistent read
+    }
+    return false;  // Gave up — caller should use previous snapshot
+}
+
+/**
+ * Legacy reader (kept for backward compatibility, calls safe version).
  */
 static inline void rf_load_eq_snapshot(const RFSharedAudio* mem, RFEQSnapshot* out) {
-    memcpy(out, &mem->eq_snapshot, sizeof(RFEQSnapshot));
+    rf_load_eq_snapshot_safe(mem, out);
 }
 
 /**
@@ -483,6 +508,18 @@ static inline bool rf_needs_format_change(
     return (mem->sample_rate != new_sample_rate ||
             mem->channels != new_channels ||
             mem->format != new_format);
+}
+
+// ===== TELEMETRY ACCESSORS =====
+// Swift cannot access C11 _Atomic fields directly. These helpers
+// provide safe read access for telemetry logging from Swift.
+
+static inline uint64_t rf_get_underrun_count(const RFSharedAudio* mem) {
+    return atomic_load((_Atomic uint64_t*)&mem->underrun_count);
+}
+
+static inline uint64_t rf_get_overrun_count(const RFSharedAudio* mem) {
+    return atomic_load((_Atomic uint64_t*)&mem->overrun_count);
 }
 
 #ifdef __cplusplus

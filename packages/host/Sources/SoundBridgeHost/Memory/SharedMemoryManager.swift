@@ -10,6 +10,11 @@ class SharedMemoryManager {
     private var heartbeatTimer: DispatchSourceTimer?
     private var lock = os_unfair_lock()
 
+    // Telemetry: track last-seen underrun/overrun counts for delta logging
+    private var lastUnderrunCounts: [String: UInt64] = [:]
+    private var lastOverrunCounts: [String: UInt64] = [:]
+    private var telemetryCounter: Int = 0
+
     func createMemory(for devices: [PhysicalDevice]) {
         logger.info("Creating shared memory for \(devices.count) devices")
 
@@ -137,10 +142,29 @@ class SharedMemoryManager {
         heartbeatTimer?.setEventHandler { [weak self] in
             guard let self = self else { return }
             os_unfair_lock_lock(&self.lock)
-            let mems = Array(self.deviceMemory.values)
+            let mems = Array(self.deviceMemory)
             os_unfair_lock_unlock(&self.lock)
-            for mem in mems {
+            for (_, mem) in mems {
                 rf_update_host_heartbeat(mem)
+            }
+
+            // Telemetry: log underrun/overrun deltas every 5 seconds (non-RT safe)
+            self.telemetryCounter += 1
+            if self.telemetryCounter % 5 == 0 {
+                for (uid, mem) in mems {
+                    let underruns = rf_get_underrun_count(mem)
+                    let overruns = rf_get_overrun_count(mem)
+                    let lastU = self.lastUnderrunCounts[uid] ?? 0
+                    let lastO = self.lastOverrunCounts[uid] ?? 0
+                    if underruns > lastU {
+                        logger.warning("⚠️ Buffer underrun: +\(underruns - lastU) (total: \(underruns)) [\(uid)]")
+                    }
+                    if overruns > lastO {
+                        logger.warning("⚠️ Buffer overrun: +\(overruns - lastO) (total: \(overruns)) [\(uid)]")
+                    }
+                    self.lastUnderrunCounts[uid] = underruns
+                    self.lastOverrunCounts[uid] = overruns
+                }
             }
         }
 

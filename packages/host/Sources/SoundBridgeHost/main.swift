@@ -40,6 +40,14 @@ let sleepWakeMonitor = SleepWakeMonitor()
 
 func main() {
 
+    // Prevent macOS App Nap from throttling this process.
+    // Without this, the system may suspend timers and background work
+    // after prolonged playback, causing heartbeat timeouts and audio dropout.
+    let _ = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiated, .latencyCritical],
+        reason: "SoundBridge realtime audio processing"
+    )
+
     print("[Step 0] Setting up directories...")
     do {
         try PathManager.ensureDirectories()
