@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import Combine
+import Darwin
 import os.log
 
 private let logger = Logger(subsystem: "com.soundbridge.app", category: "VolumeController")
@@ -632,66 +633,12 @@ class VolumeController: ObservableObject {
 
     // MARK: - Device Bounce (Reconnect Audio)
 
-    /// Bounce the default output device: current → physical → current.
-    /// Forces apps that cache the device ID to re-bind.
+    /// Request the Host process to bounce the audio device via IPC.
+    /// This triggers a Darwin notification that the Host listens for.
     func bounceDevice() {
-        guard proxyDeviceID != kAudioObjectUnknown else {
-            logger.info("bounceDevice: no proxy device bound")
-            return
-        }
-
-        // Find the physical device behind the proxy
-        guard let proxyUID = getDeviceUID(proxyDeviceID),
-              let physicalUID = proxyUID.components(separatedBy: "-soundbridge").first else {
-            logger.error("bounceDevice: could not resolve physical UID")
-            return
-        }
-
-        // Find physical device ID
-        let allIDs = getAllOutputDeviceIDs()
-        var physicalID: AudioDeviceID = kAudioObjectUnknown
-        for id in allIDs {
-            if let uid = getDeviceUID(id), uid == physicalUID {
-                physicalID = id
-                break
-            }
-        }
-        guard physicalID != kAudioObjectUnknown else {
-            logger.error("bounceDevice: physical device not found for \(physicalUID)")
-            return
-        }
-
-        let savedProxyID = proxyDeviceID
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            // Switch to physical
-            var tempID = physicalID
-            AudioObjectSetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address, 0, nil,
-                UInt32(MemoryLayout<AudioDeviceID>.size), &tempID
-            )
-
-            Thread.sleep(forTimeInterval: 0.2)
-
-            // Switch back to proxy
-            var proxyID = savedProxyID
-            AudioObjectSetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address, 0, nil,
-                UInt32(MemoryLayout<AudioDeviceID>.size), &proxyID
-            )
-
-            DispatchQueue.main.async {
-                self?.findAndBindProxyDevice()
-                logger.info("Device bounce complete")
-            }
-        }
+        // Use notify_post to send bounce request to Host — Host is the single
+        // source of truth for CoreAudio device control.
+        notify_post("com.soundbridge.bounce-request")
+        logger.info("Sent bounce request to Host")
     }
 }

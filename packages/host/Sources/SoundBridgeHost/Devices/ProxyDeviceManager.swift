@@ -7,8 +7,10 @@ private let logger = Logger(subsystem: "com.soundbridge.host", category: "ProxyD
 class ProxyDeviceManager {
     private let registry: DeviceRegistry
     private var isAutoSwitching = false
-    /// True during a device bounce — DeviceMonitor should ignore default-output changes.
-    var isDeviceBouncing = false
+    /// Timestamp until which DeviceMonitor should ignore default-output changes (bounce window).
+    private var bounceUntilTime: Date = .distantPast
+    /// Whether a device bounce is in progress (checked by DeviceMonitor).
+    var isDeviceBouncing: Bool { Date() < bounceUntilTime }
     private var lastSwitchTime: Date = .distantPast
     private let switchCooldown: TimeInterval = 0.5
     private var monitoredProxyDeviceID: AudioDeviceID?
@@ -128,7 +130,7 @@ class ProxyDeviceManager {
 
         print("[Bounce] Triggering device bounce to recapture audio streams...")
         isAutoSwitching = true
-        isDeviceBouncing = true
+        bounceUntilTime = Date().addingTimeInterval(1.0) // 1s window for async callbacks
 
         // Step 1: Switch both default + system output to physical device
         setDefaultAndSystemDevice(physicalID)
@@ -139,7 +141,6 @@ class ProxyDeviceManager {
         // Step 3: Switch both back to proxy
         setDefaultAndSystemDevice(proxyID)
 
-        isDeviceBouncing = false
         lastSwitchTime = Date()
         DispatchQueue.main.asyncAfter(deadline: .now() + switchCooldown) { [weak self] in
             self?.isAutoSwitching = false
@@ -313,6 +314,7 @@ class ProxyDeviceManager {
             isAutoSwitching = true
             lastSwitchTime = now
             if setDefaultOutputDevice(proxyID) {
+                activeProxyUID = physicalUID
                 activeProxyDeviceID = proxyID
                 activePhysicalDeviceID = physicalDevice.id
                 startVolumeForwarding(proxyDeviceID: proxyID)
@@ -345,29 +347,12 @@ class ProxyDeviceManager {
             return false
         }
 
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        // Restore both default and system output to physical device
+        setDefaultAndSystemDevice(physicalDevice.id)
 
-        var physicalDeviceID = physicalDevice.id
-        let result = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &physicalDeviceID
-        )
-
-        if result == noErr {
-            logger.info("Restored to \(physicalDevice.name)")
-            Thread.sleep(forTimeInterval: SoundBridgeConfig.physicalDeviceSwitchDelay)
-            return true
-        }
-
-        return false
+        logger.info("Restored to \(physicalDevice.name)")
+        Thread.sleep(forTimeInterval: SoundBridgeConfig.physicalDeviceSwitchDelay)
+        return true
     }
 
     private func getCurrentDefaultDevice() -> AudioDeviceID? {

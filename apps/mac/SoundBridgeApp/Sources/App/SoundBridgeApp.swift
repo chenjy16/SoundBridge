@@ -430,6 +430,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                     &newDeviceID
                                 )
 
+                                // Also restore system output device
+                                var systemAddress = AudioObjectPropertyAddress(
+                                    mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+                                    mScope: kAudioObjectPropertyScopeGlobal,
+                                    mElement: kAudioObjectPropertyElementMain
+                                )
+                                var systemDeviceID = physicalDeviceID
+                                AudioObjectSetPropertyData(
+                                    AudioObjectID(kAudioObjectSystemObject),
+                                    &systemAddress,
+                                    0,
+                                    nil,
+                                    UInt32(MemoryLayout<AudioDeviceID>.size),
+                                    &systemDeviceID
+                                )
+
                                 if result == noErr {
                                     logger("[Cleanup] Restored to physical device")
                                     // Give system time to switch

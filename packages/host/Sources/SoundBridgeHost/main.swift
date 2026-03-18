@@ -1,8 +1,21 @@
 import AudioToolbox
 import CSoundBridgeAudio
 import CoreAudio
+import Darwin
 import Foundation
 import os.log
+
+// Darwin notify API — not always visible during x86_64 cross-compilation.
+@_silgen_name("notify_register_dispatch")
+private func _notify_register_dispatch(
+    _ name: UnsafePointer<CChar>,
+    _ out_token: UnsafeMutablePointer<Int32>,
+    _ queue: DispatchQueue,
+    _ handler: @escaping @convention(block) (Int32) -> Void
+) -> UInt32
+
+@_silgen_name("notify_cancel")
+private func _notify_cancel(_ token: Int32) -> UInt32
 
 private let logger = Logger(subsystem: "com.soundbridge.host", category: "Main")
 
@@ -168,6 +181,20 @@ func main() {
     setupSignalHandlers()
 
     logger.info("Signal handlers installed")
+
+    // Listen for bounce requests from App via Darwin notification
+    var bounceToken: Int32 = 0
+    let bounceStatus = _notify_register_dispatch(
+        "com.soundbridge.bounce-request",
+        &bounceToken,
+        DispatchQueue.global(qos: .userInitiated)
+    ) { _ in
+        logger.info("Received bounce request from App")
+        proxyManager.bounceDevice()
+    }
+    if bounceStatus != 0 {
+        logger.error("Failed to register bounce notification listener (status: \(bounceStatus))")
+    }
 
     RunLoop.current.run()
 }
