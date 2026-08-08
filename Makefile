@@ -107,7 +107,7 @@ test:
 	cd build && \
 	cmake .. && \
 	cmake --build . && \
-	./soundbridge_dsp_tests
+  ctest --output-on-failure
 
 # Quick rebuild (for when you only changed Swift code)
 quick:
