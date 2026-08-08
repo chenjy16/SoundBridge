@@ -38,6 +38,10 @@ let deviceMonitor = DeviceMonitor(
 )
 let sleepWakeMonitor = SleepWakeMonitor()
 
+// Retain signal dispatch sources for the lifetime of the host process.
+// Otherwise they are released after setupSignalHandlers() returns.
+private var signalSources: [DispatchSourceSignal] = []
+
 func main() {
 
     // Prevent macOS App Nap from throttling this process.
@@ -215,6 +219,7 @@ func setupSignalHandlers() {
         exit(0)
     }
     sigintSource.resume()
+    signalSources.append(sigintSource)
 
     let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
     sigtermSource.setEventHandler {
@@ -223,6 +228,7 @@ func setupSignalHandlers() {
         exit(0)
     }
     sigtermSource.resume()
+    signalSources.append(sigtermSource)
 
     signal(SIGINT, SIG_IGN)
     signal(SIGTERM, SIG_IGN)
