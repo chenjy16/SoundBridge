@@ -261,8 +261,8 @@ class DeviceDiscovery {
         return AudioObjectGetPropertyDataSize(deviceID, &streamAddress, 0, nil, &streamSize) == noErr && streamSize > 0
     }
 
-    /// Check if device has active output channels (not just streams that report existence)
-    private func deviceHasActiveChannels(_ deviceID: AudioDeviceID) -> Bool {
+    /// Return the total number of output channels reported by Core Audio.
+    private func getOutputChannelCount(_ deviceID: AudioDeviceID) -> Int? {
         var configAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
             mScope: kAudioDevicePropertyScopeOutput,
@@ -270,33 +270,54 @@ class DeviceDiscovery {
         )
 
         var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(deviceID, &configAddress, 0, nil, &dataSize) == noErr else {
-            return false
+        guard AudioObjectGetPropertyDataSize(
+            deviceID,
+            &configAddress,
+            0,
+            nil,
+            &dataSize
+        ) == noErr,
+            dataSize > 0
+        else {
+            return nil
         }
 
-        let bufferListPointer = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: Int(dataSize))
-        defer { bufferListPointer.deallocate() }
+        let rawPointer = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(dataSize),
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { rawPointer.deallocate() }
 
-        guard AudioObjectGetPropertyData(deviceID, &configAddress, 0, nil, &dataSize, bufferListPointer) == noErr else {
-            return false
+        let bufferListPointer = rawPointer.bindMemory(
+            to: AudioBufferList.self,
+            capacity: 1
+        )
+
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &configAddress,
+            0,
+            nil,
+            &dataSize,
+            bufferListPointer
+        ) == noErr else {
+            return nil
         }
 
-        let bufferList = bufferListPointer.pointee
-        let bufferCount = Int(bufferList.mNumberBuffers)
-
-        if bufferCount == 0 {
-            return false
-        }
-
-        // Check if at least one buffer has channels
         let buffers = UnsafeMutableAudioBufferListPointer(bufferListPointer)
-        for buffer in buffers {
-            if buffer.mNumberChannels > 0 {
-                return true
-            }
+
+        return buffers.reduce(0) {
+            $0 + Int($1.mNumberChannels)
+        }
+    }
+
+    /// Check if the device reports at least one active output channel.
+    private func deviceHasActiveChannels(_ deviceID: AudioDeviceID) -> Bool {
+        guard let channelCount = getOutputChannelCount(deviceID) else {
+            return false
         }
 
-        return false
+        return channelCount > 0
     }
 
     /// Check jack connection status for HDMI/DisplayPort devices
@@ -429,15 +450,24 @@ class DeviceDiscovery {
         return (true, nil)
     }
 
-    /// Check if device supports hardware volume control via kAudioDevicePropertyVolumeScalar.
-    /// Checks master (element 0) and channel-level (elements 1, 2) on output scope.
-    /// Returns true if at least one element supports volume control.
+    /// Check whether Core Audio exposes a writable output volume control.
+    ///
+    /// Checks the main element plus every output channel reported by the device.
+    /// A volume property must both exist and be settable to count as usable.
     private func deviceHasVolumeControl(_ deviceID: AudioDeviceID) -> Bool {
-        let elements: [UInt32] = [
-            kAudioObjectPropertyElementMain,  // element 0 (master)
-            1,                                 // element 1 (left channel)
-            2                                  // element 2 (right channel)
+        guard let channelCount = getOutputChannelCount(deviceID) else {
+            return false
+        }
+
+        var elements: [UInt32] = [
+            kAudioObjectPropertyElementMain,
         ]
+
+        if channelCount > 0 {
+            elements.append(
+                contentsOf: (1 ... channelCount).map { UInt32($0) }
+            )
+        }
 
         for element in elements {
             var address = AudioObjectPropertyAddress(
@@ -445,7 +475,20 @@ class DeviceDiscovery {
                 mScope: kAudioDevicePropertyScopeOutput,
                 mElement: element
             )
-            if AudioObjectHasProperty(deviceID, &address) {
+
+            guard AudioObjectHasProperty(deviceID, &address) else {
+                continue
+            }
+
+            var isSettable = DarwinBoolean(false)
+
+            let status = AudioObjectIsPropertySettable(
+                deviceID,
+                &address,
+                &isSettable
+            )
+
+            if status == noErr && isSettable.boolValue {
                 return true
             }
         }
