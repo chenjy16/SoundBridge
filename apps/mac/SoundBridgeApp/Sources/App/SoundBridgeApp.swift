@@ -69,6 +69,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func initializeUpdater() {
+        // Without a feed URL and EdDSA public key in Info.plist, Sparkle reports
+        // "Unable to check for updates" on every launch. Stay quiet until the
+        // release feed is configured.
+        guard VersionManager.isUpdaterConfigured else {
+            print("⚠️ Update feed not configured (SUFeedURL/SUPublicEDKey) - Sparkle disabled")
+            return
+        }
+
         // Initialize Sparkle with standard user driver
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,

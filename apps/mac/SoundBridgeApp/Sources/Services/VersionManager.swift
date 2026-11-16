@@ -15,6 +15,22 @@ struct VersionManager {
 		return Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
 	}
 
+	// MARK: - App Updates
+
+	/// Whether Sparkle has a usable update feed.
+	///
+	/// Sparkle needs both `SUFeedURL` and `SUPublicEDKey` in Info.plist. When
+	/// either is empty it fails on every launch with "Unable to check for
+	/// updates", so the updater must not be started in that case.
+	static var isUpdaterConfigured: Bool {
+		let info = Bundle.main.infoDictionary
+		let feed = (info?["SUFeedURL"] as? String)?
+			.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		let key = (info?["SUPublicEDKey"] as? String)?
+			.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return !feed.isEmpty && !key.isEmpty
+	}
+
 	// MARK: - Driver Versions
 
 	/// Get installed driver version from /Library/Audio/Plug-Ins/HAL/
