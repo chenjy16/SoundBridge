@@ -244,9 +244,48 @@ Releases are automated via GitHub Actions. When you publish a release with a `vX
 3. Code signs with Developer ID certificate
 4. Notarizes with Apple
 5. Creates a signed and notarized DMG
-6. Uploads assets to the GitHub Release
+6. Generates the Sparkle `appcast.xml` feed
+7. Uploads the DMG, checksums and appcast to the GitHub Release
 
-Required repository secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_ID_PASSWORD`, `APPLE_TEAM_ID`.
+Required repository secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_ID_PASSWORD`, `APPLE_TEAM_ID`, plus the Sparkle secrets below.
+
+### Auto-updates
+
+Sparkle discovers new versions through an appcast feed. `SUFeedURL` is set to
+`https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml`, and the
+release workflow uploads the generated feed as a release asset, so the URL keeps working
+as new versions are published.
+
+Update archives are signed with an EdDSA key pair. One-time setup:
+
+```bash
+# The Sparkle command line tools ship with the SwiftPM artifact bundle
+swift build --package-path apps/mac/SoundBridgeApp
+SPARKLE_BIN=apps/mac/SoundBridgeApp/.build/artifacts/sparkle/Sparkle/bin
+
+# 1. Generate a key pair (private half goes to the login keychain).
+#    The printed key is the value for SUPublicEDKey.
+$SPARKLE_BIN/generate_keys
+
+# 2. Export the private half for CI - never commit this file
+$SPARKLE_BIN/generate_keys -x sparkle_private_key
+
+# 3. Store both halves as repository secrets
+gh secret set SPARKLE_ED_PUBLIC_KEY   # paste the public key from step 1
+gh secret set SPARKLE_ED_PRIVATE_KEY --body "$(cat sparkle_private_key)"
+rm sparkle_private_key
+```
+
+`tools/create_app_bundle.sh` injects `SPARKLE_ED_PUBLIC_KEY` into the bundle's
+`Info.plist`, and `tools/generate_appcast.sh` signs the feed with
+`SPARKLE_ED_PRIVATE_KEY`. Without either secret the workflow still publishes the DMG but
+skips the appcast, and the app keeps Sparkle stopped instead of failing on launch.
+
+To generate and inspect a feed locally:
+
+```bash
+SPARKLE_ED_PRIVATE_KEY_FILE=/path/to/sparkle_private_key ./tools/generate_appcast.sh
+```
 
 ## Contributing
 

@@ -27,7 +27,7 @@
 	<key>SUEnableSystemProfiling</key>
 	<false/>
 	<key>SUFeedURL</key>
-	<string></string>
+	<string>https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string></string>
 	<key>SUScheduledCheckInterval</key>

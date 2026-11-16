@@ -145,6 +145,8 @@ jobs:
       #  Create App Bundle
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Create App Bundle
+        env:
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
         run: |
           make bundle
           echo "✓ App bundle created"
@@ -240,6 +242,26 @@ jobs:
           echo "✓ Checksums generated"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Generate Sparkle Appcast
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Generate Sparkle Appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_ED_PRIVATE_KEY is not configured - skipping appcast, auto-update stays disabled"
+            exit 0
+          fi
+
+          KEY_FILE="$RUNNER_TEMP/sparkle_ed_private_key"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          SPARKLE_ED_PRIVATE_KEY_FILE="$KEY_FILE" ./tools/generate_appcast.sh
+          rm -f "$KEY_FILE"
+          echo "✓ Appcast generated"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Upload to GitHub Release
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Upload Release Assets
@@ -248,6 +270,7 @@ jobs:
           files: |
             dist/*.dmg
             dist/checksums.txt
+            dist/appcast/appcast.xml
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
