@@ -46,6 +46,8 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 3. Launch SoundBridge — the onboarding wizard will guide you through driver installation
 4. Your HDMI/DisplayPort audio device will appear with a working volume slider
 
+> **First launch on macOS 15+**: releases are ad-hoc signed rather than notarized, so Gatekeeper asks for confirmation once. If the app is blocked, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Older systems also accept right-click → **Open**. From Terminal: `xattr -dr com.apple.quarantine /Applications/SoundBridge.app`.
+
 To uninstall, use the "Uninstall" option in the SoundBridge menu bar dropdown.
 
 ## How It Works
@@ -241,13 +243,14 @@ Releases are automated via GitHub Actions. When you publish a release with a `vX
 
 1. Builds all components as universal binaries (arm64 + x86_64)
 2. Creates the `.app` bundle
-3. Code signs with Developer ID certificate
-4. Notarizes with Apple
-5. Creates a signed and notarized DMG
-6. Generates the Sparkle `appcast.xml` feed
-7. Uploads the DMG, checksums and appcast to the GitHub Release
+3. Ad-hoc signs the bundle (no Apple Developer account needed)
+4. Creates the DMG
+5. Generates the Sparkle `appcast.xml` feed
+6. Uploads the DMG, checksums and appcast to the GitHub Release
 
-Required repository secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_ID_PASSWORD`, `APPLE_TEAM_ID`, plus the Sparkle secrets below.
+The only optional secrets are the two Sparkle ones below. Builds are not notarized, so users approve the first launch once, as described in [Installation](#installation).
+
+To produce a notarized build locally instead (requires a Developer ID certificate), run `SIGN_MODE=developer-id ./tools/codesign.sh` and then `./tools/notarize.sh`.
 
 ### Auto-updates
 

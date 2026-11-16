@@ -1,6 +1,16 @@
 #!/bin/bash
 # Code signing script for SoundBridge
-# Signs all components with Developer ID certificate
+#
+# Two modes, selected with SIGN_MODE or --adhoc:
+#   auto          (default) use a Developer ID when one is available, otherwise
+#                 fall back to ad-hoc
+#   developer-id  require a Developer ID, hardened runtime and a timestamp so
+#                 the bundle can be notarized
+#   adhoc         never touch a certificate
+#
+# Ad-hoc signatures are what Apple silicon requires to run a binary at all, and
+# they are enough to publish a DMG on GitHub. They are not notarizable, so the
+# first launch shows a Gatekeeper warning that the user has to approve.
 
 set -e  # Exit on error
 
@@ -38,6 +48,11 @@ success() {
     echo -e "${GREEN}OK: $1${NC}"
 }
 
+# Function to print informational notes
+info() {
+    echo -e "${BLUE}INFO: $1${NC}"
+}
+
 # Check if app bundle exists
 if [ ! -d "$APP_BUNDLE" ]; then
     error "App bundle not found at $APP_BUNDLE"
@@ -45,8 +60,17 @@ if [ ! -d "$APP_BUNDLE" ]; then
     exit 1
 fi
 
-# Determine signing identity
-if [ -n "$APPLE_DEVELOPER_ID" ]; then
+# Signing mode
+SIGN_MODE="${SIGN_MODE:-auto}"
+if [ "${1:-}" = "--adhoc" ]; then
+    SIGN_MODE="adhoc"
+fi
+
+SIGNING_IDENTITY=""
+if [ "$SIGN_MODE" = "adhoc" ]; then
+    # Nothing to look up: ad-hoc signing uses the "-" pseudo identity.
+    SIGNING_IDENTITY="-"
+elif [ -n "$APPLE_DEVELOPER_ID" ]; then
     # Use provided Developer ID directly
     SIGNING_IDENTITY="$APPLE_DEVELOPER_ID"
     echo "Using Developer ID from environment: $SIGNING_IDENTITY"
@@ -84,40 +108,61 @@ elif [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
     # Cleanup certificate file
     rm -f certificate.p12
 else
-    # Try to find installed Developer ID certificate
+    # Try to find an installed Developer ID certificate
     section "Looking for Developer ID Certificate"
 
     SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk '{print $2}')
 
-    if [ -z "$SIGNING_IDENTITY" ]; then
-        error "No Developer ID certificate found and no credentials provided"
-        echo ""
-        echo "Please either:"
-        echo "  1. Set APPLE_DEVELOPER_ID environment variable with your identity string"
-        echo "     Example: export APPLE_DEVELOPER_ID=\"Developer ID Application: Your Name (TEAM_ID)\""
-        echo ""
-        echo "  2. Or set APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD for CI/CD"
-        echo "     APPLE_CERTIFICATE should be base64-encoded .p12 file"
-        echo ""
-        echo "  3. Or install your Developer ID certificate in Keychain Access"
-        echo ""
-        exit 1
+    if [ -n "$SIGNING_IDENTITY" ]; then
+        success "Found Developer ID certificate"
+        echo "Using identity: $SIGNING_IDENTITY"
     fi
-
-    success "Found Developer ID certificate"
-    echo "Using identity: $SIGNING_IDENTITY"
 fi
 
-section "Code Signing SoundBridge"
+# No certificate configured: fall back to ad-hoc unless the caller insisted.
+if [ -z "$SIGNING_IDENTITY" ] && [ "$SIGN_MODE" != "developer-id" ]; then
+    warn "No Developer ID certificate found - falling back to ad-hoc signing"
+    echo "   Ad-hoc signed builds run on both architectures and install from a"
+    echo "   GitHub release, but macOS asks the user to approve the first launch."
+    SIGNING_IDENTITY="-"
+fi
+
+if [ -z "$SIGNING_IDENTITY" ]; then
+    error "No Developer ID Application certificate found"
+    echo ""
+    echo "Please either:"
+    echo "  1. Set APPLE_DEVELOPER_ID environment variable with your identity string"
+    echo "     Example: export APPLE_DEVELOPER_ID=\"Developer ID Application: Your Name (TEAM_ID)\""
+    echo ""
+    echo "  2. Or set APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD for CI/CD"
+    echo "     APPLE_CERTIFICATE should be base64-encoded .p12 file"
+    echo ""
+    echo "  3. Or install your Developer ID certificate in Keychain Access"
+    echo ""
+    echo "  4. Or sign ad-hoc for a GitHub release: ./tools/codesign.sh --adhoc"
+    echo ""
+    exit 1
+fi
 
 # Signing options
-SIGN_OPTS=(
-    --sign "$SIGNING_IDENTITY"
-    --timestamp
-    --options runtime
-    --force
-    --verbose
-)
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    section "Ad-hoc Code Signing"
+    # --timestamp and --options runtime only make sense with a real identity.
+    SIGN_OPTS=(
+        --sign -
+        --force
+        --verbose
+    )
+else
+    section "Code Signing SoundBridge"
+    SIGN_OPTS=(
+        --sign "$SIGNING_IDENTITY"
+        --timestamp
+        --options runtime
+        --force
+        --verbose
+    )
+fi
 
 # Step 1: Sign SoundBridgeHost executable
 echo " Signing SoundBridgeHost..."
@@ -243,25 +288,36 @@ echo " Verifying SoundBridge.app bundle..."
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 # Check Gatekeeper acceptance
-echo " Checking Gatekeeper assessment..."
-if spctl --assess --type execute --verbose=4 "$APP_BUNDLE" 2>&1 | grep -q "accepted"; then
-    success "Gatekeeper will accept this app"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    info "Ad-hoc signature: Gatekeeper asks the user to approve the first launch"
 else
-    warn "Gatekeeper may reject this app (this is normal before notarization)"
+    echo " Checking Gatekeeper assessment..."
+    if spctl --assess --type execute --verbose=4 "$APP_BUNDLE" 2>&1 | grep -q "accepted"; then
+        success "Gatekeeper will accept this app"
+    else
+        warn "Gatekeeper may reject this app (this is normal before notarization)"
+    fi
 fi
 
 section "Code Signing Complete!"
 
 echo ""
-echo "App bundle signed with: $SIGNING_IDENTITY"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "App bundle signed ad-hoc"
+else
+    echo "App bundle signed with: $SIGNING_IDENTITY"
+fi
 echo "Location: $APP_BUNDLE"
 echo ""
 echo "Next steps:"
 echo "  1. Test the signed app: open $APP_BUNDLE"
-echo "  2. Notarize for distribution: ./tools/notarize.sh"
-echo "  3. Create DMG: ./tools/create_dmg.sh"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "  2. Create DMG: ./tools/create_dmg.sh"
+else
+    echo "  2. Notarize for distribution: ./tools/notarize.sh"
+    echo "  3. Create DMG: ./tools/create_dmg.sh"
+fi
 echo ""
-
 # Cleanup temporary keychain if created
 if [ -n "$APPLE_CERTIFICATE" ]; then
     security delete-keychain signing.keychain 2>/dev/null || true
