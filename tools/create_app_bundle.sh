@@ -73,6 +73,19 @@ echo "  Created bundle structure"
 # Copy Info.plist
 echo "  Copying Info.plist..."
 cp "$PROJECT_ROOT/apps/mac/SoundBridgeApp/Info.plist" "$APP_PATH/Contents/Info.plist"
+
+# Inject the Sparkle public key at bundle time.
+# The public key is safe to publish, but it is kept out of the repository so a
+# fresh checkout (and any local build) stays keyless: with an empty
+# SUPublicEDKey the app never starts Sparkle. Release builds set
+# SPARKLE_ED_PUBLIC_KEY from the CI secret.
+if [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_ED_PUBLIC_KEY" \
+        "$APP_PATH/Contents/Info.plist"
+    echo "  Sparkle public key injected"
+else
+    echo "  No SPARKLE_ED_PUBLIC_KEY set - auto-update will be disabled in this build"
+fi
 echo "  Info.plist copied"
 
 # Copy app icon
