@@ -62,6 +62,7 @@ struct SettingsView: View {
 								.onChange(of: automaticCheckEnabled) { newValue in
 									updaterController?.updater.automaticallyChecksForUpdates = newValue
 								}
+								.disabled(updaterController == nil)
 
 							if let lastCheck = lastCheckDate {
 								HStack {
@@ -87,8 +88,14 @@ struct SettingsView: View {
 								}
 								.frame(maxWidth: .infinity)
 							}
-							.disabled(isCheckingForUpdates)
+							.disabled(isCheckingForUpdates || updaterController == nil)
 							.controlSize(.large)
+
+							if updaterController == nil {
+								Text("Update checking is not configured in this build.")
+									.font(.caption)
+									.foregroundColor(.secondary)
+							}
 						}
 					}
 					.padding(16)
