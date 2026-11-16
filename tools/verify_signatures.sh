@@ -38,6 +38,14 @@ echo "Bundle: $APP_BUNDLE"
 
 FAILED=0
 
+# Ad-hoc signatures carry no authority, certificate or timestamp, and Gatekeeper
+# rejects them by design, so those checks only apply to Developer ID builds.
+if codesign -dv "$APP_BUNDLE" 2>&1 | grep -q "Signature=adhoc"; then
+    ADHOC=1
+else
+    ADHOC=0
+fi
+
 # Function to verify a component
 verify_component() {
     local component="$1"
@@ -69,20 +77,25 @@ verify_component() {
     fi
 
     # Display signing info
-    echo "   Identity: $(codesign -dv "$component" 2>&1 | grep "Authority" | head -1 | sed 's/Authority=//')"
-
-    # Check for hardened runtime
-    if codesign -dv "$component" 2>&1 | grep -q "runtime"; then
-        echo "   Hardened Runtime: Enabled"
+    if [ $ADHOC -eq 1 ]; then
+        echo "   Identity: ad-hoc"
     else
-        warn "   Hardened Runtime: Disabled"
+        echo "   Identity: $(codesign -dv "$component" 2>&1 | grep "Authority" | head -1 | sed 's/Authority=//')"
     fi
 
-    # Check for timestamp
-    if codesign -dv "$component" 2>&1 | grep -q "Timestamp"; then
-        echo "   Timestamp: Present"
-    else
-        warn "   Timestamp: Missing"
+    # Check for hardened runtime and timestamp (Developer ID signatures only)
+    if [ $ADHOC -eq 0 ]; then
+        if codesign -dv "$component" 2>&1 | grep -q "runtime"; then
+            echo "   Hardened Runtime: Enabled"
+        else
+            warn "   Hardened Runtime: Disabled"
+        fi
+
+        if codesign -dv "$component" 2>&1 | grep -q "Timestamp"; then
+            echo "   Timestamp: Present"
+        else
+            warn "   Timestamp: Missing"
+        fi
     fi
 
     # Display entitlements if present
@@ -107,7 +120,10 @@ verify_component "$APP_BUNDLE" "SoundBridge.app (bundle)"
 
 section "Gatekeeper Assessment"
 
-if spctl --assess --type execute --verbose=4 "$APP_BUNDLE" 2>&1; then
+if [ $ADHOC -eq 1 ]; then
+    warn "Gatekeeper: REJECTED (ad-hoc signature - expected)"
+    echo "   Users approve the app once via System Settings > Privacy & Security"
+elif spctl --assess --type execute --verbose=4 "$APP_BUNDLE" 2>&1; then
     success "Gatekeeper: ACCEPTED"
 else
     EXIT_CODE=$?
@@ -135,9 +151,15 @@ if [ $FAILED -eq 0 ]; then
     echo "Status:"
     echo "  OK: All components signed"
     echo "  OK: Signatures verified"
-    echo "  OK: Hardened runtime enabled"
+    if [ $ADHOC -eq 1 ]; then
+        echo "  OK: Ad-hoc signed (no Apple Developer account required)"
+    else
+        echo "  OK: Hardened runtime enabled"
+    fi
 
-    if spctl --assess --type execute "$APP_BUNDLE" 2>/dev/null; then
+    if [ $ADHOC -eq 1 ]; then
+        echo "  WARN: Gatekeeper approval is manual until the app is notarized"
+    elif spctl --assess --type execute "$APP_BUNDLE" 2>/dev/null; then
         echo "  OK: Gatekeeper approved"
     else
         echo "  WARN: Awaiting notarization"
@@ -146,8 +168,12 @@ if [ $FAILED -eq 0 ]; then
     echo ""
     echo "Next steps:"
     echo "  1. Test: open \"$APP_BUNDLE\""
-    echo "  2. Notarize: ./tools/notarize.sh"
-    echo "  3. Package: ./tools/create_dmg.sh"
+    if [ $ADHOC -eq 1 ]; then
+        echo "  2. Package: ./tools/create_dmg.sh"
+    else
+        echo "  2. Notarize: ./tools/notarize.sh"
+        echo "  3. Package: ./tools/create_dmg.sh"
+    fi
     echo ""
     exit 0
 else
@@ -155,7 +181,7 @@ else
     error "$FAILED component(s) failed verification"
     echo ""
     echo "Common issues:"
-    echo "  - Run code signing: ./tools/codesign.sh"
+    echo "  - Run code signing: ./tools/codesign.sh (add --adhoc without a certificate)"
     echo "  - Check Developer ID certificate is installed"
     echo "  - Verify entitlements files exist"
     echo ""

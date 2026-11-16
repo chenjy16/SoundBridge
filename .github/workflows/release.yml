@@ -74,31 +74,6 @@ jobs:
           echo "✓ Version update complete"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Install Apple Certificate
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      - name: Install Apple Certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-          security find-identity -v -p codesigning $KEYCHAIN_PATH
-          echo "✓ Apple certificate installed"
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Build All Components
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Build DSP Library (universal)
@@ -154,50 +129,21 @@ jobs:
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Code Sign
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      - name: Code Sign App
+      # No Apple Developer account is required. Ad-hoc signing is what Apple
+      # silicon needs to execute the binaries at all, and it is enough to ship a
+      # DMG through GitHub releases. macOS asks the user to approve the first
+      # launch instead of trusting a notarized signature.
+      - name: Code Sign App (ad-hoc)
+        env:
+          SIGN_MODE: adhoc
         run: |
           make sign
-          echo "✓ App signed"
+          echo "✓ App signed (ad-hoc)"
 
       - name: Verify Signatures
         run: |
           ./tools/verify_signatures.sh
           echo "✓ Signatures verified"
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Notarize
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      - name: Notarize App
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          ditto -c -k --keepParent dist/SoundBridge.app dist/SoundBridge.zip
-          RESULT_JSON=$(mktemp)
-
-          if ! xcrun notarytool submit dist/SoundBridge.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait \
-            --output-format json > "$RESULT_JSON"; then
-            echo "Notary submission failed"
-            cat "$RESULT_JSON" || true
-            exit 1
-          fi
-
-          STATUS=$(python3 -c 'import json,sys,pathlib; d=json.loads(pathlib.Path(sys.argv[1]).read_text()); print(d.get("status",""))' "$RESULT_JSON")
-          echo "Status: $STATUS"
-
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "Notarization failed with status: $STATUS"
-            exit 1
-          fi
-
-          xcrun stapler staple dist/SoundBridge.app
-          rm dist/SoundBridge.zip "$RESULT_JSON"
-          echo "✓ App notarized and stapled"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Create DMG
@@ -208,28 +154,9 @@ jobs:
           echo "✓ create-dmg installed"
 
       - name: Create DMG
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           ./tools/create_dmg.sh
-
-          IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
-          if [ -z "$IDENTITY" ]; then
-            echo "ERROR: No Developer ID Application certificate found"
-            exit 1
-          fi
-          codesign --force --sign "$IDENTITY" --timestamp "dist/SoundBridge.dmg"
-
-          xcrun notarytool submit "dist/SoundBridge.dmg" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_ID_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-          xcrun stapler staple "dist/SoundBridge.dmg"
-          echo "✓ DMG created, signed, notarized, and stapled"
+          echo "✓ DMG created"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Generate Checksums
@@ -274,11 +201,3 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Cleanup
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      - name: Cleanup Keychain
-        if: always()
-        run: |
-          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
