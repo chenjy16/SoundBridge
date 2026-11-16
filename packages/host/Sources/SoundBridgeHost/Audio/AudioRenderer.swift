@@ -164,14 +164,18 @@ class AudioRenderer {
             }
         }
 
-        // === Gain Stage (Linear Passthrough) ===
-        // macOS volumeScalar is already perceptually mapped (Weber-Fechner),
-        // so we use it directly as the physical gain — no additional curve.
+        // === Gain Stage (Linear-dB Taper) ===
+        // The shared volume scalar is raw slider travel (0...1), not a
+        // perceptually mapped value. Mapping it linearly onto a dB range keeps
+        // every volume-key step the same perceptual size and makes the applied
+        // gain follow the decibel curve the driver reports to CoreAudio.
         let volumeScalar = rf_load_volume_scalar(mem)
         let isMuted = rf_load_mute_state(mem) != 0
         let sampleCount = Int(framesRead) * channelCount
 
-        let targetGain: Float = (isMuted || volumeScalar <= 0.0) ? 0.0 : volumeScalar
+        let targetGain: Float = (isMuted || volumeScalar <= 0.0)
+            ? 0.0
+            : powf(10.0, (volumeScalar - 1.0) * SoundBridgeConfig.volumeRangeDB / 20.0)
 
         // Snap to target on first frame to avoid startup fade artifact
         if currentGain < 0.0 {

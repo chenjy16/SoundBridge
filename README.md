@@ -77,7 +77,7 @@ SoundBridge uses a four-component architecture:
 3. The Host process reads from the ring buffer, applies software gain (from the volume slider) and optional EQ
 4. Processed audio is rendered to the real physical output device
 
-Volume control uses CoreAudio's `kAudioDevicePropertyVolumeScalar` on the proxy device. The driver stores the value in shared memory, and the Host applies it as a linear gain multiplier with smoothing to avoid clicks.
+Volume control uses CoreAudio's `kAudioDevicePropertyVolumeScalar` on the proxy device. The driver stores the value in shared memory, and the Host maps that raw slider travel onto a linear-in-decibel taper (48 dB) before applying it as gain, with smoothing to avoid clicks. Because the taper is linear in dB, every volume-key press changes loudness by the same amount.
 
 ## Project Structure
 

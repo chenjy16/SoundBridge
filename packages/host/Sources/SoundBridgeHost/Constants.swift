@@ -24,6 +24,12 @@ struct SoundBridgeConfig {
     static let defaultFormat = RF_FORMAT_FLOAT32
     static let defaultDurationMs: UInt32 = 100
 
+    /// Total span of the software volume taper, in decibels below unity.
+    /// The proxy volume scalar is raw slider travel (0...1), so it is mapped
+    /// linearly onto this range: every one of the 16 volume-key steps macOS
+    /// emits then changes the gain by the same amount (48 dB / 16 = 3 dB).
+    static let volumeRangeDB: Float = 48.0
+
     static var controlFilePath: String {
         return PathManager.controlFilePath
     }
