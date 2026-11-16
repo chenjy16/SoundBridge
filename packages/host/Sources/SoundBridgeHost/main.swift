@@ -62,12 +62,25 @@ func main() {
         exit(1)
     }
 
+    setupSignalHandlers()
+    logger.info("Signal handlers installed")
+
+    setupSleepWakeMonitoring()
+
     print("[Step 1] Discovering physical audio devices...")
     let devices = deviceDiscovery.enumeratePhysicalDevices()
 
-    guard !devices.isEmpty else {
-        logger.error("No physical output devices found")
-        exit(1)
+    if devices.isEmpty {
+        logger.info("No physical output devices currently available; entering idle mode")
+        deviceMonitor.setHostState(.idle)
+    }
+
+    print("[Step 2] Registering device change listeners...")
+    deviceMonitor.registerListeners()
+
+    if devices.isEmpty {
+        RunLoop.current.run()
+        return
     }
 
     let validatedDevices = devices.filter { $0.validationPassed }
@@ -95,9 +108,6 @@ func main() {
 
     deviceRegistry.update(devices)
 
-    print("[Step 2] Registering device change listeners...")
-    deviceMonitor.registerListeners()
-
     print("[Step 3] Creating shared memory files...")
     memoryManager.createMemory(for: devices)
 
@@ -121,31 +131,6 @@ func main() {
         }
     }
 
-    print("[Step 7.5] Registering sleep/wake handler...")
-    sleepWakeMonitor.onSleep = {
-        print("[SleepWake] System entering sleep, stopping AudioEngine...")
-        audioEngine.stop()
-        logger.info("AudioEngine stopped before sleep")
-    }
-    sleepWakeMonitor.onWake = {
-        print("[SleepWake] Recovering after wake...")
-        deviceMonitor.reregisterListeners()
-        deviceMonitor.resetDebounce()
-        proxyManager.reregisterVolumeForwarding()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            do {
-                try audioEngine.setup(devices: deviceRegistry.devices,
-                                      preferredDeviceID: proxyManager.activePhysicalDeviceID)
-                try audioEngine.start()
-                logger.info("AudioEngine restarted after wake")
-            } catch {
-                logger.error("AudioEngine restart failed: \(error.localizedDescription)")
-            }
-        }
-    }
-    sleepWakeMonitor.start()
-
     print("[Step 8] Setting up audio engine with device fallback...")
 
     // Get the user's preferred device from proxy manager (set during autoSelectProxy)
@@ -161,6 +146,8 @@ func main() {
     do {
         try audioEngine.setup(devices: devices, preferredDeviceID: preferredDeviceID != 0 ? preferredDeviceID : nil)
         try audioEngine.start()
+
+        deviceMonitor.setHostState(.active)
         logger.info("Audio engine started successfully")
 
         // Post-start volume sync: After IO starts, the driver maps shared memory.
@@ -190,10 +177,6 @@ func main() {
         exit(1)
     }
 
-    setupSignalHandlers()
-
-    logger.info("Signal handlers installed")
-
     // Listen for bounce requests from App via Darwin notification
     var bounceToken: Int32 = 0
     let bounceStatus = _notify_register_dispatch(
@@ -209,6 +192,51 @@ func main() {
     }
 
     RunLoop.current.run()
+}
+
+func setupSleepWakeMonitoring() {
+    print("[Startup] Registering sleep/wake handler...")
+
+    sleepWakeMonitor.onSleep = {
+        guard deviceMonitor.hostState == .active else {
+            logger.info("Host is idle; no AudioEngine to stop before sleep")
+            return
+        }
+
+        print("[SleepWake] System entering sleep, stopping AudioEngine...")
+        audioEngine.stop()
+        logger.info("AudioEngine stopped before sleep")
+    }
+
+    sleepWakeMonitor.onWake = {
+        print("[SleepWake] Recovering after wake...")
+
+        deviceMonitor.reregisterListeners()
+        deviceMonitor.resetDebounce()
+        proxyManager.reregisterVolumeForwarding()
+
+        guard deviceMonitor.hostState == .active else {
+            logger.info("Host is idle after wake; skipping AudioEngine restart")
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            do {
+                try audioEngine.setup(
+                    devices: deviceRegistry.devices,
+                    preferredDeviceID: proxyManager.activePhysicalDeviceID
+                )
+                try audioEngine.start()
+                logger.info("AudioEngine restarted after wake")
+            } catch {
+                logger.error(
+                    "AudioEngine restart failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    sleepWakeMonitor.start()
 }
 
 func setupSignalHandlers() {
@@ -235,6 +263,7 @@ func setupSignalHandlers() {
 }
 
 func cleanup() {
+    deviceMonitor.setHostState(.stopping)
     print("\n[Cleanup] Starting cleanup process...")
 
     sleepWakeMonitor.stop()
