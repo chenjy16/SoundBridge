@@ -167,17 +167,14 @@ Intel 机器使用同一份通用二进制，**但本版本未在 Intel 机器�
 
 ## 9. 校验值
 
-```
-977d79e26ee4f13b06e8ad13df32907b2bb9eb5bfa17d405cc3dd97a36b3ee3b  SoundBridge-1.2.0.pkg
-c7f311b05d1760d9c60d27c32ded3adcd74b92b16bcb8969f10e2ed17b0b504a  SoundBridge-1.2.0.dmg
-```
-
-以 Release 页面上的 `SHA256SUMS.txt` 为准：
+校验值以 Release 页面上的 `SHA256SUMS.txt` 为唯一来源，本文不复制一份。二进制由 CI 在每次发布时重新构建，本地构建的哈希与发布件不同。
 
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS.txt
 ```
+
+两行都应为 `OK`。任何一行不是 `OK`，说明文件在传输中损坏或被篡改，请重新下载，不要继续安装。
 
 ---
 

@@ -54,14 +54,9 @@ SoundBridge-1.2.0.dmg: OK
 
 任何一行不是 `OK` 都说明文件在传输中损坏或被篡改，请重新下载，不要继续安装。
 
-本版本发布时记录的校验值：
+校验值只在 Release 页面上的 `SHA256SUMS.txt` 里维护，本文不复制一份。复制的那份会在重新构建后过时，而「下载的文件对不上文档里的校验值」会让人以为文件坏了。
 
-```
-977d79e26ee4f13b06e8ad13df32907b2bb9eb5bfa17d405cc3dd97a36b3ee3b  SoundBridge-1.2.0.pkg
-c7f311b05d1760d9c60d27c32ded3adcd74b92b16bcb8969f10e2ed17b0b504a  SoundBridge-1.2.0.dmg
-```
-
-（发布后如果重新构建，以 Release 页面上的 `SHA256SUMS.txt` 为准。）
+需要人工核对时，从 Release 页面打开 `SHA256SUMS.txt`，里面两行分别对应 `.dmg` 与 `.pkg`。
 
 ---
 
