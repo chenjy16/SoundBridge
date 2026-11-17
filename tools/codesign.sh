@@ -79,6 +79,28 @@ info() {
     echo -e "${BLUE}INFO: $1${NC}"
 }
 
+print_help() {
+    sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    echo ""
+    echo "usage: $0 [--adhoc] [--dry-run]"
+    echo ""
+    echo "  SB_APP_BUNDLE=<path>   sign a bundle other than $DEFAULT_APP_BUNDLE"
+    echo "  SIGN_MODE=<mode>       auto (default), developer-id or adhoc"
+    echo "  SB_SIGN_DRY_RUN=1      same as --dry-run"
+    echo "  --dry-run              print the signing plan and sign nothing"
+    echo "  --adhoc                same as SIGN_MODE=adhoc"
+}
+
+# --help is answered before the bundle is validated. Asking a script what it
+# does must not require the thing it operates on to exist: on a clean checkout
+# there is no dist/SoundBridge.app yet, and a help that exits 1 is help that was
+# never printed.
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) print_help; exit 0 ;;
+    esac
+done
+
 # The bundle has to be a bundle, not merely a directory with the right name.
 # Every refusal below says which path was asked for, so a typo cannot land on a
 # different app.
@@ -125,15 +147,9 @@ for arg in "$@"; do
         --adhoc)   SIGN_MODE="adhoc" ;;
         --dry-run) DRY_RUN=1 ;;
         -h|--help)
-            sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-            echo ""
-            echo "usage: $0 [--adhoc] [--dry-run]"
-            echo ""
-            echo "  SB_APP_BUNDLE=<path>   sign a bundle other than $DEFAULT_APP_BUNDLE"
-            echo "  SIGN_MODE=<mode>       auto (default), developer-id or adhoc"
-            echo "  SB_SIGN_DRY_RUN=1      same as --dry-run"
-            echo "  --dry-run              print the signing plan and sign nothing"
-            echo "  --adhoc                same as SIGN_MODE=adhoc"
+            # Unreachable: the pre-scan above answers it before the bundle is
+            # checked. Kept so the loop still enumerates every accepted flag.
+            print_help
             exit 0
             ;;
         *)

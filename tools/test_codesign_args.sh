@@ -132,18 +132,31 @@ BUNDLE="$TMP/SoundBridge.app"
 build_fixture "$BUNDLE"
 
 # --- 1. default path ---------------------------------------------------------
+# The default is dist/SoundBridge.app whether or not that bundle exists yet. On
+# a clean checkout (CI runs this suite before `make bundle`) there is nothing to
+# resolve, so what is asserted there is the refusal -- by path, with a remedy --
+# rather than a plan. Both branches pin the same default path, which is the
+# property that matters: a bare call must never silently sign some other app.
 echo "1. default bundle path"
 touch "$TMP/marker-default"
 run_sign "$TMP/out-default" -- --adhoc --dry-run
-assert_eq "0" "$RC" "default: exit code 0"
-assert_contains "$TMP/out-default" "bundle:       $ROOT_DIR/dist/SoundBridge.app" \
-    "default: signs dist/SoundBridge.app"
-assert_contains "$TMP/out-default" "source:       default (dist/SoundBridge.app)" \
-    "default: reported as the default source"
-assert_contains "$TMP/out-default" "Signing plan for $ROOT_DIR/dist/SoundBridge.app" \
-    "default: plan names the default bundle"
-assert_eq "0" "$(changed_since "$ROOT_DIR/dist/SoundBridge.app" "$TMP/marker-default")" \
-    "default: dry run modified nothing in dist/SoundBridge.app"
+if [ -d "$ROOT_DIR/dist/SoundBridge.app" ]; then
+    assert_eq "0" "$RC" "default: exit code 0"
+    assert_contains "$TMP/out-default" "bundle:       $ROOT_DIR/dist/SoundBridge.app" \
+        "default: signs dist/SoundBridge.app"
+    assert_contains "$TMP/out-default" "source:       default (dist/SoundBridge.app)" \
+        "default: reported as the default source"
+    assert_contains "$TMP/out-default" "Signing plan for $ROOT_DIR/dist/SoundBridge.app" \
+        "default: plan names the default bundle"
+    assert_eq "0" "$(changed_since "$ROOT_DIR/dist/SoundBridge.app" "$TMP/marker-default")" \
+        "default: dry run modified nothing in dist/SoundBridge.app"
+else
+    assert_eq "1" "$RC" "default: exit code 1 when dist/ holds no bundle"
+    assert_contains "$TMP/out-default" "App bundle not found at $ROOT_DIR/dist/SoundBridge.app" \
+        "default: names dist/SoundBridge.app as the path it looked for"
+    assert_contains "$TMP/out-default" "Run 'make bundle' first" \
+        "default: says how to create it"
+fi
 
 # --- 2. SB_APP_BUNDLE override ----------------------------------------------
 echo ""
@@ -277,11 +290,14 @@ assert_eq "0" "$(find "$BUNDLE" -name '_CodeSignature' -type d | wc -l | tr -d '
     "dry run: no _CodeSignature written into the fixture"
 
 # --- 8. help -----------------------------------------------------------------
+# --help has to work without a bundle: it is the one invocation that asks what
+# the script does, and on a clean checkout the default bundle does not exist.
 echo ""
 run_sign "$TMP/out-help" -- --help
 assert_eq "0" "$RC" "help: exit code 0"
 assert_contains "$TMP/out-help" "SB_APP_BUNDLE" "help: documents SB_APP_BUNDLE"
 assert_contains "$TMP/out-help" "--dry-run" "help: documents --dry-run"
+assert_contains "$TMP/out-help" "usage:" "help: prints a usage line"
 
 echo ""
 if [ "$FAILS" -eq 0 ]; then
