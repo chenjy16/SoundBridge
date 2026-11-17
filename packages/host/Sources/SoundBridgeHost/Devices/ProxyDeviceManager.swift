@@ -175,16 +175,71 @@ class ProxyDeviceManager {
         )
     }
 
-    func autoSelectProxy() {
+    /// What `autoSelectProxy()` actually achieved.
+    ///
+    /// It used to return `Void` while logging failures at warning level, which is
+    /// how startup reported success with no audio path: every early return was
+    /// indistinguishable from the successful path.
+    enum ProxySelectionOutcome: Equatable {
+        /// The default output is now the proxy for `physicalUID`.
+        case switched(proxyDeviceID: AudioDeviceID)
+        /// The default output already was the proxy; state was re-mapped.
+        case alreadyOnProxy(proxyDeviceID: AudioDeviceID)
+        /// No default output device could be queried.
+        case noDefaultDevice
+        /// The current device has no UID/name, or the proxy UID does not resolve
+        /// back to a device this Host knows.
+        case noPhysicalMapping
+        /// A physical device we do not manage is the default; nothing to route.
+        case notManagedDevice
+        /// The driver's proxy device for this physical device is not in the HAL
+        /// device list.
+        case proxyDeviceMissing
+        /// CoreAudio refused to make the proxy the default output.
+        case switchFailed
+
+        /// Whether the Host is now routing through a proxy device.
+        var isRouted: Bool {
+            switch self {
+            case .switched, .alreadyOnProxy:
+                return true
+            case .noDefaultDevice, .noPhysicalMapping, .notManagedDevice, .proxyDeviceMissing, .switchFailed:
+                return false
+            }
+        }
+
+        /// One line for logs and for the lifecycle snapshot's `detail`.
+        var diagnostic: String {
+            switch self {
+            case .switched(let id):
+                return "switched default output to proxy \(id)"
+            case .alreadyOnProxy(let id):
+                return "default output already was the proxy (\(id)); re-mapped"
+            case .noDefaultDevice:
+                return "no default output device could be queried"
+            case .noPhysicalMapping:
+                return "proxy device is the default but no physical device maps to it"
+            case .notManagedDevice:
+                return "default output is not a device this Host manages"
+            case .proxyDeviceMissing:
+                return "the driver's proxy device is not in the HAL device list"
+            case .switchFailed:
+                return "CoreAudio refused to make the proxy the default output"
+            }
+        }
+    }
+
+    @discardableResult
+    func autoSelectProxy() -> ProxySelectionOutcome {
         guard let currentDeviceID = getCurrentDefaultDevice() else {
             logger.error("Could not get current default device")
-            return
+            return .noDefaultDevice
         }
 
         guard let uid = getDeviceUID(currentDeviceID),
               let name = getDeviceName(currentDeviceID) else {
             logger.error("Could not get device info")
-            return
+            return .noDefaultDevice
         }
 
         print("[AutoSelect] Current default device: \(name) (\(uid))")
@@ -200,20 +255,20 @@ class ProxyDeviceManager {
                 enqueueProxyVolumeForward(force: true)
                 restoreVolumeState(proxyDeviceID: currentDeviceID, physicalUID: physicalUID)
                 print("[AutoSelect] Already on proxy device - mapped to \(physicalDevice.name)")
-            } else {
-                print("[AutoSelect] Already on proxy device - but no physical mapping found")
+                return .alreadyOnProxy(proxyDeviceID: currentDeviceID)
             }
-            return
+            print("[AutoSelect] Already on proxy device - but no physical mapping found")
+            return .noPhysicalMapping
         }
 
         guard registry.find(uid: uid) != nil else {
             print("[AutoSelect] Current device not in registry - no proxy available")
-            return
+            return .notManagedDevice
         }
 
         guard let proxyID = findProxyDevice(forPhysicalUID: uid) else {
             logger.warning("Could not find proxy for device: \(name)")
-            return
+            return .proxyDeviceMissing
         }
 
         // Capture physical volume and sync to proxy BEFORE switching
@@ -236,10 +291,12 @@ class ProxyDeviceManager {
             startVolumeForwarding(proxyDeviceID: proxyID)
             enqueueProxyVolumeForward(force: true)
             restoreVolumeState(proxyDeviceID: proxyID, physicalUID: uid)
-        } else {
-            logger.error("Failed to set proxy as default")
-            isAutoSwitching = false
+            return .switched(proxyDeviceID: proxyID)
         }
+
+        logger.error("Failed to set proxy as default")
+        isAutoSwitching = false
+        return .switchFailed
     }
 
     /// Resolve the current output device to a physical device, if possible.
@@ -680,8 +737,17 @@ class ProxyDeviceManager {
 
     /// Restore persisted volume and mute state to a proxy device via HAL API.
     /// Called when a device connects or a proxy is selected.
-    func restoreVolumeState(proxyDeviceID: AudioDeviceID, physicalUID: String) {
-        let state = volumePersistence.load(uid: physicalUID)
+    ///
+    /// `override` lets the caller supply an already-committed state (for
+    /// example one recovered from shared memory) instead of falling back to
+    /// the persisted default. Without it a device that has no saved entry
+    /// would be forced back to 0.35 and could clobber a recovered value.
+    func restoreVolumeState(
+        proxyDeviceID: AudioDeviceID,
+        physicalUID: String,
+        override: DeviceVolumeState? = nil
+    ) {
+        let state = override ?? volumePersistence.load(uid: physicalUID)
         let restored = setDeviceVolume(proxyDeviceID, volume: state.volumeScalar)
         let muteRestored = setDeviceMute(proxyDeviceID, muted: state.isMuted)
         logger.info("Restored volume state for \(physicalUID): volume=\(String(format: "%.0f%%", state.volumeScalar * 100)), muted=\(state.isMuted) (vol:\(restored), mute:\(muteRestored))")

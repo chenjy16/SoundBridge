@@ -18,7 +18,9 @@ class AudioRenderer {
 
     // Gain Stage state
     private var currentGain: Float = -1.0  // negative = uninitialized, snap on first frame
-    private let smoothingCoeff: Float = 0.995  // ~10ms at 48kHz
+    // One-pole smoothing coefficient. 0.995 at 48 kHz is a ~4.2 ms time
+    // constant (0.995^199 ~= 1/e), which is why volume-key steps do not click.
+    private let smoothingCoeff: Float = 0.995
 
     // EQ state
     private var lastEQSnapshot = RFEQSnapshot()
@@ -164,18 +166,18 @@ class AudioRenderer {
             }
         }
 
-        // === Gain Stage (Linear-dB Taper) ===
-        // The shared volume scalar is raw slider travel (0...1), not a
-        // perceptually mapped value. Mapping it linearly onto a dB range keeps
-        // every volume-key step the same perceptual size and makes the applied
-        // gain follow the decibel curve the driver reports to CoreAudio.
-        let volumeScalar = rf_load_volume_scalar(mem)
+        // === Gain Stage ===
+        // The scalar in shared memory is the taper's input, so the gain must
+        // come from VolumeTaper — the same 48 dB Pow2 curve the driver's
+        // VolumeControl exposes. Deriving the formula inline here is exactly
+        // how the two sides drifted apart by up to ~29 dB before Phase 2.1.
+        let volumeScalar = VolumeTaper.sanitize(rf_load_volume_scalar(mem), fallback: 0.0)
         let isMuted = rf_load_mute_state(mem) != 0
         let sampleCount = Int(framesRead) * channelCount
 
         let targetGain: Float = (isMuted || volumeScalar <= 0.0)
             ? 0.0
-            : powf(10.0, (volumeScalar - 1.0) * SoundBridgeConfig.volumeRangeDB / 20.0)
+            : VolumeTaper.gain(forScalar: volumeScalar)
 
         // Snap to target on first frame to avoid startup fade artifact
         if currentGain < 0.0 {

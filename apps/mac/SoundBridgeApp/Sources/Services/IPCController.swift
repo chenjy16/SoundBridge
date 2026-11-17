@@ -24,6 +24,11 @@ struct IPCDeviceInfo: Codable {
 struct IPCDeviceState: Codable {
     let devices: [IPCDeviceInfo]
     let activeDeviceUID: String?
+    /// Optional on purpose: a Host from before 1.2.0 does not write it, and this
+    /// build must keep working with one. When present it carries the seven
+    /// lifecycle levels, which is the difference between "a Host process exists"
+    /// and "audio is actually flowing".
+    let lifecycle: HostLifecycleReport?
 }
 
 /// Handles IPC with the Host process via `device-state.json`.
@@ -40,6 +45,12 @@ class IPCController {
     private var darwinNotifyToken: Int32 = 0
     private var darwinNotifyRegistered = false
     var onDeviceStateChanged: ((IPCDeviceState) -> Void)?
+    /// Latest Host lifecycle report, or `nil` when the Host has not written one.
+    ///
+    /// Kept here as well as in `onDeviceStateChanged` so a caller that appears
+    /// after the first notification can still read the current state instead of
+    /// waiting for the next device change.
+    private(set) var latestLifecycle: HostLifecycleReport?
 
     private init() {
         let appSupport = FileManager.default.urls(
@@ -154,7 +165,9 @@ class IPCController {
         }
 
         do {
-            return try JSONDecoder().decode(IPCDeviceState.self, from: data)
+            let state = try JSONDecoder().decode(IPCDeviceState.self, from: data)
+            latestLifecycle = state.lifecycle
+            return state
         } catch {
             print("[IPCController] Failed to decode device-state.json: \(error)")
             return nil

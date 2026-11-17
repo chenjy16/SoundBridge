@@ -8,6 +8,13 @@ enum HostState: String {
     case starting
     case idle
     case active
+    /// Running, but deliberately not in the audio path.
+    ///
+    /// Phase 2.1.4: when the driver's proxy device never appears, the Host stays
+    /// alive for diagnostics and keeps its shared memory so a late driver can
+    /// attach, but it must not pretend to be `active`. This is the state that
+    /// makes the difference visible to the App.
+    case degraded
     case stopping
 }
 
@@ -24,6 +31,12 @@ class DeviceMonitor {
     private var devicesListenerRegistered = false
     private var defaultOutputListenerRegistered = false
     private(set) var hostState: HostState = .starting
+
+    /// Called from a device-list change while the Host sits in `.degraded`, so a
+    /// proxy device that shows up late (coreaudiod finishing its scan, driver
+    /// installed after the Host started) can still be picked up instead of
+    /// leaving the Host wedged until the next launch.
+    var onDegradedRecovery: (() -> Void)?
 
     init(
         registry: DeviceRegistry,
@@ -168,10 +181,16 @@ class DeviceMonitor {
             )
         }
 
-        // 1. Create shared memory for new devices
+        // 1. Create shared memory for new devices.
+        // Reuse the manager that owns the persistence instance, so a device
+        // that reappears gets the same persisted > recovered > default
+        // resolution as it does on a fresh Host start.
         for device in addedDevices {
             print("Device added: \(device.name) (\(discovery.transportTypeName(device.transportType)))")
-            _ = memoryManager.createMemory(for: device.uid)
+            _ = memoryManager.createMemory(
+                for: device.uid,
+                persistence: proxyManager.volumePersistence
+            )
         }
 
         for device in removedDevices {
@@ -180,6 +199,14 @@ class DeviceMonitor {
 
         // 2. Update registry (writes control file + sends Darwin notification)
         registry.update(newDevices)
+
+        // A new device may be the proxy we were waiting for when startup gave up.
+        // Runs before the idle/active bookkeeping below so recovery is a single
+        // path, not a special case bolted onto each branch.
+        if hostState == .degraded {
+            logger.info("Device list changed while degraded; re-checking for the proxy device")
+            onDegradedRecovery?()
+        }
 
         if enteringIdle {
             print("[DeviceMonitor] No output devices remain; entering idle mode")
@@ -322,9 +349,11 @@ class DeviceMonitor {
         }
     }
 
-    private func reloadDriver() {
-        print("Driver reload required - restart coreaudiod with: sudo killall coreaudiod")
-    }
+    // Phase 2.1.4 removed `reloadDriver()`: it printed "restart coreaudiod with:
+    // sudo killall coreaudiod" and was never called. The Darwin notifications the
+    // class already subscribes to are what make a reload unnecessary, so the only
+    // thing the function could still do was tell a future reader that restarting
+    // the system audio daemon is part of this path. It is not.
 
     private func getDeviceName(_ deviceID: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(

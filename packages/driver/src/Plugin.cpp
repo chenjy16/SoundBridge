@@ -58,6 +58,32 @@ namespace {
 constexpr UInt32 DEFAULT_SAMPLE_RATE = 48000;
 constexpr UInt32 DEFAULT_CHANNELS = 2;
 constexpr UInt32 DEFAULT_RING_DURATION_MS = RF_RING_DURATION_MS_DEFAULT;
+
+// ===== Volume taper =====
+// The proxy device advertises a 48 dB / 48-step taper so that libASPL's Pow2
+// transfer function yields exactly:
+//
+//     raw = round(sqrt(scalar) * 48)      dB = 48 * sqrt(scalar) - 48
+//
+// which is the same curve the Host applies to its render gain (see
+// VolumeTaper.swift and the RF_VOLUME_* block in RFSharedAudio.h).
+//
+// libASPL applies the Pow2 transfer function ONLY when the dB range exceeds
+// 30 dB (vendor/libASPL/src/VolumeCurve.cpp). The previous 96 dB range also
+// took the non-linear branch, but the Host mapped the scalar *linearly* onto
+// 48 dB, so the two sides disagreed by up to ~29 dB at low volumes.
+// Shrinking this range below 30 dB would silently make the curve linear again;
+// the static_assert below and the one in RFSharedAudio.h both exist to turn
+// that into a build failure instead of a silent 29 dB error.
+constexpr SInt32 VOLUME_RAW_MIN = RF_VOLUME_RAW_MIN;   // 0
+constexpr SInt32 VOLUME_RAW_MAX = RF_VOLUME_RAW_MAX;   // 48
+constexpr Float32 VOLUME_DB_MIN = RF_VOLUME_DB_MIN;    // -48 dB
+constexpr Float32 VOLUME_DB_MAX = RF_VOLUME_DB_MAX;    // 0 dB
+static_assert(VOLUME_DB_MAX - VOLUME_DB_MIN > 30.0f,
+    "Volume dB range must stay above 30 dB, otherwise libASPL silently "
+    "degrades the taper to linear and disagrees with the Host gain stage");
+static_assert(VOLUME_RAW_MAX > VOLUME_RAW_MIN,
+    "Volume raw range must be non-empty");
 // CoreAudio AudioServerPlugIn.h documents a minimum allowed zero timestamp period
 // of 10923 frames. Use a conservative ring-sized period common to virtual drivers.
 constexpr UInt32 HAL_ZERO_TIMESTAMP_PERIOD_FRAMES = 16384;
@@ -74,6 +100,26 @@ constexpr int HEALTH_CHECK_INTERVAL_SEC = 3;
 constexpr int HEARTBEAT_INTERVAL_SEC = 1;
 constexpr int STATS_LOG_INTERVAL_SEC = 30;
 constexpr int HEARTBEAT_TIMEOUT_SEC = 15;
+
+// ===== OnStartIO shared-memory acquisition budget =====
+//
+// The Host creates the shared-memory file well before it starts IO
+// (main.swift: createMemory() runs at step 3, audioEngine.start() at step 8),
+// so a long backoff buys nothing — and it costs: OnStartIO sits on the HAL
+// start path. The old loop ran 15 attempts with exponential backoff and
+// accumulated 30+60+120+240+480+960+1920*8 = 17 250 ms before failing.
+//
+// First try + 2 retries, sleeping 50 ms then 100 ms => worst case 150 ms.
+constexpr int MAX_START_IO_ATTEMPTS = 3;    // includes the first attempt
+constexpr int START_IO_BASE_DELAY_MS = 50;  // attempt 1 -> 50 ms, attempt 2 -> 100 ms
+static_assert(MAX_START_IO_ATTEMPTS >= 1, "At least one attempt is required");
+static_assert(START_IO_BASE_DELAY_MS > 0, "Retry delay must be positive");
+
+// Worst-case accumulated sleep: BASE * (2^0 + ... + 2^(N-2))
+constexpr int START_IO_MAX_BLOCKING_MS =
+    START_IO_BASE_DELAY_MS * ((1 << (MAX_START_IO_ATTEMPTS - 1)) - 1);
+static_assert(START_IO_MAX_BLOCKING_MS <= 300,
+    "OnStartIO must not block the HAL start path for more than 300 ms");
 
 // Device cycling prevention - minimum time between remove and re-add
 constexpr int DEVICE_COOLDOWN_SEC = 10;
@@ -211,10 +257,26 @@ public:
         return shared_memory_;
     }
 
+    // Push a value INTO the control without echoing it back to shared memory.
+    //
+    // The scalar<->raw conversion is lossy (48 raw steps), so a plain
+    // SetScalarValue() would write the quantised value straight back over the
+    // exact value the Host committed. Restoring state must be a one-way push.
+    OSStatus RestoreFromSharedMemory(Float32 scalar) {
+        suppress_shared_memory_write_.store(true, std::memory_order_release);
+        OSStatus status = SetScalarValue(scalar);
+        suppress_shared_memory_write_.store(false, std::memory_order_release);
+        return status;
+    }
+
 protected:
     OSStatus SetRawValueImpl(SInt32 value) override {
         OSStatus status = aspl::VolumeControl::SetRawValueImpl(value);
         if (status == kAudioHardwareNoError && shared_memory_) {
+            if (suppress_shared_memory_write_.load(std::memory_order_acquire)) {
+                RF_DebugLog("SoundBridgeVolumeControl: internal restore to raw=%d (not echoed to shared memory)", value);
+                return status;
+            }
             Float32 scalar = GetScalarValue();
             rf_store_volume_scalar(shared_memory_, scalar);
             RF_DebugLog("SoundBridgeVolumeControl: volume changed to %.3f (raw=%d)", scalar, value);
@@ -224,6 +286,7 @@ protected:
 
 private:
     RFSharedAudio* shared_memory_;
+    std::atomic<bool> suppress_shared_memory_write_{false};
 };
 
 // Custom MuteControl that syncs to shared memory when mute changes.
@@ -244,10 +307,22 @@ public:
         return shared_memory_;
     }
 
+    // See SoundBridgeVolumeControl::RestoreFromSharedMemory().
+    OSStatus RestoreFromSharedMemory(bool muted) {
+        suppress_shared_memory_write_.store(true, std::memory_order_release);
+        OSStatus status = SetIsMuted(muted);
+        suppress_shared_memory_write_.store(false, std::memory_order_release);
+        return status;
+    }
+
 protected:
     OSStatus SetIsMutedImpl(bool isMuted) override {
         OSStatus status = aspl::MuteControl::SetIsMutedImpl(isMuted);
         if (status == kAudioHardwareNoError && shared_memory_) {
+            if (suppress_shared_memory_write_.load(std::memory_order_acquire)) {
+                RF_DebugLog("SoundBridgeMuteControl: internal restore to %d (not echoed to shared memory)", isMuted ? 1 : 0);
+                return status;
+            }
             rf_store_mute_state(shared_memory_, isMuted ? 1 : 0);
             RF_DebugLog("SoundBridgeMuteControl: mute changed to %d", isMuted ? 1 : 0);
         }
@@ -256,6 +331,7 @@ protected:
 
 private:
     RFSharedAudio* shared_memory_;
+    std::atomic<bool> suppress_shared_memory_write_{false};
 };
 
 // Custom Device subclass with correct GetZeroTimeStamp implementation.
@@ -416,11 +492,13 @@ public:
         if (count == 1) {
             state_ = DeviceState::Connecting;
 
-            // Retry loop with exponential backoff.
-            const int MAX_RETRIES = 15;
-            const int BASE_DELAY_MS = 30;
+            // Bounded retry loop. Worst case blocking is 150 ms, down from
+            // the 17 250 ms the old 15-attempt exponential backoff accumulated.
+            // See MAX_START_IO_ATTEMPTS / START_IO_BASE_DELAY_MS above.
+            constexpr int MAX_ATTEMPTS = MAX_START_IO_ATTEMPTS;
+            constexpr int BASE_DELAY_MS = START_IO_BASE_DELAY_MS;
 
-            for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
                 OpenSharedMemory();
 
                 if (shared_memory_) {
@@ -459,21 +537,16 @@ public:
                             RF_DebugLog("OnStartIO: set shared memory on MuteControl");
                         }
 
-                        // Sync current volume/mute state to shared memory.
-                        // This handles the case where volume was set before IO started.
+                        // Volume state handshake (Phase 2.1).
+                        //
+                        // A rebuilt VolumeControl resets rawVolume_ to
+                        // MaxRawVolume, i.e. scalar 1.0. Unconditionally syncing
+                        // that into shared memory is exactly what made IO
+                        // restarts jump to 100% (see POC_ERRATA M1 and the
+                        // driver debug log evidence). Shared memory wins
+                        // whenever the Host has already committed a state.
                         RF_DebugLog("OnStartIO: device_=%p", (void*)device_);
-                        if (volumeControl_) {
-                            float vol = volumeControl_->GetScalarValue();
-                            rf_store_volume_scalar(shared_memory_, vol);
-                            RF_DebugLog("OnStartIO: synced VolumeControl value=%.3f", vol);
-                            RF_LOG_INFO("Synced volume=%.3f to shared memory", vol);
-                        }
-                        if (muteControl_) {
-                            bool muted = muteControl_->GetIsMuted();
-                            rf_store_mute_state(shared_memory_, muted ? 1 : 0);
-                            RF_DebugLog("OnStartIO: synced MuteControl value=%d", muted ? 1 : 0);
-                            RF_LOG_INFO("Synced mute=%d to shared memory", muted ? 1 : 0);
-                        }
+                        SyncVolumeStateWithSharedMemory();
 
                         return kAudioHardwareNoError;
                     } else {
@@ -482,16 +555,19 @@ public:
                     }
                 }
 
-                if (attempt < MAX_RETRIES) {
-                    int delay = BASE_DELAY_MS * (1 << std::min(attempt - 1, 6));
-                    RF_LOG_INFO("Retry %d/%d in %dms...", attempt + 1, MAX_RETRIES, delay);
+                if (attempt < MAX_ATTEMPTS) {
+                    const int delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                    RF_LOG_INFO("Retry %d/%d in %dms...", attempt + 1, MAX_ATTEMPTS, delay);
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
             }
 
-            // All retries failed.
+            // All attempts failed. Report the reason once and give the caller a
+            // proper error; HAL will retry when a client restarts IO.
             --io_client_count_;
             state_ = DeviceState::Error;
+            RF_LOG_ERROR("OnStartIO: shared memory unavailable after %d attempt(s) (%d ms budget exhausted)",
+                MAX_ATTEMPTS, START_IO_MAX_BLOCKING_MS);
             PrintDetailedError();
             return kAudioHardwareUnspecifiedError;
         }
@@ -642,6 +718,70 @@ public:
     }
 
 private:
+    // ===== Volume state handshake (Phase 2.1) =====
+    //
+    // Decides who owns the volume state at IO start:
+    //
+    //   committed state exists (state_initialized == 1)
+    //       -> shared memory wins. Push it INTO the controls, because a
+    //          freshly constructed VolumeControl sits at MaxRawVolume
+    //          (scalar 1.0) and would otherwise report 100% to every HAL
+    //          client while the Host renders at the real gain.
+    //
+    //   no committed state (state_initialized == 0)
+    //       -> bootstrap. The controls carry whatever the Host applied via
+    //          setDeviceVolume() before IO started, so seed shared memory
+    //          from them through rf_publish_volume_state(), which also
+    //          latches state_initialized and bumps the revision once.
+    void SyncVolumeStateWithSharedMemory() {
+        if (!shared_memory_) return;
+
+        const float control_scalar = volumeControl_ ? volumeControl_->GetScalarValue() : 0.35f;
+        const bool control_muted = muteControl_ ? muteControl_->GetIsMuted() : false;
+
+        RFVolumeStateSnapshot snapshot{};
+        const RFVolumeSyncOutcome outcome = rf_sync_driver_volume_state(
+            shared_memory_, control_scalar, control_muted, &snapshot);
+
+        switch (outcome) {
+            case RF_VOLUME_SYNC_ADOPTED:
+                RF_LOG_INFO("Volume state: adopted committed shared-memory value %.4f (rev %llu)",
+                    snapshot.scalar, (unsigned long long)snapshot.revision);
+                RF_DebugLog("OnStartIO: committed state found: scalar=%.4f muted=%d mode=%u rev=%llu",
+                    snapshot.scalar, snapshot.muted, snapshot.mode,
+                    (unsigned long long)snapshot.revision);
+                break;
+
+            case RF_VOLUME_SYNC_SEEDED:
+                RF_LOG_INFO("Volume state: first-time bootstrap from controls (scalar=%.4f, muted=%d, rev %llu)",
+                    snapshot.scalar, snapshot.muted, (unsigned long long)snapshot.revision);
+                RF_DebugLog("OnStartIO: bootstrapped volume state: scalar=%.4f muted=%d rev=%llu",
+                    snapshot.scalar, snapshot.muted, (unsigned long long)snapshot.revision);
+                break;
+
+            case RF_VOLUME_SYNC_REJECTED:
+            default:
+                // ValidateConnection owns the protocol-mismatch report; do not
+                // touch a block we cannot reason about.
+                RF_LOG_ERROR("Volume state: shared memory rejected (%s); controls left untouched",
+                    rf_validate_result_string(rf_validate_header(shared_memory_)));
+                return;
+        }
+
+        // A rebuilt VolumeControl sits at MaxRawVolume (scalar 1.0), so both
+        // outcomes end by pushing the authoritative value INTO the controls.
+        if (volumeControl_) {
+            OSStatus status = volumeControl_->RestoreFromSharedMemory(snapshot.scalar);
+            RF_DebugLog("OnStartIO: pushed %.4f into VolumeControl (status=%d)",
+                snapshot.scalar, (int)status);
+        }
+        if (muteControl_) {
+            OSStatus status = muteControl_->RestoreFromSharedMemory(snapshot.muted != 0);
+            RF_DebugLog("OnStartIO: pushed muted=%d into MuteControl (status=%d)",
+                snapshot.muted, (int)status);
+        }
+    }
+
     void OpenSharedMemory() {
         RF_DebugLog("OpenSharedMemory: %s", shm_file_path_.c_str());
         RF_LOG_INFO("Opening: %s", shm_file_path_.c_str());
@@ -725,32 +865,32 @@ private:
     bool ValidateConnection() {
         if (!shared_memory_) return false;
 
-        // Check protocol version
-        if (shared_memory_->protocol_version != RF_AUDIO_PROTOCOL_VERSION) {
-            RF_DebugLog("ValidateConnection: protocol mismatch 0x%x expected 0x%x",
-                shared_memory_->protocol_version, RF_AUDIO_PROTOCOL_VERSION);
-            RF_LOG_ERROR("Protocol mismatch: 0x%x (expected 0x%x)",
-                shared_memory_->protocol_version, RF_AUDIO_PROTOCOL_VERSION);
-            return false;
-        }
-
-        // Check sample rate
-        if (!rf_is_sample_rate_supported(shared_memory_->sample_rate)) {
-            RF_DebugLog("ValidateConnection: unsupported sample rate %u", shared_memory_->sample_rate);
-            RF_LOG_ERROR("Unsupported sample rate: %u", shared_memory_->sample_rate);
-            return false;
-        }
-
-        // Check channels
-        if (shared_memory_->channels == 0 || shared_memory_->channels > RF_MAX_CHANNELS) {
-            RF_DebugLog("ValidateConnection: invalid channels %u", shared_memory_->channels);
-            RF_LOG_ERROR("Invalid channel count: %u", shared_memory_->channels);
+        // One implementation of the connection contract, shared with the Host
+        // test suite through RFSharedAudio.h. Do not duplicate these checks
+        // here: a second copy is how the driver and the Host end up disagreeing
+        // about what a valid header looks like.
+        const RFValidateResult result = rf_validate_header(shared_memory_);
+        if (result != RF_VALIDATE_OK) {
+            RF_DebugLog("ValidateConnection: rejected (%s) protocol=0x%x header_size=%u rate=%u channels=%u",
+                rf_validate_result_string(result),
+                shared_memory_->protocol_version,
+                shared_memory_->header_size,
+                shared_memory_->sample_rate,
+                shared_memory_->channels);
+            RF_LOG_ERROR("Connection rejected: %s (protocol=0x%x header_size=%u rate=%u ch=%u)",
+                rf_validate_result_string(result),
+                shared_memory_->protocol_version,
+                shared_memory_->header_size,
+                shared_memory_->sample_rate,
+                shared_memory_->channels);
             return false;
         }
 
         // Mark driver as connected
         atomic_store(&shared_memory_->driver_connected, 1);
-        RF_DebugLog("ValidateConnection: OK (driver_connected=1)");
+        RF_DebugLog("ValidateConnection: OK (driver_connected=1, state_initialized=%u, revision=%llu)",
+            atomic_load(&shared_memory_->state_initialized),
+            (unsigned long long)rf_get_state_revision(shared_memory_));
 
         return true;
     }
@@ -1060,9 +1200,19 @@ std::shared_ptr<aspl::Device> CreateProxyDevice(const std::string& name, const s
     // Create stream manually instead of using AddStreamWithControlsAsync
     auto stream = device->AddStreamAsync(aspl::Direction::Output);
 
-    // Create custom VolumeControl and MuteControl that sync to shared memory
+    // Create custom VolumeControl and MuteControl that sync to shared memory.
+    //
+    // The taper is 48 dB over 48 raw steps, matching RF_VOLUME_* in
+    // RFSharedAudio.h and VolumeTaper on the Host. libASPL keeps its Pow2
+    // transfer function because the dB range exceeds 30 dB, so both sides end
+    // up on dB = 48 * sqrt(scalar) - 48.
+    aspl::VolumeControlParameters volumeParams;
+    volumeParams.MinRawVolume = VOLUME_RAW_MIN;
+    volumeParams.MaxRawVolume = VOLUME_RAW_MAX;
+    volumeParams.MinDecibelVolume = VOLUME_DB_MIN;
+    volumeParams.MaxDecibelVolume = VOLUME_DB_MAX;
     auto volumeControl = std::make_shared<SoundBridgeVolumeControl>(
-        g_state->context, aspl::VolumeControlParameters{});
+        g_state->context, volumeParams);
     auto muteControl = std::make_shared<SoundBridgeMuteControl>(
         g_state->context, aspl::MuteControlParameters{});
 

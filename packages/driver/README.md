@@ -186,7 +186,7 @@ Single producer (driver) and single consumer (host), with monotonically increasi
 
 Current liveness checks are applied during proxy-device sync (not in the per-buffer IO callback path):
 
-- `HostHeartbeatFresh()` maps `/tmp/soundbridge-<uid>` read-only, tracks `host_heartbeat` changes, and treats heartbeat as stale after 5 seconds with no change.
+- `HostHeartbeatFresh()` maps `/tmp/soundbridge-<uid>` read-only, tracks `host_heartbeat` changes, and treats heartbeat as stale after 15 seconds with no change (`HEARTBEAT_TIMEOUT_SEC` in `Plugin.cpp`).
 - `SyncDevices()` only keeps/adds devices with fresh heartbeat state; stale entries are skipped and existing stale devices are removed.
 
 `UniversalAudioHandler` also includes `IsHealthy()` and `AttemptRecovery()` helpers for shared-memory/file/ring validation, but they are not currently called from `OnWriteMixedOutput()`.
@@ -196,7 +196,7 @@ Current liveness checks are applied during proxy-device sync (not in the per-buf
 - Driver calls `rf_update_driver_heartbeat()` on each `OnWriteMixedOutput` callback.
 - Host calls `rf_update_host_heartbeat()` on a timer (`DispatchSourceTimer` in host code, default 1s interval).
 
-A host heartbeat with no observed change for 5 seconds is treated as stale by `HostHeartbeatFresh()`.
+A host heartbeat with no observed change for 15 seconds is treated as stale by `HostHeartbeatFresh()`. The timeout is longer than the Host's 1 s heartbeat interval because the Host may be descheduled or swapping; the driver only needs to distinguish "alive" from "gone", and removing a device is disruptive.
 
 ## Building
 
@@ -273,7 +273,7 @@ log show --predicate 'subsystem == "com.soundbridge.driver"' --last 5m
 | `DEFAULT_CHANNELS` | 2 |
 | `HEALTH_CHECK_INTERVAL_SEC` | 3 (defined; helper currently not invoked from callback loop) |
 | `HEARTBEAT_INTERVAL_SEC` | 1 (defined; driver heartbeat is currently callback-driven) |
-| `HEARTBEAT_TIMEOUT_SEC` | 5 |
+| `HEARTBEAT_TIMEOUT_SEC` | 15 |
 | `STATS_LOG_INTERVAL_SEC` | 30 |
 | `DEVICE_COOLDOWN_SEC` | 10 |
 | `RF_MAX_CHANNELS` | 8 |

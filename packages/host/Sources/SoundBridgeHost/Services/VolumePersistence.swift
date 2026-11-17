@@ -15,8 +15,14 @@ struct DeviceVolumeState: Codable {
 /// - In-memory cache for fast reads
 /// - 500ms debounce on writes to avoid excessive I/O during slider drag
 /// - Atomic write (.tmp + rename) to prevent corruption
-class VolumePersistence {
-    static let defaultVolume: Float = 0.35
+///
+/// Conforms to `VolumeStatePersisting` so the volume state model can be
+/// tested against an in-memory fake instead of this file.
+class VolumePersistence: VolumeStatePersisting {
+    /// Kept in sync with `VolumeState.defaultScalar` and the seed value used by
+    /// `rf_shared_audio_init()`; all three must agree or the first launch
+    /// publishes a value the other two do not expect.
+    static let defaultVolume: Float = VolumeState.defaultScalar
 
     private let fileURL: URL
     private var cache: [String: DeviceVolumeState] = [:]
@@ -45,6 +51,15 @@ class VolumePersistence {
         return queue.sync {
             cache[uid] ?? DeviceVolumeState(volumeScalar: Self.defaultVolume, isMuted: false)
         }
+    }
+
+    /// Load volume state only if this device has actually been saved before.
+    ///
+    /// The difference from `load(uid:)` is load-bearing: `load` substitutes a
+    /// default, which would mask a recoverable shared-memory state and
+    /// silently reset the user's volume on a Host restart.
+    func loadIfPresent(uid: String) -> DeviceVolumeState? {
+        return queue.sync { cache[uid] }
     }
 
     // MARK: - Private

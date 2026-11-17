@@ -41,6 +41,18 @@ class AudioEngine {
             throw AudioEngineError.noPhysicalDeviceFound
         }
 
+        // A second `setup()` must not leak the first unit.
+        //
+        // Callers do re-enter here on a live engine: degraded recovery and the
+        // sleep/wake restart both rebuild the graph without stopping it first,
+        // and `setupWithDevice` assigns a freshly created `AudioComponentInstance`
+        // over `outputUnit`. The old unit then keeps its render callback — and its
+        // claim on the shared-memory ring — with no reference left to dispose it.
+        //
+        // Done after the empty-device guard on purpose: an empty list must not
+        // destroy a working audio path.
+        stop()
+
         var lastError: AudioEngineError?
 
         // Try preferred device FIRST if specified

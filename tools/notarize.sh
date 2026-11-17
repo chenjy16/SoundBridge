@@ -7,7 +7,16 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 APP_PATH="$PROJECT_ROOT/dist/SoundBridge.app"
-DMG_PATH="$PROJECT_ROOT/dist/SoundBridge.dmg"
+
+# create_dmg.sh names the archive after the app's version (SoundBridge-1.1.1.dmg),
+# so the path reported at the end is derived the same way instead of assuming the
+# old unversioned name.
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+if [ -n "$APP_VERSION" ]; then
+    DMG_PATH="$PROJECT_ROOT/dist/SoundBridge-$APP_VERSION.dmg"
+else
+    DMG_PATH="$PROJECT_ROOT/dist/SoundBridge.dmg"
+fi
 ZIP_PATH="$PROJECT_ROOT/dist/SoundBridge-notarize.zip"
 
 GREEN='\033[0;32m'

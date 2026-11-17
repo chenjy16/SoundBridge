@@ -50,6 +50,12 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 
 To uninstall, use the "Uninstall" option in the SoundBridge menu bar dropdown.
 
+### Updating
+
+The app updates itself through Sparkle. The audio driver does **not** update itself: SoundBridge installs the driver only from its onboarding step, never replaces the installed driver in the background, never restarts `coreaudiod` after a version check, and never asks for an administrator password on its own.
+
+Onboarding runs once. If a later release changes the driver's shared-memory protocol, the app detects the mismatch at launch, tells you which driver version it needs and which one is installed, and points at the [releases page](https://github.com/chenjy16/SoundBridge/releases) — it does not offer an in-app upgrade, and it will not re-run the install step by itself.
+
 ## How It Works
 
 SoundBridge uses a four-component architecture:

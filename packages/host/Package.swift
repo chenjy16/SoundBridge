@@ -33,5 +33,14 @@ let package = Package(
                 .unsafeFlags(["-lc++"]),
             ]
         ),
+        // Phase 2.1-E: tests target the pure Swift state model
+        // (VolumeState / VolumeTaper / VolumeStateResolver) and the shared C
+        // protocol helpers, never CoreAudio. CSoundBridgeAudio is listed so the
+        // protocol tests run the exact inline code the driver compiles.
+        .testTarget(
+            name: "SoundBridgeHostTests",
+            dependencies: ["SoundBridgeHost", "CSoundBridgeAudio"],
+            path: "Tests/SoundBridgeHostTests"
+        ),
     ]
 )

@@ -16,7 +16,33 @@ set -e  # Exit on error
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-APP_BUNDLE="$PROJECT_ROOT/dist/SoundBridge.app"
+
+# Which bundle to sign
+# --------------------
+# Without SB_APP_BUNDLE this signs the release bundle, so `make sign` and a bare
+# tools/codesign.sh call do exactly what they did before. SB_APP_BUNDLE points
+# the same sequence at a candidate copy -- build/p34/unsigned/SoundBridge.app,
+# for instance -- without ever falling back to dist/ when the caller asked for
+# something else.
+#
+#   SB_APP_BUNDLE=build/p34/unsigned/SoundBridge.app tools/codesign.sh --adhoc
+DEFAULT_APP_BUNDLE="$PROJECT_ROOT/dist/SoundBridge.app"
+HOST_ENTITLEMENTS="$PROJECT_ROOT/packages/host/SoundBridgeHost.entitlements"
+APP_ENTITLEMENTS="$PROJECT_ROOT/apps/mac/SoundBridgeApp/SoundBridgeApp.entitlements"
+
+# Set-but-empty is a mistake, not a request for the default: a caller that built
+# a path and got an empty string would otherwise sign dist/ without saying so.
+if [ -n "${SB_APP_BUNDLE+x}" ] && [ -z "$SB_APP_BUNDLE" ]; then
+    echo "ERROR: SB_APP_BUNDLE is set but empty; unset it to sign $DEFAULT_APP_BUNDLE" >&2
+    exit 2
+fi
+APP_BUNDLE="${SB_APP_BUNDLE:-$DEFAULT_APP_BUNDLE}"
+
+# 1 means: resolve everything, print the plan, sign nothing.
+DRY_RUN=0
+if [ "${SB_SIGN_DRY_RUN:-0}" = "1" ]; then
+    DRY_RUN=1
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,18 +79,71 @@ info() {
     echo -e "${BLUE}INFO: $1${NC}"
 }
 
-# Check if app bundle exists
+# The bundle has to be a bundle, not merely a directory with the right name.
+# Every refusal below says which path was asked for, so a typo cannot land on a
+# different app.
 if [ ! -d "$APP_BUNDLE" ]; then
     error "App bundle not found at $APP_BUNDLE"
-    error "Run 'make bundle' first to create the app bundle"
+    if [ -n "${SB_APP_BUNDLE+x}" ]; then
+        error "SB_APP_BUNDLE was set explicitly; $DEFAULT_APP_BUNDLE was NOT substituted"
+    else
+        error "Run 'make bundle' first to create the app bundle"
+    fi
     exit 1
 fi
 
-# Signing mode
-SIGN_MODE="${SIGN_MODE:-auto}"
-if [ "${1:-}" = "--adhoc" ]; then
-    SIGN_MODE="adhoc"
+case "$APP_BUNDLE" in
+    *.app) : ;;
+    *)
+        error "not an .app bundle: $APP_BUNDLE"
+        exit 1
+        ;;
+esac
+
+if [ ! -f "$APP_BUNDLE/Contents/Info.plist" ] || [ ! -d "$APP_BUNDLE/Contents/MacOS" ]; then
+    error "$APP_BUNDLE is not a valid app bundle (Contents/Info.plist and Contents/MacOS are required)"
+    exit 1
 fi
+
+for ent in "$HOST_ENTITLEMENTS" "$APP_ENTITLEMENTS"; do
+    if [ ! -f "$ent" ]; then
+        error "entitlements file not found: $ent"
+        exit 1
+    fi
+done
+
+# From here on the path is absolute and symlink-free, so the plan printed by
+# --dry-run can be compared with what actually ran.
+APP_PARENT="$( cd "$( dirname "$APP_BUNDLE" )" && pwd -P )" \
+    || { error "cannot resolve the parent of $APP_BUNDLE"; exit 1; }
+APP_BUNDLE="$APP_PARENT/$( basename "$APP_BUNDLE" )"
+
+# Signing mode and flags
+SIGN_MODE="${SIGN_MODE:-auto}"
+for arg in "$@"; do
+    case "$arg" in
+        --adhoc)   SIGN_MODE="adhoc" ;;
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help)
+            sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            echo ""
+            echo "usage: $0 [--adhoc] [--dry-run]"
+            echo ""
+            echo "  SB_APP_BUNDLE=<path>   sign a bundle other than $DEFAULT_APP_BUNDLE"
+            echo "  SIGN_MODE=<mode>       auto (default), developer-id or adhoc"
+            echo "  SB_SIGN_DRY_RUN=1      same as --dry-run"
+            echo "  --dry-run              print the signing plan and sign nothing"
+            echo "  --adhoc                same as SIGN_MODE=adhoc"
+            exit 0
+            ;;
+        *)
+            # Silence is the wrong answer in a signing script: an unrecognised
+            # flag would otherwise be ignored while the rest runs.
+            echo "ERROR: unknown argument '$arg' (try --help)" >&2
+            exit 2
+            ;;
+    esac
+done
 
 SIGNING_IDENTITY=""
 if [ "$SIGN_MODE" = "adhoc" ]; then
@@ -75,6 +154,12 @@ elif [ -n "$APPLE_DEVELOPER_ID" ]; then
     SIGNING_IDENTITY="$APPLE_DEVELOPER_ID"
     echo "Using Developer ID from environment: $SIGNING_IDENTITY"
 elif [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+    # Importing into a keychain is a real side effect; a dry run must not have
+    # any, so the CI path is refused rather than simulated.
+    if [ "$DRY_RUN" = "1" ]; then
+        error "a dry run cannot import a certificate; set APPLE_DEVELOPER_ID to preview a Developer ID plan"
+        exit 2
+    fi
     # Import certificate from base64-encoded .p12 (for CI/CD)
     section "Importing Certificate"
 
@@ -164,12 +249,57 @@ else
     )
 fi
 
+# What is about to be signed, in full. A signing run that reports the wrong
+# bundle is worse than one that fails, so the target is stated before the first
+# code object is touched.
+section "Signing Target"
+echo "  bundle:       $APP_BUNDLE"
+if [ "$APP_BUNDLE" = "$DEFAULT_APP_BUNDLE" ]; then
+    echo "  source:       default (dist/SoundBridge.app)"
+else
+    echo "  source:       SB_APP_BUNDLE"
+fi
+echo "  identity:     $SIGNING_IDENTITY"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "  signature:    adhoc (not a Developer ID signature)"
+else
+    echo "  signature:    Developer ID Application, hardened runtime, timestamp"
+fi
+echo "  entitlements: host $HOST_ENTITLEMENTS"
+echo "                app  $APP_ENTITLEMENTS"
+echo "  options:      ${SIGN_OPTS[*]}"
+if [ "$DRY_RUN" = "1" ]; then
+    echo "  mode:         DRY RUN (nothing will be signed)"
+fi
+
+# Every signing action goes through here. In a dry run the call is recorded and
+# printed instead of executed, which is what makes the nesting order and the
+# path handling testable without a certificate.
+SIGN_PLAN=()
+run_codesign() {
+    if [ "$DRY_RUN" = "1" ]; then
+        SIGN_PLAN+=("codesign $*")
+        echo "  [dry-run] codesign $*"
+        return 0
+    fi
+    codesign "$@"
+}
+
+# "signed" is not a claim a dry run is allowed to print.
+sign_success() {
+    if [ "$DRY_RUN" = "1" ]; then
+        info "would sign: $1"
+    else
+        success "$1"
+    fi
+}
+
 # Step 1: Sign SoundBridgeHost executable
 echo " Signing SoundBridgeHost..."
-if codesign "${SIGN_OPTS[@]}" \
-    --entitlements "$PROJECT_ROOT/packages/host/SoundBridgeHost.entitlements" \
+if run_codesign "${SIGN_OPTS[@]}" \
+    --entitlements "$HOST_ENTITLEMENTS" \
     "$APP_BUNDLE/Contents/MacOS/SoundBridgeHost"; then
-    success "SoundBridgeHost signed"
+    sign_success "SoundBridgeHost signed"
 else
     error "Failed to sign SoundBridgeHost"
     exit 1
@@ -181,9 +311,9 @@ if [ -d "$APP_BUNDLE/Contents/Resources/SoundBridgeDriver.driver" ]; then
 
     # Sign the driver binary inside the bundle
     if [ -f "$APP_BUNDLE/Contents/Resources/SoundBridgeDriver.driver/Contents/MacOS/SoundBridgeDriver" ]; then
-        if codesign "${SIGN_OPTS[@]}" \
+        if run_codesign "${SIGN_OPTS[@]}" \
             "$APP_BUNDLE/Contents/Resources/SoundBridgeDriver.driver/Contents/MacOS/SoundBridgeDriver"; then
-            success "Driver binary signed"
+            sign_success "Driver binary signed"
         else
             error "Failed to sign driver binary"
             exit 1
@@ -191,9 +321,9 @@ if [ -d "$APP_BUNDLE/Contents/Resources/SoundBridgeDriver.driver" ]; then
     fi
 
     # Sign the driver bundle
-    if codesign "${SIGN_OPTS[@]}" \
+    if run_codesign "${SIGN_OPTS[@]}" \
         "$APP_BUNDLE/Contents/Resources/SoundBridgeDriver.driver"; then
-        success "SoundBridgeDriver.driver bundle signed"
+        sign_success "SoundBridgeDriver.driver bundle signed"
     else
         error "Failed to sign driver bundle"
         exit 1
@@ -212,7 +342,7 @@ if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
             if file "$macho" | grep -q "Mach-O"; then
                 local name_rel="${macho#$APP_BUNDLE/}"
                 echo "      -> $name_rel"
-                if ! codesign "${SIGN_OPTS[@]}" "$macho"; then
+                if ! run_codesign "${SIGN_OPTS[@]}" "$macho"; then
                     error "Failed to sign $name_rel"
                     exit 1
                 fi
@@ -227,7 +357,7 @@ if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
         # Sign nested XPC services first (they contain their own Mach-O)
         while IFS= read -r xpc; do
             sign_macho_binaries "$xpc/Contents/MacOS"
-            if ! codesign "${SIGN_OPTS[@]}" "$xpc"; then
+            if ! run_codesign "${SIGN_OPTS[@]}" "$xpc"; then
                 error "Failed to sign $(basename "$xpc")"
                 exit 1
             fi
@@ -237,8 +367,8 @@ if [ -d "$APP_BUNDLE/Contents/Frameworks" ]; then
         sign_macho_binaries "$framework"
 
         # Finally sign the framework bundle itself with a deep signature
-        if codesign "${SIGN_OPTS[@]}" --deep "$framework"; then
-            success "$NAME signed"
+        if run_codesign "${SIGN_OPTS[@]}" --deep "$framework"; then
+            sign_success "$NAME signed"
         else
             error "Failed to sign $NAME"
             exit 1
@@ -250,10 +380,10 @@ fi
 
 # Step 4: Sign SoundBridgeApp main executable
 echo "Signing SoundBridgeApp..."
-if codesign "${SIGN_OPTS[@]}" \
-    --entitlements "$PROJECT_ROOT/apps/mac/SoundBridgeApp/SoundBridgeApp.entitlements" \
+if run_codesign "${SIGN_OPTS[@]}" \
+    --entitlements "$APP_ENTITLEMENTS" \
     "$APP_BUNDLE/Contents/MacOS/SoundBridgeApp"; then
-    success "SoundBridgeApp signed"
+    sign_success "SoundBridgeApp signed"
 else
     error "Failed to sign SoundBridgeApp"
     exit 1
@@ -261,16 +391,20 @@ fi
 
 # Step 5: Sign the entire app bundle (outer signature)
 echo "Signing SoundBridge.app bundle..."
-if codesign "${SIGN_OPTS[@]}" \
-    --entitlements "$PROJECT_ROOT/apps/mac/SoundBridgeApp/SoundBridgeApp.entitlements" \
+if run_codesign "${SIGN_OPTS[@]}" \
+    --entitlements "$APP_ENTITLEMENTS" \
     "$APP_BUNDLE"; then
-    success "SoundBridge.app bundle signed"
+    sign_success "SoundBridge.app bundle signed"
 else
     error "Failed to sign app bundle"
     exit 1
 fi
 
 section "Verification"
+
+if [ "$DRY_RUN" = "1" ]; then
+    info "dry run: nothing was signed, so there is nothing to verify"
+else
 
 # Verify all signatures
 echo " Verifying SoundBridgeHost..."
@@ -299,7 +433,23 @@ else
     fi
 fi
 
+fi
+
 section "Code Signing Complete!"
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo ""
+    echo "Signing plan for $APP_BUNDLE"
+    echo "Nothing was signed: this was a dry run."
+    echo ""
+    n=0
+    for step in "${SIGN_PLAN[@]}"; do
+        n=$((n + 1))
+        echo "  $n. $step"
+    done
+    echo ""
+    exit 0
+fi
 
 echo ""
 if [ "$SIGNING_IDENTITY" = "-" ]; then

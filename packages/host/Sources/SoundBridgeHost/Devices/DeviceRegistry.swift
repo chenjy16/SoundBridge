@@ -11,6 +11,12 @@ private let logger = Logger(subsystem: "com.soundbridge.host", category: "Device
 class DeviceRegistry {
     private(set) var devices: [PhysicalDevice] = []
     var activeDeviceUID: String?
+    /// Latest lifecycle snapshot, mirrored into `device-state.json`.
+    ///
+    /// The App needs to tell "Host running" apart from "Host running and audio
+    /// works". Both used to look identical from the outside because the only
+    /// signal was the process existing.
+    var lifecycle: HostLifecycleSnapshot?
 
     func update(_ newDevices: [PhysicalDevice]) {
         devices = newDevices
@@ -64,12 +70,13 @@ class DeviceRegistry {
         struct IPCDeviceState: Codable {
             let devices: [IPCDeviceInfo]
             let activeDeviceUID: String?
+            let lifecycle: HostLifecycleSnapshot?
         }
 
         let ipcDevices = devices.map {
             IPCDeviceInfo(name: $0.name, uid: $0.uid, isFixedVolume: $0.isFixedVolume)
         }
-        let state = IPCDeviceState(devices: ipcDevices, activeDeviceUID: activeDeviceUID)
+        let state = IPCDeviceState(devices: ipcDevices, activeDeviceUID: activeDeviceUID, lifecycle: lifecycle)
 
         do {
             let data = try JSONEncoder().encode(state)

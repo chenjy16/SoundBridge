@@ -20,7 +20,17 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DIST_DIR="$PROJECT_ROOT/dist"
 ARCHIVE_DIR="$DIST_DIR/appcast"
-DMG_PATH="$DIST_DIR/SoundBridge.dmg"
+
+# create_dmg.sh names the archive after the app's version (SoundBridge-1.1.1.dmg).
+# The appcast enclosure is the same file, so the name is derived from the bundle
+# that ships in it rather than from the old unversioned convention.
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$PROJECT_ROOT/dist/SoundBridge.app/Contents/Info.plist" 2>/dev/null || true)"
+if [ -n "$APP_VERSION" ]; then
+    DMG_PATH="$DIST_DIR/SoundBridge-$APP_VERSION.dmg"
+else
+    DMG_PATH="$DIST_DIR/SoundBridge.dmg"
+fi
 DOWNLOAD_URL_PREFIX="${SPARKLE_DOWNLOAD_URL_PREFIX:-https://github.com/chenjy16/SoundBridge/releases/latest/download/}"
 
 # Sparkle ships its command line tools next to the SwiftPM artifact bundle.

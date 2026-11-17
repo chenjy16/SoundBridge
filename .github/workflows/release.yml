@@ -1,5 +1,19 @@
 name: Release
 
+# Publishes a GitHub release from a tag.
+#
+# What this pipeline promises, and what it does not:
+#
+#   * The artifacts are ad-hoc signed. There is no Developer ID certificate, no
+#     `productsign` and no notarization anywhere in this file. The DMG and the
+#     PKG are unsigned archives that carry an ad-hoc signed app.
+#   * A release is only published if every verification step below passes. The
+#     checks are not advisory: a missing PKG, a driver that disagrees with the
+#     protocol header, an entry missing from SHA256SUMS.txt or a stale artifact
+#     from an earlier build all stop the run before the upload step.
+#   * Every published binary comes from this run. The pipeline never falls back
+#     to a file left in dist/ by a previous build.
+
 on:
   release:
     types: [published]
@@ -14,7 +28,7 @@ env:
 
 jobs:
   build-and-release:
-    name: Build, Sign & Release
+    name: Build, Verify & Release
     runs-on: macos-15
     permissions:
       contents: write
@@ -53,25 +67,32 @@ jobs:
           echo "Building version: $VERSION"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Update Component Versions
+      #  One version, or no release
+      #
+      #  VERSION is the file `make build` reads. The tag names the release. If
+      #  they disagree, one of them is wrong and the artifacts would be named
+      #  after one number while the app reports the other. This is the check
+      #  that turns that into a failed build instead of a mystery install.
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify VERSION file matches the release tag
+        run: |
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION says '$FILE_VERSION' but the release tag is '$TAG_VERSION'."
+            echo "Update VERSION in the same commit the tag points at. A release whose"
+            echo "artifacts are named after one version and report another cannot be"
+            echo "installed over an existing driver: the installer gate compares the"
+            echo "driver's own CFBundleShortVersionString, not the file name."
+            exit 1
+          fi
+          echo "✓ VERSION and the release tag agree on $TAG_VERSION"
+
       - name: Update Component Versions
         run: |
-          CURRENT_DRIVER_VERSION=$(cat packages/driver/VERSION 2>/dev/null || echo "1.0.0")
-          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-          if [ -n "$LAST_TAG" ]; then
-            DRIVER_CHANGED=$(git diff --name-only "$LAST_TAG" HEAD -- packages/driver/src packages/driver/include packages/driver/CMakeLists.txt 2>/dev/null | wc -l || echo "1")
-          else
-            DRIVER_CHANGED=1
-          fi
-
-          if [ "$DRIVER_CHANGED" -gt 0 ]; then
-            ./tools/update_versions.sh ${{ steps.version.outputs.version }}
-          else
-            ./tools/update_versions.sh ${{ steps.version.outputs.version }} --app-only
-          fi
-          echo "✓ Version update complete"
+          echo "Pinning every component to ${{ steps.version.outputs.version }}"
+          ./tools/update_versions.sh "${{ steps.version.outputs.version }}"
+          ./tools/verify_version_consistency.sh --expect "${{ steps.version.outputs.version }}"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Build All Components
@@ -94,27 +115,79 @@ jobs:
 
       - name: Build Host Engine (universal)
         run: |
+          # One scratch path per architecture. SwiftPM 6.x writes both triples to
+          # the same out/Products/Release, so sharing the default .build would
+          # overwrite the arm64 product with the x86_64 one and ship a single-arch
+          # binary to half the users.
           swift build --configuration release --package-path packages/host \
-            --triple arm64-apple-macosx
+            --triple arm64-apple-macosx --scratch-path packages/host/.build/arm64
           swift build --configuration release --package-path packages/host \
-            --triple x86_64-apple-macosx
+            --triple x86_64-apple-macosx --scratch-path packages/host/.build/x86_64
           mkdir -p packages/host/.build/universal/release
           lipo -create -output packages/host/.build/universal/release/SoundBridgeHost \
-            packages/host/.build/arm64-apple-macosx/release/SoundBridgeHost \
-            packages/host/.build/x86_64-apple-macosx/release/SoundBridgeHost
+            packages/host/.build/arm64/release/SoundBridgeHost \
+            packages/host/.build/x86_64/release/SoundBridgeHost
           echo "✓ Host engine built (universal)"
 
       - name: Build Menu Bar App (universal)
         run: |
           swift build --configuration release --package-path apps/mac/SoundBridgeApp \
-            --triple arm64-apple-macosx
+            --triple arm64-apple-macosx --scratch-path apps/mac/SoundBridgeApp/.build/arm64
           swift build --configuration release --package-path apps/mac/SoundBridgeApp \
-            --triple x86_64-apple-macosx
+            --triple x86_64-apple-macosx --scratch-path apps/mac/SoundBridgeApp/.build/x86_64
           mkdir -p apps/mac/SoundBridgeApp/.build/universal/release
           lipo -create -output apps/mac/SoundBridgeApp/.build/universal/release/SoundBridgeApp \
-            apps/mac/SoundBridgeApp/.build/arm64-apple-macosx/release/SoundBridgeApp \
-            apps/mac/SoundBridgeApp/.build/x86_64-apple-macosx/release/SoundBridgeApp
+            apps/mac/SoundBridgeApp/.build/arm64/release/SoundBridgeApp \
+            apps/mac/SoundBridgeApp/.build/x86_64/release/SoundBridgeApp
+          # Sparkle.framework is a build product too. It sits next to the executable
+          # inside the scratch directory, and create_app_bundle.sh looks for it in
+          # .build/universal/release. Without this step a clean checkout ships an app
+          # that links @rpath/Sparkle.framework and finds nothing at launch.
+          rm -rf apps/mac/SoundBridgeApp/.build/universal/release/Sparkle.framework
+          cp -R apps/mac/SoundBridgeApp/.build/arm64/release/Sparkle.framework \
+            apps/mac/SoundBridgeApp/.build/universal/release/
+          lipo -archs apps/mac/SoundBridgeApp/.build/universal/release/Sparkle.framework/Versions/B/Sparkle
           echo "✓ Menu bar app built (universal)"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Protocol Consistency & Tests
+      #
+      # Runs after the universal builds so the cached CMake configuration is
+      # already universal, and before packaging so a failure stops the release
+      # instead of shipping it. None of these are optional: a stale protocol
+      # copy is an ABI mismatch between the driver and the Host.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify shared-memory protocol
+        run: |
+          make protocol-check
+          echo "✓ Protocol source is single and copied verbatim"
+
+      - name: Run DSP tests
+        run: |
+          make test-dsp
+          echo "✓ DSP tests passed"
+
+      - name: Run Host tests
+        run: |
+          make test-host
+          echo "✓ Host tests passed (volume state model + shared-memory protocol)"
+
+      - name: Run App tests
+        run: |
+          make test-app
+          echo "✓ App tests passed"
+
+      - name: Run driver install transaction tests
+        run: |
+          # Every scenario runs against a temporary root with a fake driver. The
+          # real HAL directory is never read or written, and nothing needs sudo.
+          make test-installer
+          echo "✓ Install transaction tests passed"
+
+      - name: Run signing-argument tests
+        run: |
+          make test-codesign
+          echo "✓ codesign argument tests passed (no signature is created)"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Create App Bundle
@@ -127,23 +200,44 @@ jobs:
           echo "✓ App bundle created"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Verify the shipped Driver
+      #
+      # Reads dist/SoundBridge.app/Contents/Resources/SoundBridgeDriver.driver,
+      # i.e. the bundle CMake emitted and create_app_bundle.sh copied. Source-level
+      # checks cannot see a stale packages/driver/build or a packaging step that
+      # drops the plist, so this runs on the finished artifact and stops the
+      # release before signing if the driver disagrees with the protocol header.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify Release Driver Bundle
+        run: |
+          ./tools/verify_release_bundle.sh \
+            dist/SoundBridge.app/Contents/Resources/SoundBridgeDriver.driver \
+            "${{ steps.version.outputs.version }}"
+          echo "✓ Bundled driver matches the protocol header"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Code Sign
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       # No Apple Developer account is required. Ad-hoc signing is what Apple
       # silicon needs to execute the binaries at all, and it is enough to ship a
       # DMG through GitHub releases. macOS asks the user to approve the first
       # launch instead of trusting a notarized signature.
+      #
+      # This is NOT a Developer ID signature and must not be described as one:
+      # the signature has no certificate chain, no TeamIdentifier, and Gatekeeper
+      # has never seen it. The release notes say so in the same words.
       - name: Code Sign App (ad-hoc)
         env:
           SIGN_MODE: adhoc
         run: |
           make sign
-          echo "✓ App signed (ad-hoc)"
+          echo "✓ App signed ad-hoc (not Developer ID, not notarized)"
 
       - name: Verify Signatures
         run: |
           ./tools/verify_signatures.sh
-          echo "✓ Signatures verified"
+          codesign --verify --deep --strict --verbose=2 dist/SoundBridge.app
+          echo "✓ Ad-hoc signatures verify strictly; the bundle is sealed"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Create DMG
@@ -156,27 +250,160 @@ jobs:
       - name: Create DMG
         run: |
           ./tools/create_dmg.sh
+          test -f "dist/SoundBridge-${{ steps.version.outputs.version }}.dmg" || {
+            echo "::error::the DMG was not created under the expected name"
+            exit 1
+          }
           echo "✓ DMG created"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Create Installer Package
+      #
+      # The DMG alone cannot replace a driver: dragging the app to /Applications
+      # never touches /Library/Audio/Plug-Ins/HAL, so a user on an older driver
+      # stays there. The PKG is the artifact that owns both halves.
+      #
+      # It is unsigned and not notarized. On recent macOS the user has to approve
+      # it in System Settings; the installation guide says exactly that.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Create Installer Package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/build_installer_pkg.sh \
+            --app dist/SoundBridge.app \
+            --out dist \
+            --version "$VERSION"
+          test -f "dist/SoundBridge-$VERSION.pkg" || {
+            echo "::error::the installer package was not created under the expected name"
+            exit 1
+          }
+          echo "✓ Installer package created (unsigned, not notarized)"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Verify the packaged artifacts
+      #
+      # Three different questions, three different tools:
+      #   * verify_installer_pkg.sh  - the package's layout, scripts and gate
+      #   * verify_pkg_contents.sh   - the package carries *this* app and driver
+      #   * verify_pkg_driver.sh     - the driver extracted from the package is
+      #                                structurally sound, universal, and reports
+      #                                the expected version
+      #
+      # verify_pkg_driver.sh prints a structure verdict and a signature verdict.
+      # A structure pass is not a Developer ID pass, and the step below says so
+      # instead of printing a green line that could be read as one.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify Installer Package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/verify_installer_pkg.sh "dist/SoundBridge-$VERSION.pkg"
+
+      - name: Verify Package Contents
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/verify_pkg_contents.sh --app dist/SoundBridge.app "dist/SoundBridge-$VERSION.pkg"
+
+      - name: Verify Package Driver
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/verify_pkg_driver.sh \
+            --pkg "dist/SoundBridge-$VERSION.pkg" \
+            --expect-version "$VERSION" \
+            --expect-id com.soundbridge.driver
+          echo "The driver is structurally sound and ad-hoc signed."
+          echo "It is NOT Developer ID signed; that is expected for this pipeline."
+
+      - name: Verify Installer Version Gate
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Expands the package and runs its preinstall against temporary roots.
+          # One of the cases installs a 1.1.2 driver and asserts the answer, so a
+          # package that regressed to refusing upgrades fails here.
+          ./tools/test_installer_preinstall.sh "dist/SoundBridge-$VERSION.pkg"
+
+      - name: Verify Package Roundtrip
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/test_installer_pkg_roundtrip.sh "dist/SoundBridge-$VERSION.pkg"
+
+      - name: Verify Complete Release Payload
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/verify_release_payload.sh \
+            --pkg "dist/SoundBridge-$VERSION.pkg" \
+            --dmg "dist/SoundBridge-$VERSION.dmg" \
+            --app dist/SoundBridge.app
+          echo "✓ Six-way payload check passed"
+
+      - name: Verify Version Consistency Across Artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ./tools/verify_version_consistency.sh \
+            --expect "$VERSION" \
+            --app dist/SoundBridge.app \
+            --pkg "dist/SoundBridge-$VERSION.pkg"
+
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      #  Stage the documents that ship with the binaries
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Stage Release Documents
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          for doc in INSTALLATION_GUIDE.md RELEASE_NOTES.md; do
+            if [ ! -f "docs/$doc" ]; then
+              echo "::error::docs/$doc is missing; the release would ship without it"
+              exit 1
+            fi
+            cp "docs/$doc" dist/
+          done
+          # The notes and the guide name a version in their first lines. A copy
+          # left over from the previous release would tell users to expect the
+          # wrong build, so the version is asserted rather than assumed.
+          grep -q "$VERSION" dist/RELEASE_NOTES.md || {
+            echo "::error::dist/RELEASE_NOTES.md does not mention $VERSION"
+            exit 1
+          }
+          echo "✓ Release documents staged"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Generate Checksums
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Generate Checksums
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           cd dist
-          shasum -a 256 *.dmg > checksums.txt
-          cat checksums.txt
-          echo "✓ Checksums generated"
+          # Both binaries, by name. `*.dmg` alone is how the package went
+          # unpublished with a checksum file that looked complete.
+          shasum -a 256 "SoundBridge-$VERSION.dmg" "SoundBridge-$VERSION.pkg" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Verify Checksums
+        run: |
+          cd dist
+          shasum -a 256 -c SHA256SUMS.txt
+          lines="$(wc -l < SHA256SUMS.txt | tr -d ' ')"
+          if [ "$lines" -ne 2 ]; then
+            echo "::error::SHA256SUMS.txt has $lines entries; expected 2 (dmg + pkg)"
+            exit 1
+          fi
+          echo "✓ Checksums verified ($lines entries)"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Generate Sparkle Appcast
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Generate Sparkle Appcast
+        id: appcast
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
         run: |
-          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
-            echo "::warning::SPARKLE_ED_PRIVATE_KEY is not configured - skipping appcast, auto-update stays disabled"
+          # The appcast is optional for 1.2.0: auto-update is disabled unless the
+          # bundle carries a non-empty SUPublicEDKey, and generate_appcast.sh
+          # refuses to emit an unsigned feed. Both halves of the key pair are
+          # therefore required, and a missing pair is a skip - not a failure.
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ] || [ -z "$SPARKLE_ED_PUBLIC_KEY" ]; then
+            echo "::warning::Sparkle keys are not configured - the appcast is skipped and auto-update stays disabled in this build"
+            echo "generated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -186,18 +413,70 @@ jobs:
 
           SPARKLE_ED_PRIVATE_KEY_FILE="$KEY_FILE" ./tools/generate_appcast.sh
           rm -f "$KEY_FILE"
+          echo "generated=true" >> "$GITHUB_OUTPUT"
           echo "✓ Appcast generated"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Upload to GitHub Release
+      #  The upload is all-or-nothing
+      #
+      #  This step is the last place a missing or stale asset can be caught
+      #  cheaply. It checks the five files by name, that each is non-empty, and
+      #  that the binaries are this run's: nothing here falls back to a file an
+      #  earlier build left behind.
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify Release Assets
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ASSETS="
+            SoundBridge-$VERSION.dmg
+            SoundBridge-$VERSION.pkg
+            SHA256SUMS.txt
+            INSTALLATION_GUIDE.md
+            RELEASE_NOTES.md
+          "
+          missing=0
+          for a in $ASSETS; do
+            if [ ! -s "dist/$a" ]; then
+              echo "::error::dist/$a is missing or empty"
+              missing=$((missing + 1))
+            else
+              printf '  %-34s %s bytes\n' "$a" "$(wc -c < "dist/$a" | tr -d ' ')"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::$missing release asset(s) missing; nothing was uploaded"
+            exit 1
+          fi
+          echo "✓ All five release assets are present"
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          # Named, not globbed. `dist/*.dmg` would also pick up a file an
+          # earlier step left behind; these paths can only match what this run
+          # produced, and fail_on_unmatched_files turns a miss into a failure.
           files: |
-            dist/*.dmg
-            dist/checksums.txt
-            dist/appcast/appcast.xml
-          fail_on_unmatched_files: false
+            dist/SoundBridge-${{ steps.version.outputs.version }}.dmg
+            dist/SoundBridge-${{ steps.version.outputs.version }}.pkg
+            dist/SHA256SUMS.txt
+            dist/INSTALLATION_GUIDE.md
+            dist/RELEASE_NOTES.md
+          # A published release with half its files is worse than a failed run:
+          # fail_on_unmatched_files is what makes the list above a contract
+          # instead of a wish.
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The feed is uploaded by a second call rather than in the list above:
+      # it only exists when both Sparkle secrets are configured, and putting a
+      # conditional file in a fail_on_unmatched_files list would fail every
+      # first release instead of shipping without auto-update.
+      - name: Upload Sparkle Appcast
+        if: steps.appcast.outputs.generated == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/appcast/appcast.xml
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

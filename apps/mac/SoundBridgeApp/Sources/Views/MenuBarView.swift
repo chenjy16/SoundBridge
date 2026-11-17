@@ -21,6 +21,7 @@ private let soundbridgeFont: Font = {
 struct MenuBarView: View {
     @StateObject private var volumeController = VolumeController.shared
     @StateObject private var eqController = EQController(deviceUID: "default")
+    @StateObject private var hostStatus = HostStatusModel.shared
     @State private var showDeviceList = false
 
     var body: some View {
@@ -33,6 +34,17 @@ struct MenuBarView: View {
 
             Divider()
                 .padding(.horizontal, 12)
+
+            // 1.5 Host status. Only rendered when there is something to say:
+            // a healthy popover is unchanged, which is what "do not rework the
+            // UI" means in practice. The sentence comes from `HostRunState`,
+            // so this row can never disagree with the log line or the notice.
+            if hostStatus.showsStatusLine {
+                HostStatusRow(state: hostStatus.state)
+
+                Divider()
+                    .padding(.horizontal, 12)
+            }
 
             // 2. Volume slider (only for fixed-volume devices)
             if volumeController.isFixedVolumeDevice {
@@ -93,6 +105,42 @@ struct MenuBarView: View {
             guard !uid.isEmpty else { return }
             eqController.attachSharedMemory(for: uid)
         }
+    }
+}
+
+// MARK: - Host Status Row
+
+/// One line describing what the audio host is doing, shown only when that is
+/// not the obvious "nothing to report".
+///
+/// Deliberately not a button and not a link. Every problem that has a remedy
+/// the app can perform is already handled by reconnecting to the host; the ones
+/// that need a download are explained by `DriverCompatibilityNotice`, which is
+/// where the versions and the release page belong. Adding an action here would
+/// be the upgrade entry point Phase 2.1.4 removed.
+struct HostStatusRow: View {
+    let state: HostRunState
+
+    private var tint: Color {
+        state.isProblem ? .orange : .secondary
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: state.isProblem ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 11))
+                .foregroundColor(tint)
+
+            Text(state.shortMessage)
+                .font(.system(size: 11))
+                .foregroundColor(tint)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 }
 

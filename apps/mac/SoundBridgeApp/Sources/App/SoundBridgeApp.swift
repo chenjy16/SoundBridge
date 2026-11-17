@@ -20,6 +20,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set to true during uninstall to suppress Host terminationHandler from
     /// calling NSApp.terminate prematurely.
     var isUninstalling = false
+    /// One compatibility alert per launch. The check runs once anyway; this keeps
+    /// a future second caller from stacking windows on top of each other.
+    private var didPresentCompatibilityNotice = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Register custom font
@@ -45,11 +48,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         launchHostIfNeeded()
 
         // Start IPC monitoring for device state updates from Host
-        IPCController.shared.onDeviceStateChanged = { _ in
+        IPCController.shared.onDeviceStateChanged = { [weak self] state in
             VolumeController.shared.refreshDeviceList()
             VolumeController.shared.findAndBindProxyDevice()
+            self?.applyHostLifecycle(state.lifecycle)
         }
         IPCController.shared.startMonitoring()
+
+        // The lock decides "is a Host alive"; the report decides what it is doing.
+        // Reading only the file is how a killed Host kept looking healthy.
+        applyHostLifecycle(IPCController.shared.latestLifecycle)
 
         // Retry proxy device binding after a short delay to handle the race
         // where Host hasn't created the proxy device yet at startup.
@@ -89,41 +97,101 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updaterController?.updater.checkForUpdatesInBackground()
     }
 
-    func checkDriverVersionMismatch() {
-        // Only check if driver is already installed
-        guard VersionManager.isDriverInstalled() else {
-            print("Driver not installed - skipping version check")
+    /// Inspect the installed driver at launch and record what was found.
+    ///
+    /// Phase 2.1.3 removed the prompt this used to raise. The gate still runs so
+    /// a mismatch is visible in logs and in the returned status, but nothing on
+    /// this path may open a window: an unsolicited upgrade prompt is a product
+    /// decision this build does not make. See `DriverUpgradePolicy`.
+    ///
+    /// `showDriverUpdatePrompt` / `performDriverUpdate` are kept intact and
+    /// deliberately unwired — the capability stays tested, the entry point is
+    /// not shipped.
+    @discardableResult
+    func checkDriverVersionMismatch() -> DriverVersionStatus {
+        let status = DriverInstaller().currentInstallStatus()
+
+        switch status {
+        case .notInstalled:
+            print("Driver not installed - no version check to run")
+        case .compatible:
+            print("✓ Driver is up to date (\(status.summary))")
+        case .newer:
+            // Overwriting a newer driver with an older one is a silent downgrade.
+            print("Installed driver is newer than this build - leaving it alone (\(status.summary))")
+        case .expectedVersionUnavailable:
+            print("Bundled driver version is unknown - skipping version check")
+        case .outdated, .metadataUnreadable, .protocolIncompatible:
+            // Recorded, not acted on. No install, no download, no coreaudiod
+            // restart — but also not silent: a user with no audio deserves the
+            // reason. The notice carries no install action (2.1.4 §2.4).
+            print("Driver is not usable by this build (\(status.summary)); no upgrade prompt is shown")
+        }
+
+        presentCompatibilityNoticeIfNeeded(status)
+        return status
+    }
+
+    /// Explain an unusable driver once per launch.
+    ///
+    /// Text only. `DriverCompatibilityNotice` has no install path, this method
+    /// calls nothing privileged, and the download location comes from the app's
+    /// own `SUFeedURL` rather than from a URL typed in here.
+    ///
+    /// `shouldPresent` is checked separately from `make` since Phase 3.2C:
+    /// `make` now also describes "the driver is newer than this app", which is a
+    /// state to explain on screen rather than an alert to raise at launch. This
+    /// guard is what keeps that notice off the launch path.
+    private func presentCompatibilityNoticeIfNeeded(_ status: DriverVersionStatus) {
+        guard !didPresentCompatibilityNotice else { return }
+        guard DriverCompatibilityNotice.shouldPresent(for: status) else { return }
+        guard let notice = DriverCompatibilityNotice.make(
+            for: status,
+            appVersion: VersionManager.appVersion() ?? "unknown",
+            releasePageURL: DriverCompatibilityNotice.configuredReleasePageURL
+        ) else {
             return
         }
 
-        // Check for version mismatch
-        if VersionManager.driverNeedsUpdate() {
-            let installedVersion = VersionManager.installedDriverVersion() ?? "unknown"
-            let bundledVersion = VersionManager.bundledDriverVersion() ?? "unknown"
+        didPresentCompatibilityNotice = true
+        print("[Compatibility] \(notice.lines.joined(separator: " | "))")
+        showAlert(notice.title, notice.message)
+    }
 
-            print("Driver version mismatch detected:")
-            print("  Installed: \(installedVersion)")
-            print("  Bundled: \(bundledVersion)")
+    /// Fold the Host's lifecycle report into the state the UI shows.
+    ///
+    /// Two inputs on purpose: the instance lock answers "is a Host alive" and the
+    /// report answers "what is it doing". Trusting either one alone is the bug
+    /// this replaces — a stale `ready` file from a killed Host, or a live Host
+    /// that never found its proxy device and said nothing.
+    private func applyHostLifecycle(_ report: HostLifecycleReport?) {
+        let state = HostRunState.resolve(
+            report: report,
+            hostRunning: HostInstanceProbe.isHostRunning()
+        )
+        HostStatusModel.shared.update(state, report: report)
 
-            // Only prompt if we haven't already prompted for this version
-            if OnboardingState.lastDriverVersionCheck() != bundledVersion {
-                // Show update prompt
-                showDriverUpdatePrompt(
-                    currentVersion: installedVersion,
-                    newVersion: bundledVersion
-                )
-
-                // Mark this version as checked
-                OnboardingState.updateLastDriverVersionCheck(bundledVersion)
-            } else {
-                print("Already prompted for version \(bundledVersion), skipping")
-            }
-        } else {
-            print("✓ Driver version is up to date")
+        if state.isProblem {
+            print("[HostState] \(state.shortMessage) — \(report?.detail ?? "no detail reported")")
         }
     }
 
+    /// Present the driver update window.
+    ///
+    /// Not called from any launch path as of Phase 2.1.3. Kept so a future
+    /// release can wire it to an explicit user action without rebuilding the
+    /// upgrade flow from scratch.
+    ///
+    /// The policy check is deliberately inside the function rather than at each
+    /// call site: one switch is easier to review than an argument about whether
+    /// every caller remembered, and it means a future caller cannot ship an
+    /// unsolicited prompt by accident.
     func showDriverUpdatePrompt(currentVersion: String, newVersion: String) {
+        guard DriverUpgradePolicy.allowsUserFacingPrompt else {
+            print("Driver update prompt suppressed by DriverUpgradePolicy (\(currentVersion) -> \(newVersion))")
+            return
+        }
+
         // Close existing window if any
         driverUpdateWindow?.close()
 
@@ -150,20 +218,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         driverUpdateWindow?.close()
         driverUpdateWindow = nil
 
-        // Use existing DriverInstaller logic
+        // Use existing DriverInstaller logic. The install intent is derived from
+        // the current status rather than assumed: this is an upgrade path, so a
+        // first install cannot be launched from here, and a compatible or newer
+        // driver is refused by the installer's intent check.
         let installer = DriverInstaller()
 
         Task {
             do {
-                try await installer.installDriver()
-                print("✓ Driver updated successfully")
+                let status = installer.currentInstallStatus()
+                guard let intent = status.installIntent, !intent.isFirstInstall else {
+                    print("Driver update requested but nothing to upgrade (\(status.summary))")
+                    return
+                }
 
-                // Show success alert
+                try await installer.installDriver(intent: intent)
+
+                // Re-read the gate instead of trusting the call above. This is
+                // what makes a phantom "updated to X" alert impossible: the
+                // alert now reflects what is actually on disk.
+                let verified = installer.currentInstallStatus()
+                print("Driver update finished: \(verified.summary)")
+
                 await MainActor.run {
                     let alert = NSAlert()
-                    alert.messageText = "Driver Updated"
-                    alert.informativeText = "The SoundBridge audio driver has been updated to version \(VersionManager.bundledDriverVersion() ?? "unknown")."
-                    alert.alertStyle = .informational
+                    if verified.isCompatible {
+                        alert.messageText = "Driver Updated"
+                        alert.informativeText = "The SoundBridge audio driver has been updated to version \(VersionManager.bundledDriverVersion() ?? "unknown")."
+                        alert.alertStyle = .informational
+                    } else if case .newer = verified {
+                        alert.messageText = "Driver Kept"
+                        alert.informativeText = "The installed driver is newer than this build, so it was left untouched (\(verified.summary))."
+                        alert.alertStyle = .informational
+                    } else {
+                        alert.messageText = "Update Failed"
+                        alert.informativeText = "The driver still does not match this build: \(verified.summary)"
+                        alert.alertStyle = .critical
+                    }
                     alert.addButton(withTitle: "OK")
                     alert.runModal()
                 }
@@ -380,6 +471,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Clean up temporary files that keep proxies alive.
+    ///
+    /// `.lock` files are skipped. The Host's single-instance lock lives in the
+    /// same directory, and unlinking it is not harmless: the next Host creates a
+    /// *new* inode and locks that, so two Hosts can each believe they are the only
+    /// one. A leftover lock file costs nothing; a deleted one costs a shared
+    /// memory mapping.
     private func cleanupTempIPC(logger: (String) -> Void) {
         let fm = FileManager.default
         let controlFile = "/tmp/soundbridge-devices.txt"
@@ -391,6 +488,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Remove shared memory files the driver might watch
         if let tmpItems = try? fm.contentsOfDirectory(atPath: "/tmp") {
             for item in tmpItems where item.hasPrefix("soundbridge-") {
+                if item.hasSuffix(HostInstanceProbe.lockSuffix) {
+                    logger("Keeping instance lock file /tmp/\(item)")
+                    continue
+                }
                 let path = "/tmp/\(item)"
                 logger("Removing shared memory file \(path)")
                 unlink(path)
@@ -572,91 +673,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
-    func checkAndLoadDriverIfNeeded() {
-        // Check if SoundBridge driver is already loaded
-        if isDriverLoaded() {
-            print("SoundBridge driver already loaded, no need to restart coreaudiod")
-            return
-        }
+    // Phase 2.1.4 removed `checkAndLoadDriverIfNeeded()` and `isDriverLoaded()`
+    // from this class. Both were dead (zero call sites) and neither answered a
+    // question this build is allowed to act on.
+    //
+    // `isDriverLoaded()` shelled out to `system_profiler SPAudioDataType`, which
+    // lists *audio devices* — proxies the Host creates — so it reported a
+    // missing driver whenever the Host was down, and conflated "HAL loaded the
+    // bundle" with "a proxy device exists".
+    //
+    // `checkAndLoadDriverIfNeeded()` would have requested admin rights to run
+    // `killall coreaudiod` as part of a launch check, and shown developer text
+    // (`cd packages/driver && ./install.sh`) to end users. Phase 2.1.4 forbids
+    // both.
+    //
+    // The question they were reaching for is now answered by the Host's own
+    // lifecycle report (`driverFile`, `driverLoad`, `halDiscovery`,
+    // `proxyDevice`), which arrives through IPC and is rendered by
+    // `HostRunState`. Nothing on the app side inspects the HAL directory or
+    // restarts `coreaudiod`; the only remaining caller of `killall coreaudiod`
+    // is `DriverInstaller`, inside an explicit install after a user action.
 
-        print("WARNING: SoundBridge driver not detected, attempting to load...")
-
-        // Check if driver is installed
-        let driverPath = "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
-        guard FileManager.default.fileExists(atPath: driverPath) else {
-            showAlert(
-                "Driver Not Installed",
-                "SoundBridge driver is not installed at \(driverPath)\n\nInstall it with:\ncd packages/driver && ./install.sh && sudo killall coreaudiod"
-            )
-            return
-        }
-
-        // Attempt to restart coreaudiod
-        // This uses AppleScript to request admin privileges
-        let script = """
-        do shell script "killall coreaudiod" with administrator privileges
-        """
-
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        appleScript?.executeAndReturnError(&error)
-
-        if let error = error {
-            print("Failed to restart coreaudiod: \(error)")
-            showAlert("Driver Load Failed", "Could not restart coreaudiod. You may need to manually run:\nsudo killall coreaudiod")
-        } else {
-            print("coreaudiod restarted successfully")
-            // Wait a bit for coreaudiod to restart
-            Thread.sleep(forTimeInterval: 2.0)
-        }
-    }
-
-    func isDriverLoaded() -> Bool {
-        // Use system_profiler to check if SoundBridge devices are visible
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                return output.contains("SoundBridge")
-            }
-        } catch {
-            print("Failed to check driver status: \(error)")
-        }
-
-        return false
-    }
-
+    /// Launch the Host unless one already holds this user's instance lock.
+    ///
+    /// The lock replaced `pgrep -f SoundBridgeHost`. Process-name matching had no
+    /// atom — two launches a millisecond apart both saw "not running" — and it
+    /// matched any command line containing the string. The Host now takes an
+    /// exclusive `flock` for its whole life, so asking the same file is both
+    /// raceless and immune to look-alikes.
     func launchHostIfNeeded() {
-        // Check if SoundBridgeHost is already running
-        let task = Process()
-        task.launchPath = "/usr/bin/pgrep"
-        task.arguments = ["-f", "SoundBridgeHost"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.launch()
-        task.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if output.isEmpty {
-            // Host not running, launch it
-            print("Launching SoundBridgeHost...")
-            startHost()
-        } else {
-            print("SoundBridgeHost already running (PID: \(output))")
+        if HostInstanceProbe.isHostRunning() {
+            let owner = HostInstanceProbe.ownerDescription() ?? "owner unknown"
+            print("SoundBridgeHost already running (\(owner)); not starting a second one")
+            applyHostLifecycle(IPCController.shared.latestLifecycle)
+            return
         }
+
+        print("No SoundBridgeHost owns \(HostInstanceProbe.lockPath()); launching one")
+        startHost()
     }
 
     func startHost() {

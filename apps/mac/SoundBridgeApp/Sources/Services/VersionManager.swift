@@ -81,40 +81,18 @@ struct VersionManager {
 		return FileManager.default.fileExists(atPath: driverPath)
 	}
 
-	/// Check if driver needs update (bundled version > installed version)
-	static func driverNeedsUpdate() -> Bool {
-		guard let installedVersion = installedDriverVersion(),
-			  let bundledVersion = bundledDriverVersion() else {
-			// If driver not installed, it needs installation (not update)
-			return false
-		}
-
-		// Only update if bundled version is newer than installed version
-		return isVersionOlder(installedVersion, than: bundledVersion)
-	}
-
 	// MARK: - Version Comparison
 
 	/// Compare two semantic versions
 	/// - Returns: true if v1 < v2, false otherwise
 	static func isVersionOlder(_ v1: String, than v2: String) -> Bool {
-		let components1 = v1.split(separator: ".").compactMap { Int($0) }
-		let components2 = v2.split(separator: ".").compactMap { Int($0) }
-
-		for i in 0..<max(components1.count, components2.count) {
-			let c1 = i < components1.count ? components1[i] : 0
-			let c2 = i < components2.count ? components2[i] : 0
-
-			if c1 < c2 { return true }
-			if c1 > c2 { return false }
-		}
-
-		return false
+		return DriverVersionGate.compare(v1, v2) < 0
 	}
 
-	/// Compare two semantic versions for equality
+	/// Compare two semantic versions for equality.
+	/// Comparison is numeric and pads missing components, so "1.2" equals "1.2.0".
 	static func areVersionsEqual(_ v1: String, _ v2: String) -> Bool {
-		return v1 == v2
+		return DriverVersionGate.compare(v1, v2) == 0
 	}
 
 	// MARK: - Bundle Discovery

@@ -56,15 +56,46 @@ class DriverInstaller: ObservableObject {
     private let driverName = "SoundBridgeDriver.driver"
     private let driverDestination = "/Library/Audio/Plug-Ins/HAL"
 
-    /// Install the driver with progress updates
-    func installDriver() async throws {
+    /// Path of the driver bundle this app installs.
+    private var installedDriverURL: URL {
+        URL(fileURLWithPath: "\(driverDestination)/\(driverName)")
+    }
+
+    /// Compare what is installed right now against what this build ships.
+    ///
+    /// Reading the installed `Info.plist` is cheap, unprivileged and safe to run
+    /// at launch. Every install decision resolves through here, so the privileged
+    /// copy step only runs for a reason the caller can name.
+    func currentInstallStatus() -> DriverVersionStatus {
+        DriverVersionGate.evaluate(
+            bundleURL: installedDriverURL,
+            expectedVersion: VersionManager.bundledDriverVersion() ?? "",
+            expectedProtocol: DriverVersionGate.expectedProtocolVersion
+        )
+    }
+
+    /// Install the driver with progress updates.
+    ///
+    /// A previous version short-circuited on `isDriverInstalled()`, so a version
+    /// mismatch detected at launch was never repaired: the call returned
+    /// `.complete` without copying anything, and the caller reported a successful
+    /// update that never happened. The gate below replaces that check.
+    ///
+    /// The caller must say *why* it is installing. A launch check that noticed a
+    /// version mismatch can no longer reach the privileged copy step by accident:
+    /// it has no intent to pass. Only `OnboardingView`'s first-install flow does.
+    func installDriver(intent: DriverInstallIntent) async throws {
         await MainActor.run { state = .checkingExisting; progress = 0.1 }
 
-        // Check if driver is already installed (fast file check)
-        if isDriverInstalled() {
-            print("Driver already installed, skipping installation")
-            await MainActor.run { state = .complete; progress = 1.0 }
-            return
+        let status = currentInstallStatus()
+        print("Driver install gate: intent=\(intent.summary) status=\(status.summary)")
+
+        guard intent.permits(status) else {
+            print("Driver install gate: \(intent.summary) is not allowed against \(status.summary)")
+            throw DriverInstallError.intentDoesNotMatchStatus(
+                intent: intent.summary,
+                status: status.summary
+            )
         }
 
         await MainActor.run { state = .copying; progress = 0.3 }
@@ -88,47 +119,31 @@ class DriverInstaller: ObservableObject {
 
         await MainActor.run { state = .verifying; progress = 0.9 }
 
-        // Verify installation by checking if file exists (fast check)
-        let driverPath = "\(driverDestination)/\(driverName)"
-        if FileManager.default.fileExists(atPath: driverPath) {
-            print("Driver verified: file exists at \(driverPath)")
-        } else {
-            throw DriverInstallError.copyFailed("Driver file not found after installation")
+        // Verify by re-running the same gate rather than looking for the file.
+        // File existence was exactly what let a stale driver pass verification.
+        let verified = currentInstallStatus()
+        guard verified.isCompatible else {
+            print("Driver verification failed: \(verified.summary)")
+            throw DriverInstallError.verificationFailed
         }
 
         await MainActor.run { state = .complete; progress = 1.0 }
-        print("Driver installed successfully")
+        print("Driver installed successfully: \(verified.summary)")
     }
 
-    /// Check if driver is currently loaded
-    func isDriverLoaded() -> Bool {
-        let task = Process()
-        task.launchPath = "/usr/sbin/system_profiler"
-        task.arguments = ["SPAudioDataType"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                return output.contains("SoundBridge")
-            }
-        } catch {
-            print("Failed to check driver status: \(error)")
-        }
-
-        return false
-    }
-
-    /// Check if driver is installed (file exists)
+    /// Whether a driver bundle exists at the install path.
+    ///
+    /// This is a display helper, not an install gate — a bundle can exist and
+    /// still be the wrong version. Use `currentInstallStatus()` for decisions.
+    ///
+    /// Phase 2.1.4 removed `isDriverLoaded()`, which used to sit above this and
+    /// shell out to `system_profiler SPAudioDataType` looking for the word
+    /// "SoundBridge". That output lists audio *devices*, not loaded bundles, so
+    /// the answer mixed "HAL loaded the driver" with "the Host created a proxy
+    /// device" and was wrong whenever the Host was down. The Host's lifecycle
+    /// report answers it properly, per level, via IPC.
     func isDriverInstalled() -> Bool {
-        let driverPath = "\(driverDestination)/\(driverName)"
-        return FileManager.default.fileExists(atPath: driverPath)
+        FileManager.default.fileExists(atPath: installedDriverURL.path)
     }
 
     /// Find driver bundle in app resources
@@ -154,15 +169,32 @@ class DriverInstaller: ObservableObject {
     private func installDriverWithPrivileges(from source: String) async throws {
         // Escape single quotes in paths for shell
         let escapedSource = source.replacingOccurrences(of: "'", with: "'\\''")
-        let escapedDest = driverDestination.replacingOccurrences(of: "'", with: "'\\''")
         let driverPath = "\(driverDestination)/\(driverName)"
         let escapedDriverPath = driverPath.replacingOccurrences(of: "'", with: "'\\''")
 
+        // Staged replace, not a merge.
+        //
+        // `cp -R src dest/` against an existing bundle copies *into* it: every
+        // file the incoming build does not contain survives. An upgrade could
+        // therefore leave a half-old, half-new driver that still reports the new
+        // version from its Info.plist — the half-installed state that makes
+        // "installed version" and "what is actually loaded" disagree.
+        //
+        // The new bundle is staged next to the old one in the same directory and
+        // swapped in by rename, so the installed bundle is always exactly the one
+        // this app ships, and the window in which no bundle exists is one rename
+        // rather than one recursive copy.
+        let stagingPath = "\(driverDestination)/.\(driverName).new"
+        let escapedStaging = stagingPath.replacingOccurrences(of: "'", with: "'\\''")
+
         // Combine all operations into single command chain
         let script = """
-        do shell script "cp -R '\(escapedSource)' '\(escapedDest)/' && \
-        chown -R root:wheel '\(escapedDriverPath)' && \
-        chmod -R 755 '\(escapedDriverPath)' && \
+        do shell script "rm -rf '\(escapedStaging)' && \
+        cp -R '\(escapedSource)' '\(escapedStaging)' && \
+        chown -R root:wheel '\(escapedStaging)' && \
+        chmod -R 755 '\(escapedStaging)' && \
+        rm -rf '\(escapedDriverPath)' && \
+        mv '\(escapedStaging)' '\(escapedDriverPath)' && \
         killall coreaudiod" with administrator privileges
         """
 
@@ -185,112 +217,39 @@ class DriverInstaller: ObservableObject {
         }
     }
 
-    /// Copy driver using AppleScript with admin privileges
-    @MainActor
-    private func copyDriverWithPrivileges(from source: String) async throws {
-        // Escape single quotes in paths for shell
-        let escapedSource = source.replacingOccurrences(of: "'", with: "'\\''")
-        let escapedDest = driverDestination.replacingOccurrences(of: "'", with: "'\\''")
-
-        let script = "do shell script \"cp -R '\(escapedSource)' '\(escapedDest)/'\" with administrator privileges"
-
-        let appleScript = NSAppleScript(source: script)
-
-        // Execute on main thread (AppleScript requires it)
-        var errorDict: NSDictionary?
-        appleScript?.executeAndReturnError(&errorDict)
-
-        if let errorDict = errorDict,
-           let errorMessage = errorDict["NSAppleScriptErrorMessage"] as? String {
-            print("Failed to copy driver: \(errorMessage)")
-            throw DriverInstallError.copyFailed(errorMessage)
-        }
-    }
-
-    /// Set driver permissions using AppleScript
-    @MainActor
-    private func setDriverPermissions() async throws {
-        let driverPath = "\(driverDestination)/\(driverName)"
-        let escapedPath = driverPath.replacingOccurrences(of: "'", with: "'\\''")
-
-        let script = "do shell script \"chown -R root:wheel '\(escapedPath)' && chmod -R 755 '\(escapedPath)'\" with administrator privileges"
-
-        let appleScript = NSAppleScript(source: script)
-
-        // Execute on main thread (AppleScript requires it)
-        var errorDict: NSDictionary?
-        appleScript?.executeAndReturnError(&errorDict)
-
-        if let errorDict = errorDict,
-           let errorMessage = errorDict["NSAppleScriptErrorMessage"] as? String {
-            print("Failed to set permissions: \(errorMessage)")
-            throw DriverInstallError.permissionsFailed(errorMessage)
-        }
-    }
-
-    /// Restart coreaudiod using AppleScript
-    @MainActor
-    private func restartAudio() async throws {
-        let script = "do shell script \"killall coreaudiod\" with administrator privileges"
-
-        let appleScript = NSAppleScript(source: script)
-
-        // Execute on main thread (AppleScript requires it)
-        var errorDict: NSDictionary?
-        appleScript?.executeAndReturnError(&errorDict)
-
-        if let errorDict = errorDict,
-           let errorMessage = errorDict["NSAppleScriptErrorMessage"] as? String {
-            print("Failed to restart coreaudiod: \(errorMessage)")
-            throw DriverInstallError.audioRestartFailed(errorMessage)
-        }
-
-        print("coreaudiod restarted")
-    }
-
-    /// Uninstall driver (for testing)
-    func uninstallDriver() throws {
-        let driverPath = "\(driverDestination)/\(driverName)"
-        let escapedPath = driverPath.replacingOccurrences(of: "'", with: "'\\''")
-
-        let script = "do shell script \"rm -rf '\(escapedPath)'\" with administrator privileges"
-
-        let appleScript = NSAppleScript(source: script)
-        var errorDict: NSDictionary?
-        appleScript?.executeAndReturnError(&errorDict)
-
-        if let errorDict = errorDict {
-            let errorMessage = errorDict["NSAppleScriptErrorMessage"] as? String ?? "Unknown error"
-            throw DriverInstallError.uninstallFailed(errorMessage)
-        }
-
-        print("Driver uninstalled")
-    }
+    // Phase 2.1.4 removed three unused private helpers here:
+    // `copyDriverWithPrivileges`, `setDriverPermissions` and `restartAudio`.
+    //
+    // `installDriverWithPrivileges` already performs all three steps in one
+    // `do shell script ... with administrator privileges`, so these were never
+    // called. Keeping them cost more than dead bytes: each was a separate site
+    // that could ask for admin rights and a separate `killall coreaudiod` in the
+    // source tree, which makes "what can this build do without a user action?"
+    // harder to answer than it should be. There is now exactly one privileged
+    // code path, and it is reachable only from `installDriver(intent:)` after an
+    // intent check and an explicit user action.
 }
 
 /// Driver installation errors
 enum DriverInstallError: Error, LocalizedError {
     case driverNotFound
     case copyFailed(String)
-    case permissionsFailed(String)
-    case audioRestartFailed(String)
     case verificationFailed
-    case uninstallFailed(String)
+    /// The caller asked for something the installed state does not justify — a
+    /// first install over an existing bundle, or an upgrade over a compatible or
+    /// newer one.
+    case intentDoesNotMatchStatus(intent: String, status: String)
 
     var errorDescription: String? {
         switch self {
+        case .intentDoesNotMatchStatus(let intent, let status):
+            return "Refusing to install (\(intent)) against an installed driver that does not need it (\(status))"
         case .driverNotFound:
             return "Driver bundle not found in app resources"
         case .copyFailed(let message):
             return "Failed to copy driver: \(message)"
-        case .permissionsFailed(let message):
-            return "Failed to set permissions: \(message)"
-        case .audioRestartFailed(let message):
-            return "Failed to restart audio system: \(message)"
         case .verificationFailed:
             return "Driver installation could not be verified"
-        case .uninstallFailed(let message):
-            return "Failed to uninstall driver: \(message)"
         }
     }
 }
