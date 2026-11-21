@@ -46,8 +46,8 @@ enum HostExitCode {
 /// - The descriptor is held for the life of the process, so `exit()`, SIGTERM
 ///   and SIGKILL all release it without any cleanup code running. A crashed
 ///   Host cannot leave the lock held.
-/// - The path is per-UID, so two logged-in users never contend, while two
-///   instances of the same user always do.
+/// - 每用户锁提供 Session 记录；生产入口还持有全局锁，以保护所有用户
+///   共用的控制文件和共享内存路径。
 /// - The file is never removed on release. Unlinking a lock file is how a lock
 ///   stops protecting anything: the next process creates a *new* inode and both
 ///   can hold "the" lock. A leftover file is harmless, because an unheld flock
@@ -73,12 +73,26 @@ final class HostInstanceLock {
     /// reason about than a name that depends on the other side remembering.
     static let lockSuffix = RF_INSTANCE_LOCK_PATH_SUFFIX
 
+    /// 与共享的控制文件一样，生产环境的互斥范围跨所有登录用户。
+    static let globalPath = "/tmp/com.soundbridge.host-global.lock"
+
     let path: String
+    private let sharedPath: String?
+    private var sharedFD: Int32 = -1
     private var fd: Int32 = -1
     private(set) var isHeld = false
+    /// 仅在成功持有锁期间有效；每次重新获取锁时生成新的会话标识。
+    private(set) var sessionID: UUID?
 
-    init(path: String = HostInstanceLock.defaultPath()) {
+    /// 默认生产入口同时持有全局锁与每用户锁。
+    convenience init() {
+        self.init(path: Self.defaultPath(), globalPath: Self.globalPath)
+    }
+
+    /// 自定义路径供隔离测试使用；需要验证全局互斥时也须注入该路径。
+    init(path: String, globalPath: String? = nil) {
         self.path = path
+        self.sharedPath = globalPath
     }
 
     deinit {
@@ -92,6 +106,10 @@ final class HostInstanceLock {
     /// pretending to be exclusive.
     func acquire(maxAttempts: Int = 3) -> HostInstanceAcquireResult {
         if isHeld { return .acquired }
+        if let sharedPath, let failure = acquireGlobalLock(path: sharedPath) {
+            return failure
+        }
+        defer { if !isHeld { releaseGlobalLock() } }
 
         for attempt in 1...maxAttempts {
             // No O_EXCL: the file is expected to persist. Existence is not the
@@ -129,9 +147,20 @@ final class HostInstanceLock {
                 continue
             }
 
+            var info = stat()
+            guard fstat(candidate, &info) == 0,
+                  (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid() else {
+                _ = _lockFileDescriptor(candidate, LOCK_UN)
+                close(candidate)
+                return .failed(reason: "lock file is not a regular file owned by this user")
+            }
             fd = candidate
             isHeld = true
-            writeOwnerRecord()
+            sessionID = UUID()
+            guard writeOwnerRecord() else {
+                release()
+                return .failed(reason: "could not publish lock session record")
+            }
             logger.info("Instance lock acquired: \(self.path, privacy: .public) (pid \(getpid()))")
             return .acquired
         }
@@ -141,13 +170,14 @@ final class HostInstanceLock {
 
     /// Release on the normal exit path. The file stays; see the type comment.
     func release() {
-        guard fd >= 0 else { return }
-        if isHeld {
-            _ = _lockFileDescriptor(fd, LOCK_UN)
+        if fd >= 0 {
+            if isHeld { _ = _lockFileDescriptor(fd, LOCK_UN) }
+            close(fd)
+            fd = -1
         }
-        close(fd)
-        fd = -1
         isHeld = false
+        sessionID = nil
+        releaseGlobalLock()
     }
 
     /// What the current owner recorded, for logs and for a second instance's
@@ -179,18 +209,66 @@ final class HostInstanceLock {
 
     // MARK: - Private
 
-    private func writeOwnerRecord() {
-        guard fd >= 0 else { return }
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let record = "pid=\(getpid()) uid=\(getuid()) since=\(stamp)\n"
-        guard let data = record.data(using: .utf8) else { return }
+    /// 协作的新版 Host 共用稳定 inode；旧 Host 不参与此锁。
+    private func acquireGlobalLock(path: String) -> HostInstanceAcquireResult? {
+        var candidate = open(path, O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o644)
+        if candidate >= 0 {
+            // 不依赖调用者的 umask，其他用户需要能打开此锁文件。
+            guard fchmod(candidate, 0o644) == 0 else {
+                close(candidate)
+                return .failed(reason: "cannot set global lock permissions")
+            }
+        } else if errno == EEXIST {
+            candidate = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        }
+        guard candidate >= 0 else {
+            return .failed(reason: "global lock open: \(String(cString: strerror(errno)))")
+        }
+        var info = stat()
+        guard fstat(candidate, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            close(candidate)
+            return .failed(reason: "global lock is not a regular file")
+        }
+        if _lockFileDescriptor(candidate, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            close(candidate)
+            if code == EWOULDBLOCK || code == EAGAIN {
+                return .heldByAnotherInstance(owner: "another user or Host holds the global lock")
+            }
+            return .failed(reason: "global flock: \(String(cString: strerror(code)))")
+        }
+        guard Self.pathRefersToSameFile(fd: candidate, path: path) else {
+            _ = _lockFileDescriptor(candidate, LOCK_UN)
+            close(candidate)
+            return .failed(reason: "global lock file was replaced")
+        }
+        sharedFD = candidate
+        return nil
+    }
 
-        // Best effort: a read-only-but-lockable descriptor would make this fail,
-        // and a missing owner line must never stop the Host from starting.
-        _ = ftruncate(fd, 0)
-        data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            _ = pwrite(fd, base, raw.count, 0)
+    private func releaseGlobalLock() {
+        guard sharedFD >= 0 else { return }
+        _ = _lockFileDescriptor(sharedFD, LOCK_UN)
+        close(sharedFD)
+        sharedFD = -1
+    }
+
+    private func writeOwnerRecord() -> Bool {
+        guard fd >= 0, let sessionID else { return false }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        // 记录与 flock 一起验证；单独读取记录不能证明进程仍然持锁。
+        let record = "pid=\(getpid()) uid=\(getuid()) since=\(stamp) session=\(sessionID.uuidString)\n"
+        guard let data = record.data(using: .utf8), ftruncate(fd, 0) == 0 else { return false }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return false }
+            var written = 0
+            while written < raw.count {
+                let n = pwrite(fd, base.advanced(by: written), raw.count - written, off_t(written))
+                if n < 0 && errno == EINTR { continue }
+                guard n > 0 else { return false }
+                written += n
+            }
+            return true
         }
     }
 

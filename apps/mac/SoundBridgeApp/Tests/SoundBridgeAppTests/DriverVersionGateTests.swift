@@ -436,13 +436,42 @@ final class DriverVersionGateTests: XCTestCase {
 
     // MARK: - Consistency guard
 
-    func testExpectedProtocolVersionMatchesSharedHeader() {
-        // If this fires, RFSharedAudio.h was bumped without updating the shared
-        // memory layout expectations that the app was built against.
+    func testExpectedProtocolVersionMatchesTheDriverThePackageShips() throws {
+        // The gate's expected protocol is compiled in from RFSharedAudio.h, so
+        // comparing it to a literal proves nothing: the literal is either the
+        // same number (always passes) or a stale one (always fails). What can
+        // actually drift is the *other* place the protocol is recorded — the
+        // driver Info.plist that tools/update_versions.sh writes and that the
+        // installer payload ships.
+        //
+        // So the second source is the packaged driver, read from disk. If the
+        // header is bumped without re-running the version sync, this fails for
+        // the reason the old hardcoded assertion claimed to detect, and it needs
+        // no edit when the header moves again.
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // SoundBridgeAppTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // SoundBridgeApp
+            .deletingLastPathComponent()   // mac
+            .deletingLastPathComponent()   // apps
+            .deletingLastPathComponent()   // repository root
+        let plistURL = repoRoot.appendingPathComponent("packages/driver/Info.plist")
+
+        let data = try Data(contentsOf: plistURL)
+        let plist = try XCTUnwrap(
+            try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            "driver Info.plist is not a property list dictionary: \(plistURL.path)"
+        )
+        let shipped = try XCTUnwrap(
+            plist[DriverVersionGate.protocolVersionKey] as? Int,
+            "\(DriverVersionGate.protocolVersionKey) is missing from \(plistURL.path)"
+        )
+
         XCTAssertEqual(
             DriverVersionGate.expectedProtocolVersion,
-            0x0002_0100,
-            "driver gate protocol version drifted from RFSharedAudio.h"
+            UInt32(shipped),
+            "the gate speaks \(DriverVersionGate.hex(DriverVersionGate.expectedProtocolVersion)) "
+                + "but the packaged driver declares \(DriverVersionGate.hex(UInt32(shipped)))"
         )
     }
 }

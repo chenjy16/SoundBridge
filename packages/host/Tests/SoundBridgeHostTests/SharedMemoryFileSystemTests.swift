@@ -33,6 +33,19 @@ final class SharedMemoryFileSystemTests: XCTestCase {
         }
     }
 
+    private final class BlockingPersistence: VolumeStatePersisting {
+        let entered = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+
+        func loadIfPresent(uid: String) -> DeviceVolumeState? {
+            entered.signal()
+            _ = resume.wait(timeout: .now() + 10)
+            return nil
+        }
+
+        func save(uid: String, volume: Float, muted: Bool) {}
+    }
+
     private var sandbox: URL!
     private var testUID: String!
 
@@ -64,7 +77,7 @@ final class SharedMemoryFileSystemTests: XCTestCase {
 
     private func makeManager(root: String? = nil) -> SharedMemoryManager {
         let base = root ?? sandbox.path
-        return SharedMemoryManager { uid in "\(base)/soundbridge-\(uid)" }
+        return SharedMemoryManager(sessionID: UUID()) { uid in "\(base)/soundbridge-\(uid)" }
     }
 
     private func path(for uid: String) -> String {
@@ -72,7 +85,9 @@ final class SharedMemoryFileSystemTests: XCTestCase {
     }
 
     private var expectedFileSize: Int {
-        let frames = rf_frames_for_duration(
+        // Batch 1: same single source of truth as the production SharedMemoryManager
+        // — the power-of-two rounding, not the raw frame count.
+        let frames = rf_ring_capacity_frames_for(
             SoundBridgeConfig.activeSampleRate,
             SoundBridgeConfig.defaultDurationMs
         )
@@ -110,6 +125,131 @@ final class SharedMemoryFileSystemTests: XCTestCase {
         var st = stat()
         guard lstat(path, &st) == 0 else { return false }
         return (st.st_mode & S_IFMT) == S_IFLNK
+    }
+
+    private func matchesSession(_ memory: UnsafePointer<RFSharedAudio>, _ session: UUID) -> Bool {
+        var uuid = session.uuid
+        return withUnsafeBytes(of: &uuid) { bytes in
+            rf_host_session_matches(memory, bytes.bindMemory(to: UInt8.self).baseAddress!)
+        }
+    }
+
+    func testCreationWithoutSessionLeavesExistingPathUntouched() throws {
+        let target = path(for: testUID)
+        try Data("previous".utf8).write(to: URL(fileURLWithPath: target))
+        let manager = SharedMemoryManager { _ in target }
+        XCTAssertNil(manager.createMemory(for: testUID, persistence: FakePersistence()))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: target)), Data("previous".utf8))
+    }
+
+    func testReplacementPublishesInitializedSessionAndPreservesOldMapping() throws {
+        let target = path(for: testUID)
+        let oldSession = UUID()
+        let newSession = UUID()
+        let old = SharedMemoryManager(sessionID: oldSession) { _ in target }
+        XCTAssertEqual(old.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        let oldMemory = try XCTUnwrap(old.getMemory(for: testUID))
+        XCTAssertTrue(matchesSession(UnsafePointer(oldMemory), oldSession))
+        XCTAssertFalse(matchesSession(UnsafePointer(oldMemory), newSession))
+
+        let replacement = SharedMemoryManager(sessionID: newSession) { _ in target }
+        let persistence = BlockingPersistence()
+        let finished = expectation(description: "replacement published")
+        let uid = testUID!
+        DispatchQueue.global().async {
+            _ = replacement.createMemory(for: uid, persistence: persistence)
+            finished.fulfill()
+        }
+        defer { persistence.resume.signal() }
+        XCTAssertEqual(persistence.entered.wait(timeout: .now() + 5), .success)
+
+        let fd = open(target, O_RDONLY | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        if fd >= 0 {
+            let raw = mmap(nil, MemoryLayout<RFSharedAudio>.size, PROT_READ, MAP_SHARED, fd, 0)
+            close(fd)
+            XCTAssertNotEqual(raw, MAP_FAILED)
+            if let raw, raw != MAP_FAILED {
+                let visible = raw.assumingMemoryBound(to: RFSharedAudio.self)
+                XCTAssertTrue(matchesSession(UnsafePointer(visible), oldSession))
+                munmap(raw, MemoryLayout<RFSharedAudio>.size)
+            }
+        }
+        persistence.resume.signal()
+        wait(for: [finished], timeout: 10)
+
+        let newMemory = try XCTUnwrap(replacement.getMemory(for: uid))
+        XCTAssertTrue(matchesSession(UnsafePointer(newMemory), newSession))
+        XCTAssertFalse(matchesSession(UnsafePointer(newMemory), oldSession))
+        XCTAssertTrue(matchesSession(UnsafePointer(oldMemory), oldSession))
+        var snapshot = RFVolumeStateSnapshot()
+        XCTAssertTrue(rf_read_volume_state(newMemory, &snapshot))
+        replacement.cleanup()
+        old.cleanup()
+    }
+
+    func testOldManagerCleanupDoesNotUnlinkReplacement() throws {
+        let target = path(for: testUID)
+        let old = SharedMemoryManager(sessionID: UUID()) { _ in target }
+        let newSession = UUID()
+        let replacement = SharedMemoryManager(sessionID: newSession) { _ in target }
+        XCTAssertEqual(old.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        XCTAssertEqual(replacement.createMemory(for: testUID, persistence: FakePersistence()), .recoveredFromCrash)
+
+        old.cleanup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target))
+        let newMapping = try XCTUnwrap(replacement.acquireMemory(for: testUID))
+        XCTAssertTrue(matchesSession(UnsafePointer(newMapping.memory), newSession))
+        replacement.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target))
+    }
+
+    func testDelayedRemovalDoesNotRemoveReappearedDevice() throws {
+        let manager = makeManager()
+        XCTAssertEqual(manager.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        let oldGeneration = try XCTUnwrap(manager.acquireMemory(for: testUID)).generation
+        XCTAssertEqual(manager.createMemory(for: testUID, persistence: FakePersistence()), .recoveredFromCrash)
+        let newGeneration = try XCTUnwrap(manager.acquireMemory(for: testUID)).generation
+        XCTAssertNotEqual(oldGeneration, newGeneration)
+
+        manager.removeMemory(for: testUID, ifGeneration: oldGeneration)
+        XCTAssertEqual(manager.acquireMemory(for: testUID)?.generation, newGeneration)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path(for: testUID)))
+        manager.removeMemory(for: testUID, ifGeneration: newGeneration)
+        XCTAssertNil(manager.acquireMemory(for: testUID))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path(for: testUID)))
+    }
+
+    func testMappingLeaseRemainsReadableAfterCleanup() throws {
+        let manager = makeManager()
+        XCTAssertEqual(manager.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        var lease: SharedMemoryMapping? = try XCTUnwrap(manager.acquireMemory(for: testUID))
+        weak var releasedMapping = lease
+        manager.cleanup()
+        XCTAssertNil(manager.acquireMemory(for: testUID))
+        XCTAssertNotNil(releasedMapping)
+        XCTAssertEqual(rf_validate_header(try XCTUnwrap(lease).memory), RF_VALIDATE_OK)
+        lease = nil
+        XCTAssertNil(releasedMapping)
+    }
+
+    func testCleanupRejectsLaterCreation() {
+        let manager = makeManager()
+        XCTAssertEqual(manager.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        manager.cleanup()
+        XCTAssertNil(manager.createMemory(for: testUID, persistence: FakePersistence()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path(for: testUID)))
+    }
+
+    func testHeartbeatAndCleanupCanOverlapWithHeldLease() throws {
+        let manager = makeManager()
+        XCTAssertEqual(manager.createMemory(for: testUID, persistence: FakePersistence()), .created)
+        let lease = try XCTUnwrap(manager.acquireMemory(for: testUID))
+        manager.startHeartbeat()
+        manager.cleanup()
+        manager.stopHeartbeat()
+        XCTAssertEqual(rf_validate_header(lease.memory), RF_VALIDATE_OK)
+        withExtendedLifetime(lease) {}
     }
 
     // MARK: - 1. Read-only directory

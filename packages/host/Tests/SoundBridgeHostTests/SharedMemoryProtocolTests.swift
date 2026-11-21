@@ -20,8 +20,13 @@ final class SharedMemoryProtocolTests: XCTestCase {
 
     /// Allocate a block large enough for the header *and* the audio payload,
     /// so ring-buffer helpers stay in bounds.
+    ///
+    /// Batch 1: the capacity is the power-of-two rounding that
+    /// `rf_shared_audio_init` stores (8192 for 48 kHz / 100 ms, not the raw
+    /// 4800 frames). Sizing with the raw frame count would truncate the
+    /// payload the ring helpers address through the rounded capacity.
     private func withBlock(_ body: (UnsafeMutablePointer<RFSharedAudio>) throws -> Void) rethrows {
-        let frames = rf_frames_for_duration(sampleRate, durationMs)
+        let frames = rf_ring_capacity_frames_for(sampleRate, durationMs)
         let byteCount = Int(rf_shared_audio_size(frames, channels, 4))
         let raw = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: 8)
         defer { raw.deallocate() }
@@ -33,9 +38,9 @@ final class SharedMemoryProtocolTests: XCTestCase {
     // MARK: - 6. Protocol identity (driver and Host built from one source)
 
     func testProtocolConstantsArePinned() {
-        XCTAssertEqual(RF_AUDIO_PROTOCOL_VERSION, 0x0002_0100)
-        XCTAssertEqual(RF_SHARED_AUDIO_HEADER_SIZE, 256)
-        XCTAssertEqual(MemoryLayout<RFSharedAudio>.size, 256)
+        XCTAssertEqual(RF_AUDIO_PROTOCOL_VERSION, 0x0002_0200)
+        XCTAssertEqual(RF_SHARED_AUDIO_HEADER_SIZE, 320)
+        XCTAssertEqual(MemoryLayout<RFSharedAudio>.size, 320)
         XCTAssertEqual(MemoryLayout<RFEQSnapshot>.size, 48)
         XCTAssertEqual(MemoryLayout<RFVolumeStateSnapshot>.size, 24)
     }
@@ -49,7 +54,7 @@ final class SharedMemoryProtocolTests: XCTestCase {
     /// total size is the important one: every accessor's pointer arithmetic
     /// depends on `sizeof(RFSharedAudio)` being the fixed header length.
     func testLayoutVisibleFromSwift() {
-        XCTAssertEqual(MemoryLayout<RFSharedAudio>.size, 256)
+        XCTAssertEqual(MemoryLayout<RFSharedAudio>.size, 320)
         XCTAssertEqual(MemoryLayout<RFSharedAudio>.alignment, 8)
         XCTAssertEqual(MemoryLayout<RFSharedAudio>.offset(of: \.protocol_version), 0)
         XCTAssertEqual(MemoryLayout<RFSharedAudio>.offset(of: \.header_size), 4)
@@ -288,7 +293,12 @@ final class SharedMemoryProtocolTests: XCTestCase {
             var output = [Float](repeating: 1.0, count: 128 * Int(channels))
             let requested: UInt32 = 128
             output.withUnsafeMutableBufferPointer { buffer in
-                _ = rf_ring_read(mem, buffer.baseAddress, requested)
+                var zeroFilled: UInt32 = 0
+                let consumed = rf_ring_read(mem, buffer.baseAddress, requested, &zeroFilled)
+                // Batch 1 contract: an empty ring consumes nothing and reports
+                // the whole request as the zero-filled tail.
+                XCTAssertEqual(consumed, 0)
+                XCTAssertEqual(zeroFilled, requested)
             }
 
             XCTAssertEqual(rf_get_underrun_frames(mem), requested, "silence frames must be accounted")

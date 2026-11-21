@@ -55,6 +55,15 @@ enum HostRunState: Equatable {
     /// Host running, mapping valid, driver has never attached. Normal until
     /// something plays through the SoundBridge device.
     case waitingForDriver
+    /// CoreAudio replaced its device list and the Host is rebuilding the path.
+    /// Transient, and *not* "not running": the Host is working on it.
+    case recovering
+    /// Recovery finished without an audio path. The Host is still alive.
+    case degraded
+    /// The Host is releasing its resources.
+    case stopping
+    /// The Host finished shutting down.
+    case stopped
     /// No proxy device appeared, or the default output is not one this Host
     /// manages. Audio goes wherever it went before.
     case proxyUnavailable
@@ -90,6 +99,14 @@ enum HostRunState: Equatable {
             return .sharedMemoryInvalid
         case "driverNotResponding":
             return .driverNotResponding
+        case "recovering":
+            return .recovering
+        case "degraded":
+            return .degraded
+        case "stopping":
+            return .stopping
+        case "stopped":
+            return .stopped
         case "proxyTimeout", "deviceNotFound":
             return .proxyUnavailable
         case "inactive":
@@ -124,6 +141,14 @@ enum HostRunState: Equatable {
             return flowing ? "Connected" : "Routed — no audio playing"
         case .waitingForDriver:
             return "Waiting for audio driver"
+        case .recovering:
+            return "Reconnecting to the audio driver…"
+        case .degraded:
+            return "Audio routing is degraded"
+        case .stopping:
+            return "Audio host is stopping…"
+        case .stopped:
+            return "Audio host stopped"
         case .proxyUnavailable:
             return "SoundBridge device is not available"
         case .sharedMemoryInvalid:
@@ -145,11 +170,26 @@ enum HostRunState: Equatable {
     ///
     /// `waitingForDriver` is excluded: it is the normal state on a machine where
     /// nothing plays through SoundBridge, and an alert for it would be noise.
+    /// `recovering` and `stopping` are also excluded from "problem" but still
+    /// shown, because a Host that is visibly working is not a fault.
     var isProblem: Bool {
         switch self {
-        case .notRunning, .proxyUnavailable, .sharedMemoryInvalid, .driverNotResponding, .instanceConflict:
+        case .notRunning, .proxyUnavailable, .sharedMemoryInvalid, .driverNotResponding, .instanceConflict, .degraded:
             return true
-        case .starting, .ready, .waitingForDriver, .noOutputDevices, .inactive, .unknown:
+        case .starting, .ready, .waitingForDriver, .noOutputDevices, .inactive, .unknown, .recovering, .stopping, .stopped:
+            return false
+        }
+    }
+
+    /// Whether the Host is mid-transition, which is worth showing even though it
+    /// is not a problem.
+    var isTransitional: Bool {
+        switch self {
+        case .starting, .recovering, .stopping:
+            return true
+        case .notRunning, .ready, .waitingForDriver, .degraded, .stopped,
+             .proxyUnavailable, .sharedMemoryInvalid, .driverNotResponding,
+             .noOutputDevices, .instanceConflict, .inactive, .unknown:
             return false
         }
     }

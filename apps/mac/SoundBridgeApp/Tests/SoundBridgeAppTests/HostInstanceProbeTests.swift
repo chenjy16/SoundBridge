@@ -136,6 +136,37 @@ final class HostInstanceProbeTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0)
     }
 
+    func testSessionProbeRequiresHeldLockAndCompleteOwnerRecord() throws {
+        let path = root.appendingPathComponent("session.lock").path
+        let fd = try acquireLikeAHost(path: path)
+        defer { close(fd) }
+        let session = UUID()
+        let record = "pid=\(getpid()) uid=\(getuid()) session=\(session.uuidString)\n"
+        let data = Data(record.utf8)
+        XCTAssertEqual(data.withUnsafeBytes { pwrite(fd, $0.baseAddress, $0.count, 0) }, data.count)
+        XCTAssertEqual(HostInstanceProbe.state(path: path), .held(session: session))
+        _ = _lockFileDescriptor(fd, LOCK_UN)
+        XCTAssertEqual(HostInstanceProbe.state(path: path), .notRunning)
+    }
+
+    func testSessionProbeRejectsIncompleteRecord() throws {
+        let path = root.appendingPathComponent("incomplete.lock").path
+        let fd = try acquireLikeAHost(path: path)
+        defer { close(fd) }
+        let data = Data("uid=\(getuid()) session=\(UUID().uuidString)".utf8)
+        XCTAssertEqual(data.withUnsafeBytes { pwrite(fd, $0.baseAddress, $0.count, 0) }, data.count)
+        XCTAssertEqual(HostInstanceProbe.state(path: path), .unavailable)
+    }
+
+    func testSessionProbeAcceptsCompleteLegacyOwnerRecord() throws {
+        let path = root.appendingPathComponent("legacy.lock").path
+        let fd = try acquireLikeAHost(path: path)
+        defer { close(fd) }
+        let data = Data("pid=\(getpid()) uid=\(getuid())\n".utf8)
+        XCTAssertEqual(data.withUnsafeBytes { pwrite(fd, $0.baseAddress, $0.count, 0) }, data.count)
+        XCTAssertEqual(HostInstanceProbe.state(path: path), .held(session: nil))
+    }
+
     // MARK: - Owner record
 
     func testOwnerDescriptionReturnsTheFirstLine() throws {

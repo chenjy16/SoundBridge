@@ -54,12 +54,27 @@
 # forks and code signatures are not compared by this script.
 #
 # Usage
-#   tools/verify_pkg_contents.sh                              # A+B+C for dist/
+#   tools/verify_pkg_contents.sh                              # A+B+C for dist/ and the repository VERSION
 #   tools/verify_pkg_contents.sh dist/SoundBridge-1.1.1.pkg
+#   tools/verify_pkg_contents.sh --version 1.1.1              # that release's package in dist/
 #   tools/verify_pkg_contents.sh --app dist/Other.app <pkg>   # compare against a different bundle
 #   tools/verify_pkg_contents.sh --pkg-only <pkg>             # inside the package only
 #   tools/verify_pkg_contents.sh --image-report <file> <pkg>  # and the copy inside the image (D)
 #   tools/verify_pkg_contents.sh --manifest-only <driver>     # print the tree manifest and stop
+#   tools/verify_pkg_contents.sh --print-target               # say which package would be read, then stop
+#
+# Which package the default is
+# ----------------------------
+# The repository's VERSION file names the release, so the default target is
+# dist/SoundBridge-$(cat VERSION).pkg. The bundle in dist/ does *not* choose the
+# file: a 1.1.1 bundle left behind used to select dist/SoundBridge-1.1.1.pkg,
+# and that old package passed every check while the tree said 1.2.0. A stale
+# bundle next to current artifacts is reported as a version mismatch by
+# tools/verify_release_payload.sh instead of silently naming the release.
+#
+# A package under that name that does not exist is a failure, and the packages
+# that *are* in dist/ are listed: the point is to stop the pipeline, not to
+# check whichever file happens to be there.
 #
 # Output (parsed by tools/verify_release_payload.sh)
 #   DRIVER_TREE_MATCH=true|false
@@ -84,9 +99,13 @@ APP_BUNDLE="$ROOT_DIR/dist/SoundBridge.app"
 REQUIRE_EXTERNAL=1
 IMAGE_REPORT=""
 MANIFEST_ONLY=""
+VERSION=""
+PRINT_TARGET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app) APP_BUNDLE="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --print-target) PRINT_TARGET=1; shift ;;
         --pkg-only) REQUIRE_EXTERNAL=0; shift ;;
         --image-report) IMAGE_REPORT="$2"; shift 2 ;;
         --manifest-only) MANIFEST_ONLY="$2"; shift 2 ;;
@@ -151,17 +170,48 @@ if [[ -n "$MANIFEST_ONLY" ]]; then
 fi
 
 if [[ -z "$PKG" ]]; then
-    DEFAULT_APP="$ROOT_DIR/dist/SoundBridge.app"
-    # Through plist_read: PlistBuddy answers a missing file on stdout, and that
-    # text would end up inside the package name.
-    VERSION_FROM_APP="$(plist_read "$DEFAULT_APP/Contents/Info.plist" CFBundleShortVersionString)"
-    if [[ -n "$VERSION_FROM_APP" ]]; then
-        PKG="$ROOT_DIR/dist/SoundBridge-$VERSION_FROM_APP.pkg"
+    # The repository's VERSION file names the release; --version overrides it.
+    # The bundle in dist/ is deliberately not consulted here -- it is the copy
+    # that goes stale, and letting it pick the package is what made a 1.1.1
+    # release look verified under a 1.2.0 tree.
+    TARGET_VERSION="$VERSION"
+    if [[ -z "$TARGET_VERSION" && -f "$ROOT_DIR/VERSION" ]]; then
+        TARGET_VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
+    fi
+    if [[ -n "$TARGET_VERSION" ]]; then
+        PKG="$ROOT_DIR/dist/SoundBridge-$TARGET_VERSION.pkg"
     else
-        PKG="$ROOT_DIR/dist/SoundBridge.pkg"
+        # No VERSION file and no --version (an unpacked payload, say): the
+        # bundle is the only thing left that could name it, and the header says
+        # which target was chosen.
+        VERSION_FROM_APP="$(plist_read "$ROOT_DIR/dist/SoundBridge.app/Contents/Info.plist" CFBundleShortVersionString)"
+        if [[ -n "$VERSION_FROM_APP" ]]; then
+            PKG="$ROOT_DIR/dist/SoundBridge-$VERSION_FROM_APP.pkg"
+        else
+            PKG="$ROOT_DIR/dist/SoundBridge.pkg"
+        fi
     fi
 fi
-[[ -f "$PKG" ]] || fail "package not found: $PKG (build one with tools/build_installer_pkg.sh)"
+
+if [[ "$PRINT_TARGET" -eq 1 ]]; then
+    echo "PKG=$PKG"
+    exit 0
+fi
+
+# A missing package is a failure that says what is there. Falling back to
+# another file in dist/ would verify a release nobody asked about.
+if [[ ! -f "$PKG" ]]; then
+    echo "FAIL  package not found: $PKG" >&2
+    AVAILABLE="$(ls -1 "$ROOT_DIR/dist"/*.pkg 2>/dev/null || true)"
+    if [[ -n "$AVAILABLE" ]]; then
+        echo "      dist/ holds these packages, none named for ${TARGET_VERSION:-this tree}:" >&2
+        printf '%s\n' "$AVAILABLE" | sed 's/^/        /' >&2
+        echo "      pass --version <x.y.z> or --pkg <path> to check one of them" >&2
+    else
+        echo "      dist/ holds no .pkg; build one with tools/build_installer_pkg.sh" >&2
+    fi
+    exit 1
+fi
 
 EXPECTED_PROTOCOL_HEX="$(sed -nE 's/^[[:space:]]*#[[:space:]]*define[[:space:]]+RF_AUDIO_PROTOCOL_VERSION[[:space:]]+(0x[0-9A-Fa-f]+)[uUlL]*.*$/\1/p' "$HEADER" | head -n 1)"
 [[ -n "$EXPECTED_PROTOCOL_HEX" ]] || fail "could not read RF_AUDIO_PROTOCOL_VERSION from $HEADER"

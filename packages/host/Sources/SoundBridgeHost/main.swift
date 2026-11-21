@@ -23,12 +23,18 @@ let deviceDiscovery = DeviceDiscovery()
 let deviceRegistry = DeviceRegistry()
 let memoryManager = SharedMemoryManager()
 let volumePersistence = VolumePersistence()
-let proxyManager = ProxyDeviceManager(registry: deviceRegistry, volumePersistence: volumePersistence)
+let lifecycleGate = HostLifecycleGate()
+let proxyManager = ProxyDeviceManager(registry: deviceRegistry, volumePersistence: volumePersistence,
+                                      lifecycleGate: lifecycleGate)
 let volumeStateStore = VolumeStateStore()
-let renderer = AudioRenderer(
-    memoryManager: memoryManager,
-    proxyManager: proxyManager
-)
+let renderer = AudioRenderer(memoryManager: memoryManager)
+
+// The render callback reads whatever mapping this slot publishes; it never
+// looks at `proxyManager` itself. Routing changes therefore have to be pushed
+// in, and this is the single place that does it.
+proxyManager.onManagedProxyChanged = { uid in
+    memoryManager.setPreferredRenderUID(uid)
+}
 let audioEngine = AudioEngine(renderer: renderer, registry: deviceRegistry)
 let deviceMonitor = DeviceMonitor(
     registry: deviceRegistry,
@@ -37,7 +43,7 @@ let deviceMonitor = DeviceMonitor(
     discovery: deviceDiscovery,
     audioEngine: audioEngine
 )
-let sleepWakeMonitor = SleepWakeMonitor()
+let sleepWakeMonitor = SleepWakeMonitor(lifecycleGate: lifecycleGate)
 
 /// Process-wide single-instance lock. Acquired at the top of `main()` and held
 /// until the process ends; see `HostInstanceLock` for why this is a `flock` and
@@ -55,12 +61,19 @@ var connectionMonitor: DriverConnectionMonitor?
 
 /// Single-flight guard for `.degraded` → `.active`.
 ///
-/// Device-list notifications are delivered on the main queue, but the recovery
-/// they trigger immediately hops to a background queue to probe CoreAudio. Two
-/// notifications inside that window both observe `.degraded` and both call
-/// `audioEngine.setup()`, which allocates a new audio unit before disposing the
-/// previous one. Mutated on the main queue only.
+/// 设备通知和恢复操作均在主队列串行；该标志合并已排队的重复尝试。
 private var degradedRecoveryGate = DegradedRecoveryGate()
+// P2 Batch 2 removed `degradedMaySelectDefault`. Recovery used it to decide
+// whether it was allowed to make the proxy the default output again; recovery
+// no longer writes the default output at all, so there is nothing to allow.
+
+/// Single-flight guard for `.coreaudioRebuild` recovery.
+///
+/// Separate from `degradedRecoveryGate` because the two transitions are
+/// different: degraded means the proxy never appeared, a rebuild means the
+/// object graph that described it was replaced. Sharing one flag would let a
+/// rebuild pass be mistaken for a degraded retry and skipped.
+private var coreAudioRecoveryGate = CoreAudioRecoveryGate()
 
 /// Teardown is requested by SIGINT and SIGTERM, so it has to be run-once and
 /// stay ordered; see `ShutdownSequence` for why the order is the contract.
@@ -69,6 +82,7 @@ private var shutdownSequence = ShutdownSequence()
 // Retain signal dispatch sources for the lifetime of the host process.
 // Otherwise they are released after setupSignalHandlers() returns.
 private var signalSources: [DispatchSourceSignal] = []
+private var bounceNotificationToken: Int32?
 
 func main() {
 
@@ -89,6 +103,13 @@ func main() {
     // refusal exits before any of it — no unlink, no create, no cleanup.
     switch HostStartupGate(lock: instanceLock).evaluate() {
     case .proceed:
+        guard let sessionID = instanceLock.sessionID else {
+            logger.error("Instance lock acquired without a session")
+            cleanup()
+            exit(1)
+        }
+        deviceRegistry.beginSession(sessionID)
+        memoryManager.beginSession(sessionID)
         print("[Step -1] Single instance: \(instanceLock.path)")
     case .refuseInstanceConflict(let owner):
         let who = owner ?? "another process"
@@ -125,9 +146,18 @@ func main() {
     setupSleepWakeMonitoring()
 
     print("[Step 1] Discovering physical audio devices...")
-    let devices = deviceDiscovery.enumeratePhysicalDevices()
+    let initialEnumeration = deviceDiscovery.enumeratePhysicalDevicesWithStatus()
+    let devices = initialEnumeration.devices
 
-    if devices.isEmpty {
+    if initialEnumeration.queryFailed {
+        deviceMonitor.setHostState(.degraded)
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .degraded
+            snapshot.halDiscovery = .notDiscovered
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = "initial HAL device-list query failed; waiting for a recheck"
+        }
+    } else if devices.isEmpty {
         logger.info("No physical output devices currently available; entering idle mode")
         deviceMonitor.setHostState(.idle)
         lifecycleReporter.update { snapshot in
@@ -137,8 +167,38 @@ func main() {
         }
     }
 
+    // 初始空设备与恢复后的空设备都使用同一条 degraded 恢复路径。
+    deviceMonitor.onDegradedRecovery = { attemptDegradedRecovery() }
+    deviceMonitor.onNoPhysicalDevices = {
+        connectionMonitor?.stop()
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .noPhysicalDevices
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = "no physical output device; waiting for a device"
+        }
+    }
+    deviceMonitor.onIdleDevicesAvailable = { allowRoutingChanges in
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .degraded
+            snapshot.proxyDevice = .pending
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = "physical device appeared; waiting for its proxy"
+        }
+        if allowRoutingChanges { attemptDegradedRecovery() }
+    }
+
     print("[Step 2] Registering device change listeners...")
     deviceMonitor.registerListeners()
+    setupBounceNotifications()
+    if initialEnumeration.queryFailed { deviceMonitor.scheduleInitialDeviceRecheck() }
+
+    // A HAL rebuild invalidates the listeners registered above and every
+    // AudioObjectID this process holds. DeviceMonitor decides when a device
+    // notification means "rebuilt" rather than "plugged"; this is what it calls
+    // when it does.
+    deviceMonitor.onCoreAudioRestart = { reason in
+        attemptCoreAudioRecovery(reason: reason)
+    }
 
     if devices.isEmpty {
         // The run loop is what keeps an idle Host alive. If it ever returns — no
@@ -173,36 +233,30 @@ func main() {
     SoundBridgeConfig.activeSampleRate = deviceSampleRate
     print("[Step 1.5] HiFi mode: \(deviceSampleRate) Hz (from \(preferredDevice.name))")
 
-    deviceRegistry.update(devices)
-
-    print("[Step 3] Creating shared memory files...")
-    // createMemory() resolves the starting volume for each device in the
-    // documented order (persisted > recovered-from-crash > safe default) and
-    // commits it, so the driver sees state_initialized == 1 on first OnStartIO.
-    memoryManager.createMemory(for: devices, persistence: volumePersistence)
-
-    // `createMemory` logs per device; a caller cannot tell "one failure among
-    // several" from "nothing was created" without looking. With no mapping there
-    // is no audio path at all, so stop instead of continuing into a fake startup.
-    let mappedDevices = devices.filter { memoryManager.getMemory(for: $0.uid) != nil }
-    guard !mappedDevices.isEmpty else {
-        print("[Step 3] FATAL: no shared memory mapping exists for any device")
-        logger.error("Shared memory creation failed for all \(devices.count) device(s); refusing to start")
-        lifecycleReporter.update { snapshot in
-            snapshot.outcome = .sharedMemoryInvalid
-            snapshot.sharedMemoryConnection = .invalid
-            snapshot.audioPipeline = .notStarted
-            snapshot.detail = "createMemory() produced no mapping for any physical device"
-        }
-        // Nothing was routed yet, so there is no default device to restore, but
-        // a partial mapping can exist and must not outlive the process.
-        cleanup()
-        exit(1)
+    print("[Step 3] Preparing shared memory and publishing the device list...")
+    let preparationSession = instanceLock.sessionID
+    let canPrepare = {
+        lifecycleGate.permitsNormal() && instanceLock.isHeld && preparationSession != nil &&
+            instanceLock.sessionID == preparationSession && !shutdownSequence.isComplete
     }
-
-    print("[Step 4] Writing control file...")
-    deviceRegistry.writeControlFile()
-    print("    ✓ Control file: \(SoundBridgeConfig.controlFilePath)")
+    // 启动与热插拔使用同一准备规则：所有映射可用后才发布控制文件。
+    // 部分创建的映射保留供有界重查复用，不把未完成的快照交给 Driver。
+    let prepared = DeviceMappingPreparation.publishIfReady(
+        uids: devices.map { $0.uid },
+        canProceed: canPrepare,
+        hasMapping: { memoryManager.acquireMemory(for: $0) != nil },
+        createMapping: { memoryManager.createMemory(for: $0, persistence: volumePersistence) != nil },
+        publish: { deviceRegistry.update(devices) }
+    )
+    guard prepared else {
+        guard canPrepare() else { return }
+        enterDegraded(detail: "initial device mappings or control file could not be published; waiting for a recheck")
+        deviceMonitor.scheduleInitialDeviceRecheck()
+        RunLoop.current.run()
+        cleanup()
+        return
+    }
+    print("[Step 4] Control file: \(SoundBridgeConfig.controlFilePath)")
 
     print("[Step 5] Starting heartbeat monitor...")
     memoryManager.startHeartbeat()
@@ -213,24 +267,46 @@ func main() {
     // startup "succeeded" whether or not a proxy device ever appeared, and the
     // two seconds were spent even when the device was already there. Wait for the
     // actual HAL device instead, with a deadline.
-    if case .timedOut(let seconds) = waitForProxyDevice(forUID: preferredDevice.uid) {
+    func waitForCurrentLifecycleToStop() {
+        if !shutdownSequence.isComplete, instanceLock.isHeld { RunLoop.current.run() }
+    }
+
+    switch waitForProxyDevice(forUID: preferredDevice.uid) {
+    case .ready:
+        break
+    case .timedOut(let seconds):
         enterDegraded(
             detail: "no proxy device for \(preferredDevice.name) after \(seconds)s; the driver is not loaded, or is not compatible with this build"
         )
-        // Degraded is not a terminal state: the run loop keeps the Host alive so
-        // a late driver can attach. When it does return, the teardown still has
-        // to happen.
         RunLoop.current.run()
         cleanup()
         return
+    case .cancelled:
+        // 泵送期间恢复可能已经接管启动；旧启动流程不能再次建立音频链路。
+        waitForCurrentLifecycleToStop()
+        if instanceLock.isHeld { cleanup() }
+        return
     }
 
-    print("[Step 7] Auto-selecting proxy device...")
-    let selection = proxyManager.autoSelectProxy()
-    print("[Step 7] Proxy selection: \(selection.diagnostic)")
+    guard let startupToken = lifecycleGate.normalToken(), let startupSession = instanceLock.sessionID else {
+        waitForCurrentLifecycleToStop()
+        if instanceLock.isHeld { cleanup() }
+        return
+    }
+    let canStart = {
+        lifecycleGate.permitsNormal(startupToken) && instanceLock.isHeld && instanceLock.sessionID == startupSession
+    }
+    print("[Step 7] Resolving the proxy route (the default output is not touched)...")
+    let routing = proxyManager.resolveProxyRouting(forPhysicalUID: preferredDevice.uid)
+    guard canStart() else {
+        waitForCurrentLifecycleToStop()
+        if instanceLock.isHeld { cleanup() }
+        return
+    }
+    print("[Step 7] Proxy route: \(routing.diagnostic)")
 
-    guard selection.isRouted else {
-        enterDegraded(detail: "proxy device exists but could not be selected (\(selection.diagnostic))")
+    guard routing.isRoutable else {
+        enterDegraded(detail: "the driver's proxy device for \(preferredDevice.name) is not available (\(routing.diagnostic))")
         RunLoop.current.run()
         cleanup()
         return
@@ -243,16 +319,10 @@ func main() {
     // scalar/gain pair for the render path and for Phase 2.2 routing.
     adoptCommittedVolumeState()
 
-    // Bounce device to recapture audio from apps that were already running
-    if proxyManager.activeProxyDeviceID != 0 {
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
-            proxyManager.bounceDevice()
-        }
-    }
-
     print("[Step 8] Setting up audio engine with device fallback...")
 
-    // Get the user's preferred device from proxy manager (set during autoSelectProxy)
+    // The device this Host routes for, resolved above without reference to
+    // which output the user has selected.
     let preferredDeviceID = proxyManager.activePhysicalDeviceID
     if preferredDeviceID != 0 {
         if let preferredDevice = devices.first(where: { $0.id == preferredDeviceID }) {
@@ -263,8 +333,18 @@ func main() {
     }
 
     do {
-        try audioEngine.setup(devices: devices, preferredDeviceID: preferredDeviceID != 0 ? preferredDeviceID : nil)
-        try audioEngine.start()
+        let result = try GuardedEngineStart.run(
+            canProceed: canStart,
+            setup: {
+                try audioEngine.setup(devices: devices, preferredDeviceID: preferredDeviceID != 0 ? preferredDeviceID : nil)
+            },
+            start: { try audioEngine.start() }
+        )
+        guard result == .started, canStart() else {
+            waitForCurrentLifecycleToStop()
+            if instanceLock.isHeld { cleanup() }
+            return
+        }
 
         deviceMonitor.setHostState(.active)
         logger.info("Audio engine started successfully")
@@ -278,7 +358,7 @@ func main() {
             snapshot.proxyDevice = .found
             snapshot.sharedMemoryConnection = .waitingForDriver
             snapshot.audioPipeline = .notStarted
-            snapshot.detail = "engine running; the driver attaches on its first IO, so waitingForDriver is expected until an app plays through the SoundBridge device"
+            snapshot.detail = "engine running; the driver attaches on its first IO, so waitingForDriver is expected until an app plays through the SoundBridge device; " + defaultOutputNote(routing)
         }
         startConnectionMonitor()
 
@@ -288,8 +368,9 @@ func main() {
         // re-apply after the initial device bounce, not the initialisation
         // path. The override keeps a recovered shared-memory value from being
         // replaced by the persistence default.
-        if proxyManager.activeProxyDeviceID != 0 {
+        if proxyManager.activeProxyDeviceID != 0, let token = lifecycleGate.normalToken() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard lifecycleGate.permitsNormal(token) else { return }
                 if let physicalUID = proxyManager.activeProxyUID {
                     let committed = memoryManager.readVolumeState(for: physicalUID).map {
                         DeviceVolumeState(volumeScalar: $0.scalar, isMuted: $0.muted)
@@ -304,6 +385,11 @@ func main() {
             }
         }
     } catch let error as AudioEngineError {
+        guard canStart() else {
+            waitForCurrentLifecycleToStop()
+            if instanceLock.isHeld { cleanup() }
+            return
+        }
         logger.error("Audio engine setup failed: \(error.description)")
         if case .allDevicesFailed = error {
             logger.error("All \(devices.count) device(s) failed to initialize.")
@@ -314,37 +400,29 @@ func main() {
             snapshot.audioPipeline = .notStarted
             snapshot.detail = "audio engine setup failed: \(error.description)"
         }
-        // `autoSelectProxy()` above already switched the system default output to
-        // the proxy device. Exiting without teardown would leave the Mac pointed
-        // at a virtual device whose Host is gone — silent audio with no obvious
-        // cause. `cleanup()` restores the physical device before releasing.
+        // P2 Batch 2 removed the default-output restore that used to precede
+        // this. The Host never made the proxy the default output, so a failed
+        // engine start no longer leaves the Mac pointing at a virtual device;
+        // there is nothing to put back. Teardown still releases the lock, the
+        // mappings and the control file.
         cleanup()
         exit(1)
     } catch {
+        guard canStart() else {
+            waitForCurrentLifecycleToStop()
+            if instanceLock.isHeld { cleanup() }
+            return
+        }
         logger.error("Audio engine setup failed: \(error.localizedDescription)")
         lifecycleReporter.update { snapshot in
             snapshot.outcome = .inactive
             snapshot.audioPipeline = .notStarted
             snapshot.detail = "audio engine setup failed: \(error.localizedDescription)"
         }
-        // See the AudioEngineError branch: the default output is on the proxy by
-        // now, so teardown is what keeps the failure from silencing the machine.
+        // See the AudioEngineError branch: there is no default-output state to
+        // put back, because the Host never took one.
         cleanup()
         exit(1)
-    }
-
-    // Listen for bounce requests from App via Darwin notification
-    var bounceToken: Int32 = 0
-    let bounceStatus = _notify_register_dispatch(
-        "com.soundbridge.bounce-request",
-        &bounceToken,
-        DispatchQueue.global(qos: .userInitiated)
-    ) { _ in
-        logger.info("Received bounce request from App")
-        proxyManager.bounceDevice()
-    }
-    if bounceStatus != 0 {
-        logger.error("Failed to register bounce notification listener (status: \(bounceStatus))")
     }
 
     RunLoop.current.run()
@@ -356,11 +434,56 @@ func main() {
     cleanup()
 }
 
+private func setupBounceNotifications() {
+    var token: Int32 = 0
+    let status = _notify_register_dispatch("com.soundbridge.bounce-request", &token, DispatchQueue.main) { _ in
+        guard lifecycleGate.permitsNormal() else { return }
+        logger.info("Received reconnect request from App")
+        reconnectAudioPath()
+    }
+    if status == 0 {
+        bounceNotificationToken = token
+    } else {
+        logger.error("Failed to register bounce notification listener (status: \(status))")
+    }
+}
+
+/// Re-establish the Host's own audio path after the App's "Reconnect Audio".
+///
+/// It re-resolves the proxy the driver publishes and points the engine at the
+/// physical device behind it. It deliberately does **not** bounce the default
+/// output: a reconnect restores the Host↔driver↔proxy connection, and the
+/// user's default output — wherever it is — stays put. The notification name is
+/// unchanged because the App's button still posts it; only what the Host does
+/// with it changed (P2 Batch 2).
+private func reconnectAudioPath() {
+    guard lifecycleGate.permitsNormal(), !proxyManager.isRecovering else { return }
+    let devices = deviceRegistry.devices
+    guard !devices.isEmpty else {
+        logger.info("Reconnect requested with no physical devices; nothing to re-establish")
+        return
+    }
+
+    let remap = proxyManager.remapAfterCoreAudioRebuild(in: devices)
+    guard remap.proxyPresent else {
+        logger.notice("Reconnect requested but the driver has not published a proxy again yet")
+        return
+    }
+
+    do {
+        try audioEngine.switchDevice(remap.physicalDeviceID)
+    } catch {
+        logger.error("Reconnect could not point the engine at the physical device: \(error.localizedDescription)")
+    }
+    proxyManager.refreshSystemDefaultOutput()
+    print("[Reconnect] Audio path re-established; default output untouched")
+}
+
 func setupSleepWakeMonitoring() {
     print("[Startup] Registering sleep/wake handler...")
 
     sleepWakeMonitor.onSleep = {
-        guard deviceMonitor.hostState == .active else {
+        guard lifecycleGate.permitsNormal(), deviceMonitor.hostState == .active else {
             logger.info("Host is idle; no AudioEngine to stop before sleep")
             return
         }
@@ -371,11 +494,19 @@ func setupSleepWakeMonitoring() {
     }
 
     sleepWakeMonitor.onWake = {
+        guard let token = lifecycleGate.normalToken(), let session = instanceLock.sessionID,
+              instanceLock.isHeld else { return }
         print("[SleepWake] Recovering after wake...")
+        let canWakeProceed = {
+            lifecycleGate.permitsNormal(token) && instanceLock.isHeld && instanceLock.sessionID == session
+        }
 
         deviceMonitor.reregisterListeners()
+        guard canWakeProceed() else { return }
         deviceMonitor.resetDebounce()
+        guard canWakeProceed() else { return }
         proxyManager.reregisterVolumeForwarding()
+        guard canWakeProceed() else { return }
 
         guard deviceMonitor.hostState == .active else {
             logger.info("Host is idle after wake; skipping AudioEngine restart")
@@ -383,14 +514,21 @@ func setupSleepWakeMonitoring() {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard canWakeProceed(), deviceMonitor.hostState == .active else { return }
             do {
-                try audioEngine.setup(
-                    devices: deviceRegistry.devices,
-                    preferredDeviceID: proxyManager.activePhysicalDeviceID
+                let result = try GuardedEngineStart.run(
+                    canProceed: { canWakeProceed() && deviceMonitor.hostState == .active },
+                    setup: {
+                        try audioEngine.setup(
+                            devices: deviceRegistry.devices,
+                            preferredDeviceID: proxyManager.activePhysicalDeviceID
+                        )
+                    },
+                    start: { try audioEngine.start() }
                 )
-                try audioEngine.start()
-                logger.info("AudioEngine restarted after wake")
+                if result == .started { logger.info("AudioEngine restarted after wake") }
             } catch {
+                guard canWakeProceed() else { return }
                 logger.error(
                     "AudioEngine restart failed: \(error.localizedDescription)"
                 )
@@ -431,7 +569,20 @@ func cleanup() {
     let performedTeardown = shutdownSequence.run { step in
         switch step {
         case .markStopping:
+            lifecycleGate.stop()
+            if let token = bounceNotificationToken {
+                _ = _notify_cancel(token)
+                bounceNotificationToken = nil
+            }
+            // Refuse new recovery first: a pass that rewrites the control file
+            // or re-registers listeners while resources are being released is
+            // how a teardown ends up racing itself.
+            coreAudioRecoveryGate.terminate()
             deviceMonitor.setHostState(.stopping)
+            lifecycleReporter.update { snapshot in
+                snapshot.outcome = .stopping
+                snapshot.detail = "shutdown started"
+            }
             print("\n[Cleanup] Starting cleanup process...")
 
         case .stopConnectionMonitor:
@@ -440,11 +591,18 @@ func cleanup() {
         case .stopSleepWakeMonitor:
             sleepWakeMonitor.stop()
 
+        case .removePropertyListeners:
+            // One-way from here: nothing may re-arm them, so a HAL notification
+            // cannot re-enter the device path while the rest is being released.
+            deviceMonitor.stop()
+
         case .stopHeartbeat:
             memoryManager.stopHeartbeat()
 
-        case .restorePhysicalDevice:
-            _ = proxyManager.restorePhysicalDevice()
+        // P2 Batch 2 removed the shutdown restore step. It returned the
+        // physical device as the default output on quit, which changed a
+        // system-wide setting from a lifecycle event; the default output is
+        // now left exactly where the user put it.
 
         case .stopAudioEngine:
             audioEngine.stop()
@@ -473,7 +631,18 @@ func cleanup() {
                 logger.info("Skipping coreaudiod restart (restartsCoreAudioOnExit == false)")
             }
 
+        case .publishStopped:
+            // Written while the lock is still held, so the App can tell
+            // "quitting" apart from "died": it resolves the lock first, and a
+            // state written after the release would never be read.
+            lifecycleReporter.update { snapshot in
+                snapshot.outcome = .stopped
+                snapshot.detail = "shutdown complete"
+            }
+
         case .releaseInstanceLock:
+            // 使排队的状态重试失效后再释放锁，防止旧 Session 晚发布。
+            deviceRegistry.endSession()
             // Released last: the lock covers every resource touched above. The
             // file stays on disk; only the flock is dropped.
             instanceLock.release()
@@ -488,11 +657,37 @@ func cleanup() {
     logger.info("Cleanup complete")
 }
 
+// MARK: - Routing target
+
+/// The device this Host should route for, chosen without consulting the system
+/// default output.
+///
+/// `managedProxyUID` first: it survives a rebuild and remembers what the Host
+/// was doing. Then whatever the user is listening to, then the first device.
+private func routingTarget(in devices: [PhysicalDevice]) -> PhysicalDevice? {
+    if let uid = proxyManager.managedProxyUID,
+       let managed = devices.first(where: { $0.uid == uid }) {
+        return managed
+    }
+    return proxyManager.resolveCurrentOutputDevice(in: devices) ?? devices.first
+}
+
+/// One clause for the lifecycle detail: where the audio is going, and the fact
+/// that the Host is not the thing that decides it.
+private func defaultOutputNote(_ routing: ProxyDeviceManager.ProxyRoutingOutcome) -> String {
+    if routing.isDefaultOutput {
+        return "the system default output is the SoundBridge device"
+    }
+    let current = deviceRegistry.systemDefaultOutputUID ?? "unset"
+    return "the system default output is \(current) and was left alone"
+}
+
 // MARK: - Startup readiness
 
 private enum ProxyReadiness {
     case ready
     case timedOut(seconds: Int)
+    case cancelled
 }
 
 /// Poll for the driver's proxy device, with a hard deadline.
@@ -502,6 +697,7 @@ private enum ProxyReadiness {
 /// blocked the main thread here would not notice a device appearing until it
 /// had stopped waiting for one.
 private func waitForProxyDevice(forUID physicalUID: String) -> ProxyReadiness {
+    guard let token = lifecycleGate.normalToken(), let session = instanceLock.sessionID else { return .cancelled }
     // `run(mode:before:)` returns immediately when the run loop has no sources,
     // which would turn the poll interval into a spin. One long-lived timer keeps
     // each call blocked for the requested slice.
@@ -518,10 +714,14 @@ private func waitForProxyDevice(forUID physicalUID: String) -> ProxyReadiness {
     )
 
     let outcome = waiter.waitFor { poll in
-        if proxyManager.findProxyDevice(forPhysicalUID: physicalUID) != nil {
-            return .ready
+        guard lifecycleGate.permitsNormal(token), instanceLock.isHeld, instanceLock.sessionID == session else {
+            return .terminal("startup lifecycle changed")
         }
-        return .notYet("proxy device for \(physicalUID) absent from the HAL list (poll \(poll))")
+        let found = proxyManager.findProxyDevice(forPhysicalUID: physicalUID) != nil
+        guard lifecycleGate.permitsNormal(token), instanceLock.isHeld, instanceLock.sessionID == session else {
+            return .terminal("startup lifecycle changed")
+        }
+        return found ? .ready : .notYet("proxy device for \(physicalUID) absent from the HAL list (poll \(poll))")
     }
 
     switch outcome {
@@ -533,7 +733,7 @@ private func waitForProxyDevice(forUID physicalUID: String) -> ProxyReadiness {
         return .timedOut(seconds: Int(SoundBridgeConfig.proxyDiscoveryTimeout.rounded()))
     case .terminal(let reason, _):
         logger.error("Proxy wait aborted: \(reason, privacy: .public)")
-        return .timedOut(seconds: Int(SoundBridgeConfig.proxyDiscoveryTimeout.rounded()))
+        return .cancelled
     }
 }
 
@@ -547,7 +747,7 @@ private func waitForProxyDevice(forUID physicalUID: String) -> ProxyReadiness {
 private func enterDegraded(detail: String) {
     deviceMonitor.setHostState(.degraded)
     lifecycleReporter.update { snapshot in
-        snapshot.outcome = .proxyTimeout
+        snapshot.outcome = .degraded
         snapshot.halDiscovery = .notDiscovered
         snapshot.proxyDevice = .missing
         snapshot.audioPipeline = .notStarted
@@ -567,69 +767,285 @@ private func enterDegraded(detail: String) {
 
 /// Retry the routing step after a device-list change while degraded.
 private func attemptDegradedRecovery() {
-    // One pass per degraded episode. Two notifications arriving while the first
-    // probe is still on a background queue used to start two recoveries, and the
-    // second `audioEngine.setup()` would replace `outputUnit` without disposing
-    // it — two live units rendering into one shared-memory ring.
-    guard degradedRecoveryGate.begin(isDegraded: deviceMonitor.hostState == .degraded) else { return }
+    guard let token = lifecycleGate.normalToken(), let session = instanceLock.sessionID, instanceLock.isHeld,
+          degradedRecoveryGate.begin(isDegraded: deviceMonitor.hostState == .degraded) else { return }
 
-    DispatchQueue.global(qos: .userInitiated).async {
-        let selection = proxyManager.autoSelectProxy()
-        guard selection.isRouted else {
-            logger.info("Degraded recovery: proxy still not selectable (\(selection.diagnostic, privacy: .public))")
-            // Released on the main queue like every other gate mutation.
-            DispatchQueue.main.async { degradedRecoveryGate.finish() }
+    DispatchQueue.main.async {
+        defer { degradedRecoveryGate.finish() }
+        guard lifecycleGate.permitsNormal(token), deviceMonitor.hostState == .degraded,
+              instanceLock.isHeld, instanceLock.sessionID == session else { return }
+        let devices = deviceRegistry.devices
+        guard !devices.isEmpty else {
+            logger.warning("Degraded recovery: no physical devices left")
             return
         }
 
-        DispatchQueue.main.async {
-            defer { degradedRecoveryGate.finish() }
+        // 恢复只重建映射与音频链路，不夺取用户当前的默认输出。
+        let target = routingTarget(in: devices)
+        guard let target else {
+            logger.warning("Degraded recovery: no device to route for")
+            return
+        }
+        let routing = proxyManager.resolveProxyRouting(forPhysicalUID: target.uid)
+        guard routing.isRoutable else {
+            logger.info("Degraded recovery: proxy still not available (\(routing.diagnostic, privacy: .public))")
+            return
+        }
+        guard lifecycleGate.permitsNormal(token), deviceMonitor.hostState == .degraded,
+              instanceLock.isHeld, instanceLock.sessionID == session else { return }
+        adoptCommittedVolumeState()
 
-            // The probe ran off the main queue, so re-check: another path may
-            // have left `.degraded` while it was in flight.
-            guard deviceMonitor.hostState == .degraded else {
-                logger.info(
-                    "Degraded recovery: state became \(deviceMonitor.hostState.rawValue, privacy: .public) while probing; abandoning this pass"
-                )
-                return
+        let canStart = {
+            lifecycleGate.permitsNormal(token) && deviceMonitor.hostState == .degraded &&
+                instanceLock.isHeld && instanceLock.sessionID == session
+        }
+        do {
+            let result = try GuardedEngineStart.run(
+                canProceed: canStart,
+                setup: { try audioEngine.setup(devices: devices, preferredDeviceID: proxyManager.activePhysicalDeviceID) },
+                start: { try audioEngine.start() }
+            )
+            guard result == .started, canStart() else { return }
+            deviceMonitor.setHostState(.active)
+            lifecycleReporter.update { snapshot in
+                snapshot.outcome = .ready
+                snapshot.driverFile = .present
+                snapshot.driverCompatibility = .compatible
+                snapshot.driverLoad = .loaded
+                snapshot.halDiscovery = .discovered
+                snapshot.proxyDevice = .found
+                snapshot.sharedMemoryConnection = .waitingForDriver
+                snapshot.detail = "recovered after the proxy device appeared late"
             }
-
-            let devices = deviceRegistry.devices
-            guard !devices.isEmpty else {
-                logger.warning("Degraded recovery: no physical devices left")
-                return
-            }
-
-            adoptCommittedVolumeState()
-
-            do {
-                try audioEngine.setup(
-                    devices: devices,
-                    preferredDeviceID: proxyManager.activePhysicalDeviceID
-                )
-                try audioEngine.start()
-                deviceMonitor.setHostState(.active)
-                lifecycleReporter.update { snapshot in
-                    snapshot.outcome = .ready
-                    snapshot.driverFile = .present
-                    snapshot.driverCompatibility = .compatible
-                    snapshot.driverLoad = .loaded
-                    snapshot.halDiscovery = .discovered
-                    snapshot.proxyDevice = .found
-                    snapshot.sharedMemoryConnection = .waitingForDriver
-                    snapshot.detail = "recovered after the proxy device appeared late"
-                }
-                startConnectionMonitor()
-                logger.info("Degraded recovery: audio engine started")
-            } catch {
-                logger.error("Degraded recovery: audio engine failed: \(error.localizedDescription)")
-                lifecycleReporter.update { snapshot in
-                    snapshot.outcome = .inactive
-                    snapshot.audioPipeline = .notStarted
-                    snapshot.detail = "proxy found but the audio engine failed: \(error.localizedDescription)"
-                }
+            startConnectionMonitor()
+            logger.info("Degraded recovery: audio engine started")
+        } catch {
+            guard canStart() else { return }
+            logger.error("Degraded recovery: audio engine failed: \(error.localizedDescription)")
+            lifecycleReporter.update { snapshot in
+                snapshot.outcome = .inactive
+                snapshot.audioPipeline = .notStarted
+                snapshot.detail = "proxy found but the audio engine failed: \(error.localizedDescription)"
             }
         }
+    }
+}
+
+// MARK: - CoreAudio rebuild recovery
+
+/// Start one bounded recovery episode for a rebuilt HAL object graph.
+///
+/// Runs on the main queue and pumps the run loop while it waits between
+/// attempts, for the same reason `waitForProxyDevice` does: the HAL callbacks
+/// that carry the new device list are delivered on the main queue, and a Host
+/// blocked in `Thread.sleep` here would not see the device it is waiting for.
+///
+/// Duplicate triggers are no-ops: `coreAudioRecoveryGate` allows one episode at a
+/// time and refuses new ones once shutdown has begun.
+private func attemptCoreAudioRecovery(reason: String) {
+    guard coreAudioRecoveryGate.begin() else { return }
+    guard let session = instanceLock.sessionID, lifecycleGate.beginRecovery() else {
+        coreAudioRecoveryGate.finish()
+        return
+    }
+
+    // Report "recovering", not "ready" and not "stopped". The App has no third
+    // channel for this, so the phase has to be a value of the existing outcome
+    // field.
+    connectionMonitor?.stop()
+    deviceMonitor.beginRecoveryReconciliation()
+    proxyManager.beginRecovery()
+    audioEngine.stop()
+    deviceMonitor.setHostState(.recovering)
+    lifecycleReporter.update { snapshot in
+        snapshot.outcome = .recovering
+        snapshot.halDiscovery = .pending
+        snapshot.proxyDevice = .pending
+        snapshot.audioPipeline = .notStarted
+        snapshot.detail = "CoreAudio rebuilt its device list: \(reason)"
+    }
+    logger.error("CoreAudio recovery started: \(reason, privacy: .public)")
+
+    var reconciliationGeneration: UInt64 = 0
+    let episode = CoreAudioRecoveryEpisode(
+        backoff: RecoveryBackoff(),
+        sleep: { interval in
+            // `run(mode:before:)` returns immediately when the run loop has no
+            // sources, which would turn the backoff into a spin and make four
+            // attempts happen in a microsecond. One long-lived timer keeps each
+            // slice honest, exactly as `waitForProxyDevice` does.
+            let keepAlive = Timer(timeInterval: 3600, repeats: false) { _ in }
+            RunLoop.current.add(keepAlive, forMode: .default)
+            defer { keepAlive.invalidate() }
+            let deadline = ProcessInfo.processInfo.systemUptime + interval
+            while !coreAudioRecoveryGate.isTerminated, !shutdownSequence.isComplete {
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                if remaining <= 0 { break }
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(min(remaining, 0.1)))
+            }
+        },
+        shouldContinue: {
+            !coreAudioRecoveryGate.isTerminated && !shutdownSequence.isComplete &&
+                instanceLock.isHeld && instanceLock.sessionID == session
+        },
+        commitAttempt: {
+            deviceMonitor.finishRecoveryReconciliation(ifUnchanged: reconciliationGeneration)
+        },
+        discardAttempt: {
+            audioEngine.stop()
+        },
+        attemptWithBudget: { attempt, canProceed in
+            reconciliationGeneration = deviceMonitor.recoveryReconciliationSnapshot()
+            let result = performCoreAudioRecoveryAttempt(attempt, canProceed: canProceed)
+            guard canProceed() else { return .terminal(reason: "recovery cancelled or attempt deadline exceeded") }
+            return result
+        }
+    )
+
+    let outcome = episode.run()
+    guard !coreAudioRecoveryGate.isTerminated, !shutdownSequence.isComplete,
+          instanceLock.isHeld, instanceLock.sessionID == session else {
+        coreAudioRecoveryGate.finish()
+        return
+    }
+    if !outcome.isRecovered {
+        audioEngine.stop()
+        if case .waitingForDevice = outcome {
+            // 已在预算检查后原子提交空设备快照。
+        } else {
+            deviceMonitor.abandonRecoveryReconciliation()
+        }
+    }
+    finishCoreAudioRecovery(outcome)
+    proxyManager.endRecovery()
+    lifecycleGate.endRecovery()
+    coreAudioRecoveryGate.finish()
+    deviceMonitor.resetCoreAudioDetector()
+    if outcome.isRecovered, lifecycleGate.permitsNormal() {
+        // 恢复期间的音量通知被 Gate 拒绝；重新同步当前代理音量与静音。
+        if let uid = proxyManager.managedProxyUID,
+           proxyManager.currentDefaultOutputOwner() == .proxy(physicalUID: uid) {
+            proxyManager.reregisterVolumeForwarding()
+        }
+        startConnectionMonitor()
+    }
+}
+
+/// One attempt at putting the audio path back together.
+///
+/// The order matters and is the same on every attempt: drop every stale ID,
+/// re-register the listeners that died with the old graph, enumerate afresh,
+/// publish, then re-map by UID. Nothing from before the rebuild is reused.
+private func performCoreAudioRecoveryAttempt(_ attempt: Int, canProceed: () -> Bool) -> RecoveryAttemptResult {
+    guard canProceed() else {
+        return .terminal(reason: "shutdown or recovery deadline reached")
+    }
+
+    // 1. Every AudioObjectID this process holds is stale. Dropping them first
+    //    means no later step can use one by accident.
+    proxyManager.invalidateDeviceReferences()
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+
+    // 2. The property listeners were registered against the old graph and are
+    //    gone with it. Without them the Host would recover once and then go
+    //    deaf, which is exactly the 1.2.0 symptom.
+    deviceMonitor.reregisterListeners(reason: "CoreAudio rebuild")
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    guard deviceMonitor.hasAllListeners else {
+        return .retryable(reason: "HAL property listeners could not be re-registered")
+    }
+
+    // 3. Enumerate from scratch.
+    let enumeration = deviceDiscovery.enumeratePhysicalDevicesWithStatus()
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    guard !enumeration.queryFailed else {
+        return .retryable(reason: "the HAL device list is still not queryable (attempt \(attempt))")
+    }
+
+    let devices = enumeration.devices
+    // 先为新设备建立共享内存，再发布快照；清理旧映射时检查代际。
+    guard deviceMonitor.publishRecoveryDevices(devices, canProceed: canProceed) else {
+        return .retryable(reason: "could not prepare the current recovery device mappings")
+    }
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    guard !devices.isEmpty else {
+        _ = proxyManager.refreshSystemDefaultOutput()
+        return .waitingForDevice(reason: "no physical output device after the CoreAudio rebuild")
+    }
+    // 可能从尚未启动过心跳的 idle 状态进入恢复。
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    memoryManager.startHeartbeat()
+
+    // 5. Re-resolve the proxy by UID and restore its volume state. This does
+    //    not touch the default output device.
+    let remap = proxyManager.remapAfterCoreAudioRebuild(in: devices)
+    guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    guard remap.proxyPresent else {
+        return .retryable(
+            reason: "the driver has not published a proxy again yet (\(devices.count) physical device(s))"
+        )
+    }
+
+    // 6. Bring the engine back on the physical device.
+    do {
+        adoptCommittedVolumeState()
+        guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+        try audioEngine.setup(devices: devices, preferredDeviceID: remap.physicalDeviceID)
+        guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+        try audioEngine.start()
+        guard canProceed() else { return .terminal(reason: "recovery cancelled") }
+    } catch {
+        return .retryable(reason: "the audio engine could not start: \(error.localizedDescription)")
+    }
+
+    let detail = remap.defaultIsProxy
+        ? "proxy re-established and still the default output"
+        : "proxy re-established; the default output is \(remap.systemDefaultOutputUID ?? "unset") and was left alone"
+    return .recovered(detail: detail)
+}
+
+/// Report what the episode achieved.
+private func finishCoreAudioRecovery(_ outcome: CoreAudioRecoveryOutcome) {
+    switch outcome {
+    case .recovered:
+        deviceMonitor.setHostState(.active)
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .ready
+            snapshot.driverFile = .present
+            snapshot.driverCompatibility = .compatible
+            snapshot.driverLoad = .loaded
+            snapshot.halDiscovery = .discovered
+            snapshot.proxyDevice = .found
+            snapshot.sharedMemoryConnection = .waitingForDriver
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = outcome.diagnostic
+        }
+        print("[Recovery] \(outcome.diagnostic)")
+        logger.info("CoreAudio recovery complete: \(outcome.diagnostic, privacy: .public)")
+
+    case .waitingForDevice:
+        deviceMonitor.setHostState(.idle)
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .noPhysicalDevices
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = outcome.diagnostic
+        }
+
+    case .failed, .exhausted:
+        deviceMonitor.setHostState(.degraded)
+        lifecycleReporter.update { snapshot in
+            snapshot.outcome = .degraded
+            snapshot.halDiscovery = .notDiscovered
+            snapshot.proxyDevice = .missing
+            snapshot.audioPipeline = .notStarted
+            snapshot.detail = outcome.diagnostic
+        }
+        // A proxy that appears later must still be able to take over without a
+        // relaunch; that is the same late-driver path startup uses.
+        deviceMonitor.onDegradedRecovery = {
+            attemptDegradedRecovery()
+        }
+        logger.error("CoreAudio recovery did not restore the audio path: \(outcome.diagnostic, privacy: .public)")
     }
 }
 
@@ -663,45 +1079,24 @@ func startConnectionMonitor() {
     connectionMonitor?.stop()
 
     let monitor = DriverConnectionMonitor(
+        lifecycleGate: lifecycleGate,
         sample: {
+            // Control-thread drain for what the render callback recorded. The
+            // callback itself only adds to counters; this is where a refused
+            // block, a missing mapping or a missed deadline becomes a log line.
+            renderer.drainDiagnostics()
+            renderer.drainTiming()
             guard let uid = proxyManager.activeProxyUID else { return nil }
             return memoryManager.connectionObservation(for: uid)
         },
         report: { status, pipeline in
             lifecycleReporter.update { snapshot in
-                snapshot.sharedMemoryConnection = status
-                snapshot.audioPipeline = pipeline
-
-                switch status {
-                case .connected:
-                    snapshot.driverLoad = .loaded
-                    snapshot.halDiscovery = .discovered
-                    snapshot.proxyDevice = .found
-                case .driverNotResponding:
-                    // Attached but never produced a frame — the narrow case that
-                    // really is wrong. A device that played and went quiet stays
-                    // `.connected` with `pipeline == .stalled`, because a pause
-                    // is not a fault.
-                    snapshot.outcome = .driverNotResponding
-                    snapshot.detail = "driver attached but never produced a frame"
-                case .disconnected:
-                    snapshot.detail = "driver detached from this mapping"
-                case .hostHeartbeatStalled:
-                    snapshot.detail = "Host heartbeat timer stopped advancing"
-                case .invalid:
-                    snapshot.detail = "shared memory header failed validation"
-                case .pending, .waitingForDriver:
-                    break
-                }
-
-                if status == .connected, deviceMonitor.hostState == .active {
-                    snapshot.outcome = .ready
-                    if snapshot.detail?.isEmpty != false {
-                        snapshot.detail = pipeline == .flowing
-                            ? "audio flowing through the driver"
-                            : "routed through the proxy device; no frames yet"
-                    }
-                }
+                SharedMemoryReportPolicy.apply(
+                    status,
+                    pipeline: pipeline,
+                    hostIsActive: deviceMonitor.hostState == .active,
+                    to: &snapshot
+                )
             }
         }
     )

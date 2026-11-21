@@ -6,7 +6,7 @@
 # preparing a different release without editing the file.
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-host test-app test-installer protocol-check dsp-build sign verify release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
+.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-driver test-host test-app test-installer protocol-check dsp-build sign verify release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
 
 # Default target - show help
 help:
@@ -45,7 +45,8 @@ help:
 	@echo "    make test-release-payload - Damage tests for the checkers themselves"
 	@echo ""
 	@echo "  Other:"
-	@echo "    make test         - Run protocol check + DSP/Host/App/installer tests"
+	@echo "    make test         - Run protocol check + DSP/Driver/Host/App/installer tests"
+	@echo "    make test-driver  - Run the Driver's C++ unit tests"
 	@echo "    make test-installer - Run the driver install transaction tests"
 	@echo "    make test-installer-gate - Run the package's preinstall/postinstall gate tests"
 	@echo "    make protocol-check - Verify the single shared-memory protocol source"
@@ -126,7 +127,7 @@ install-deps:
 # Run all tests: protocol consistency first, then DSP -> Driver -> Host -> App.
 # The Host links the prebuilt DSP static library through a relative path, so
 # `dsp-build` has to run before `swift test` in packages/host.
-test: protocol-check version-check test-dsp test-host test-app test-installer test-codesign
+test: protocol-check version-check test-dsp test-driver test-host test-app test-installer test-codesign
 	@echo "✓ All test suites passed"
 
 # Every version source agrees on $(VERSION) (App, Driver, VERSION files, CMake).
@@ -153,6 +154,27 @@ dsp-build:
 test-dsp: dsp-build
 	@echo "Running DSP tests..."
 	@cd packages/dsp/build && ctest --output-on-failure
+
+# Run the Driver's C++ unit tests
+#
+# The three suites under packages/driver/tests include src/*.hpp and nothing else
+# from the driver, so they build and run with no driver installed, no sudo and no
+# CoreAudio. packages/driver/CMakeLists.txt declares them as plain executables
+# and registers them with CTest.
+#
+# They are configured in a scratch directory on purpose: packages/driver/build
+# holds the bundle the release tooling signs, and a test run must not write over
+# it. The scratch path is printed so a failing run can still be inspected.
+test-driver:
+	@echo "Running Driver tests..."
+	@scratch="$$(mktemp -d "$${TMPDIR:-/tmp}/soundbridge-driver-tests.XXXXXX")" && \
+	echo "  scratch build: $$scratch" && \
+	cmake -S packages/driver -B "$$scratch" && \
+	cmake --build "$$scratch" \
+	    --target soundbridge_driver_control_protocol_tests \
+	             soundbridge_driver_producer_token_tests \
+	             soundbridge_driver_mapping_retirement_tests && \
+	ctest --test-dir "$$scratch" --output-on-failure
 
 # Run Host tests (volume state model + shared-memory protocol)
 test-host: dsp-build
@@ -355,11 +377,16 @@ dmg-precheck:
 # mounted image to the same comparison (four-way); `verify-pkg` stays package-only
 # so it can answer one question without mounting anything.
 #
+# Which release is checked is $(VERSION) -- the repository's VERSION file -- and
+# that is handed to each verifier explicitly. The bundle in dist/ no longer
+# selects the artifacts: it is the copy that goes stale, and a 1.1.1 bundle next
+# to a 1.2.0 tree used to make the 1.1.1 package and image look verified.
+#
 # `verify-payload` prints one line per area (PASS, FAIL or NOT_VERIFIED); the
 # individual targets exist for when only one artifact is at hand. An artifact
 # that is not there is reported as NOT_VERIFIED, not as PASS.
 verify-pkg:
-	@./tools/verify_pkg_contents.sh --app "$(APP_BUNDLE)"
+	@./tools/verify_pkg_contents.sh --app "$(APP_BUNDLE)" --version "$(VERSION)"
 
 # Static check of an installer package: payload layout, script contents, and the
 # pre-payload version gate. Reads only, never installs.
@@ -375,10 +402,10 @@ verify-installer-pkg:
 	./tools/verify_installer_pkg.sh $(if $(ALLOW_LEGACY_PREINSTALL),--allow-legacy-preinstall,) "$$PKG"
 
 verify-dmg:
-	@./tools/verify_dmg_contents.sh --app "$(APP_BUNDLE)"
+	@./tools/verify_dmg_contents.sh --app "$(APP_BUNDLE)" --expect-version "$(VERSION)"
 
 verify-payload:
-	@./tools/verify_release_payload.sh --app "$(APP_BUNDLE)"
+	@./tools/verify_release_payload.sh --app "$(APP_BUNDLE)" --version "$(VERSION)"
 
 # Damage tests for the verifiers above: each case breaks one copy of an artifact
 # and expects the matching verifier to notice. Reads dist/, writes only to a

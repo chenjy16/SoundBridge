@@ -57,6 +57,57 @@ enum HostInstanceProbe {
         return false
     }
 
+    enum State: Equatable {
+        case notRunning
+        case held(session: UUID?)
+        case unavailable
+    }
+
+    /// 在同一个稳定 inode 上读取持锁记录；记录本身不能证明锁仍然持有。
+    static func state(path: String = lockPath()) -> State {
+        let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { return errno == ENOENT ? .notRunning : .unavailable }
+        defer { close(fd) }
+        var opened = stat()
+        var current = stat()
+        guard fstat(fd, &opened) == 0, lstat(path, &current) == 0,
+              (opened.st_mode & S_IFMT) == S_IFREG, opened.st_uid == getuid(), opened.st_dev == current.st_dev,
+              opened.st_ino == current.st_ino else { return .unavailable }
+        if _lockFileDescriptor(fd, LOCK_EX | LOCK_NB) == 0 {
+            _ = _lockFileDescriptor(fd, LOCK_UN)
+            return .notRunning
+        }
+        guard errno == EWOULDBLOCK || errno == EAGAIN else { return .unavailable }
+        var bytes = [UInt8](repeating: 0, count: 512)
+        let count = pread(fd, &bytes, bytes.count, 0)
+        guard count > 0, count < bytes.count, bytes[count - 1] == 10 else { return .unavailable }
+        let text = String(decoding: bytes.prefix(count), as: UTF8.self)
+        let fields = text.split(whereSeparator: { $0.isWhitespace })
+        let uidFields = fields.filter { $0.hasPrefix("uid=") }
+        guard uidFields.count == 1, UInt32(uidFields[0].dropFirst(4)) == getuid() else { return .unavailable }
+        let sessionFields = fields.filter { $0.hasPrefix("session=") }
+        guard sessionFields.count <= 1 else { return .unavailable }
+        let sessionField = sessionFields.first
+        let session: UUID?
+        if let field = sessionField {
+            guard let value = UUID(uuidString: String(field.dropFirst("session=".count))) else { return .unavailable }
+            session = value
+        } else {
+            session = nil // 旧 Host 的锁记录没有 Session。
+        }
+        var second = [UInt8](repeating: 0, count: bytes.count)
+        let secondCount = pread(fd, &second, second.count, 0)
+        guard secondCount == count, bytes.prefix(count).elementsEqual(second.prefix(count)),
+              lstat(path, &current) == 0, opened.st_dev == current.st_dev,
+              opened.st_ino == current.st_ino else { return .unavailable }
+        if _lockFileDescriptor(fd, LOCK_EX | LOCK_NB) == 0 {
+            _ = _lockFileDescriptor(fd, LOCK_UN)
+            return .notRunning
+        }
+        guard errno == EWOULDBLOCK || errno == EAGAIN else { return .unavailable }
+        return .held(session: session)
+    }
+
     /// What the owner recorded, for logs. `nil` when the file holds nothing.
     static func ownerDescription(path: String = lockPath()) -> String? {
         guard let data = FileManager.default.contents(atPath: path), !data.isEmpty,

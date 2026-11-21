@@ -82,13 +82,19 @@ final class AtomicMemoryModelTests: XCTestCase {
         ("volume_mode", 4, 204),
         ("state_initialized", 4, 208),
         ("state_revision", 8, 216),
+        // Batch 2 admission gateway: read inside the audio callback, so the
+        // offsets AND the lock-freedom of these four are part of the RT contract.
+        ("admission_state", 4, 256),
+        ("admission_epoch", 8, 264),
+        ("producer_owner_token", 8, 272),
+        ("admission_claim_seq", 8, 280),
     ]
 
     func testAtomicFieldLayoutIsAlignedAndPinned() throws {
         let report = try runProbe()
 
-        XCTAssertEqual(report["sizeof"], "256", "the fixed header must stay one cache-line-multiple")
-        XCTAssertEqual(report["header_size"], "256")
+        XCTAssertEqual(report["sizeof"], "320", "the fixed header must stay one cache-line-multiple")
+        XCTAssertEqual(report["header_size"], "320")
 
         for field in Self.atomicFields {
             let offsetKey = "offset.\(field.name)"
@@ -330,7 +336,7 @@ final class AtomicMemoryModelTests: XCTestCase {
 
     private func makeManager() -> SharedMemoryManager {
         let directory = sandbox!
-        return SharedMemoryManager(pathForUID: { "\(directory.path)/soundbridge-\($0)" })
+        return SharedMemoryManager(sessionID: UUID(), pathForUID: { "\(directory.path)/soundbridge-\($0)" })
     }
 
     private func runProbe() throws -> [String: String] {
@@ -449,6 +455,10 @@ final class AtomicMemoryModelTests: XCTestCase {
         OFFSET(volume_mode);
         OFFSET(state_initialized);
         OFFSET(state_revision);
+        OFFSET(admission_state);
+        OFFSET(admission_epoch);
+        OFFSET(producer_owner_token);
+        OFFSET(admission_claim_seq);
 
         LOCKFREE(format_change_counter);
         LOCKFREE(write_index);
@@ -468,6 +478,10 @@ final class AtomicMemoryModelTests: XCTestCase {
         LOCKFREE(volume_mode);
         LOCKFREE(state_initialized);
         LOCKFREE(state_revision);
+        LOCKFREE(admission_state);
+        LOCKFREE(admission_epoch);
+        LOCKFREE(producer_owner_token);
+        LOCKFREE(admission_claim_seq);
 
         /* Copied by value, never read atomically: report its lock-freedom as a
            separate fact so a future change to a wider snapshot is visible. */

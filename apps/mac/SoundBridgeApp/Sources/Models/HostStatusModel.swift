@@ -20,7 +20,21 @@ final class HostStatusModel: ObservableObject {
     /// the next IPC tick. Not published: no view renders it directly.
     private(set) var lastReport: HostLifecycleReport?
 
+    /// Re-resolve from the current file and lock, without waiting for a
+    /// notification.
+    ///
+    /// Set by `AppDelegate`, which is the only place that knows how to ask both
+    /// questions. Called from the menu bar's `onAppear` and from a low-frequency
+    /// fallback timer: a notification that never arrives must cost a few
+    /// seconds, not require the user to close and reopen the panel.
+    var refreshHandler: (() -> Void)?
+
     private init() {}
+
+    /// Ask the owner to re-resolve. Safe to call from any thread.
+    func refresh() {
+        refreshHandler?()
+    }
 
     /// Take a resolution made by the caller.
     ///
@@ -53,8 +67,10 @@ final class HostStatusModel: ObservableObject {
     ///
     /// Hiding the healthy case keeps the popover unchanged for users whose audio
     /// works — the "no large UI rework" constraint. `starting` is included
-    /// because a silent popover during launch looks like a hang.
+    /// because a silent popover during launch looks like a hang, and Phase 6A
+    /// added `recovering` / `stopping` for the same reason: those are the moments
+    /// a user is most likely to open the panel and wonder what is happening.
     var showsStatusLine: Bool {
-        state.isProblem || state == .starting
+        state.isProblem || state.isTransitional
     }
 }

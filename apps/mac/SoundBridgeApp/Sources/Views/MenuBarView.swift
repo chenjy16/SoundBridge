@@ -19,10 +19,25 @@ private let soundbridgeFont: Font = {
 }()
 
 struct MenuBarView: View {
+    /// The App-owned EQ writer, passed in by `AppDelegate`.
+    ///
+    /// This used to be `@StateObject private var eqController = EQController(…)`,
+    /// which meant the writer was created the first time the popover rendered.
+    /// A user who never opened the menu bar had no writer at all, and the Host's
+    /// new mapping stayed at `eq_sequence = 0` (Gate 3). Observing an instance
+    /// that already exists is the whole fix: the view is now only a reader.
+    @ObservedObject private var eqController: EQController
     @StateObject private var volumeController = VolumeController.shared
-    @StateObject private var eqController = EQController(deviceUID: "default")
     @StateObject private var hostStatus = HostStatusModel.shared
     @State private var showDeviceList = false
+    /// Set when an explicit switch failed. The list stays open and the user is
+    /// told why: a silent failure is what would invite a "just try again in a
+    /// loop" fix, which P2 Batch 2 forbids.
+    @State private var switchFailure: String?
+
+    init(eqController: EQController) {
+        self.eqController = eqController
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -83,8 +98,13 @@ struct MenuBarView: View {
                     devices: volumeController.allDevices,
                     activeUID: volumeController.activeDeviceUID,
                     onSelect: { device in
-                        volumeController.switchDevice(to: device)
-                        showDeviceList = false
+                        // The one explicit default-output switch in the product.
+                        let result = volumeController.switchDevice(to: device)
+                        if let failure = result.failureMessage {
+                            switchFailure = failure
+                        } else {
+                            showDeviceList = false
+                        }
                     }
                 )
             }
@@ -93,6 +113,14 @@ struct MenuBarView: View {
             ReconnectAudioButton()
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
+
+            // 5. Host-only restart. Below "Reconnect Audio" and deliberately
+            // its own row: that one rebuilds the audio path inside the running
+            // Host (same process, same session, same mapping); this one replaces
+            // the Host process, which is what publishes a new mapping.
+            RestartHostButton()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 0)
 
             FooterBar()
                 .padding(.horizontal, 8)
@@ -104,6 +132,22 @@ struct MenuBarView: View {
         .onReceive(volumeController.$activeDeviceUID) { uid in
             guard !uid.isEmpty else { return }
             eqController.attachSharedMemory(for: uid)
+        }
+        // A notification cannot be replayed: whatever the Host published while
+        // the panel was closed was only seen by `IPCController`. Re-resolve on
+        // open so the first frame already reflects the current Host, instead
+        // of showing the value captured at launch.
+        .onAppear { hostStatus.refresh() }
+        .alert(
+            "Could not switch output",
+            isPresented: Binding(
+                get: { switchFailure != nil },
+                set: { if !$0 { switchFailure = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { switchFailure = nil }
+        } message: {
+            Text(switchFailure ?? "")
         }
     }
 }
@@ -318,14 +362,92 @@ struct ReconnectAudioButton: View {
 
     private func reconnect() {
         isBouncing = true
-        VolumeController.shared.bounceDevice()
-        // Show feedback after bounce completes
+        VolumeController.shared.requestAudioReconnect()
+        // Show feedback after the Host has had time to re-establish the path.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             isBouncing = false
             showDone = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 showDone = false
             }
+        }
+    }
+}
+
+// MARK: - Restart Host
+
+/// User-facing Host-only restart.
+///
+/// The click reaches `AppDelegate.requestHostRestart()`, which applies the gate
+/// (`HostRestartEntry`: no restart while uninstalling or terminating) and then
+/// calls the same `restartHost()` the supervisor tests drive — never a second
+/// process-launching path, never `killall`, never a `Process()` of its own.
+///
+/// The disabled window below is feedback, not the concurrency control: a second
+/// click that does get through is coalesced by `HostSupervisor`, and the instance
+/// lock prevents a second Host regardless. It is only long enough for the stop,
+/// the graceful exit and the relaunch to be under way.
+struct RestartHostButton: View {
+    @State private var isRequesting = false
+    @State private var refusal: String?
+
+    var body: some View {
+        Button(action: restart) {
+            HStack(spacing: 6) {
+                if isRequesting {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                Text(isRequesting ? "Restarting Host…" : "Restart Host")
+                    .font(.system(size: 11))
+                    .foregroundColor(.primary)
+                if let refusal {
+                    Text(refusal)
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.06))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isRequesting)
+    }
+
+    private func restart() {
+        refusal = nil
+        guard let appDelegate = NSApp.delegate as? AppDelegate else {
+            // Not reachable in the app (`@main` is the delegate). Saying so beats
+            // a click that visibly does nothing.
+            refusal = "Unavailable"
+            return
+        }
+
+        let outcome = appDelegate.requestHostRestart()
+        guard outcome == .requested else {
+            switch outcome {
+            case .refusedUninstalling: refusal = "Uninstalling"
+            case .refusedShuttingDown: refusal = "Shutting down"
+            case .requested: break
+            }
+            return
+        }
+
+        isRequesting = true
+        // SIGTERM → the Host's ordered teardown → relaunch → lock. The label is
+        // back to "Restart Host" once that has had time to finish; the state it
+        // actually ended in is reported by the Host status row above, not here.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            isRequesting = false
         }
     }
 }
@@ -361,10 +483,45 @@ struct UninstallButton: View {
         .onHover { hovering in isHovered = hovering }
     }
 
+    /// Remove the driver the same way `tools/uninstall_driver.sh` does.
+    ///
+    /// P4 Batch 1A rewrote this. It used to kill the Host by name, delete
+    /// `/tmp/soundbridge-*` with a wildcard, `rm -rf` whatever sat at the HAL
+    /// path without checking whose it was, and finish with `killall coreaudiod`
+    /// inside the same privileged command. Every one of those is now the
+    /// policy's decision, made before the prompt:
+    ///
+    ///   1. identify the bundle (unprivileged, and refuse anything else)
+    ///   2. ask the supervisor to stop the Host, and wait for it
+    ///   3. remove one constant path, once
+    ///   4. verify it is gone, and only then clear onboarding state
     private func performUninstall() {
+        switch DriverUninstallPolicy.decide(DriverUninstaller.readIdentity()) {
+        case .nothingToRemove:
+            presentUninstallMessage(
+                title: "Driver Not Installed",
+                message: "There is no SoundBridge driver at \(DriverUninstallPolicy.driverPath). Nothing was removed."
+            )
+            return
+        case .refuse(let reason):
+            presentUninstallMessage(
+                title: "Driver Left Alone",
+                message: "\(DriverUninstallPolicy.driverPath) was not removed: \(reason). Nothing was changed."
+            )
+            return
+        case .remove:
+            break
+        }
+
         let alert = NSAlert()
         alert.messageText = "Uninstall SoundBridge Driver"
-        alert.informativeText = "This will remove the audio driver, stop background processes, and clear configuration data. The app itself will not be deleted — you can reinstall the driver anytime."
+        alert.informativeText = """
+        This removes:
+        \(DriverUninstallPolicy.removed.map { "• \($0)" }.joined(separator: "\n"))
+
+        This keeps:
+        \(DriverUninstallPolicy.kept.map { "• \($0)" }.joined(separator: "\n"))
+        """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Uninstall Driver")
         alert.addButton(withTitle: "Cancel")
@@ -372,61 +529,65 @@ struct UninstallButton: View {
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
 
-        // Tell AppDelegate we're uninstalling so Host's terminationHandler
-        // won't call NSApp.terminate prematurely.
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.isUninstalling = true
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+
+        // Order, and why: the Host goes first, through the supervisor, and the
+        // bundle is removed only in the completion. `shutdown(intent: .uninstall)`
+        // sets the supervisor's shutdown latch, so a Host exit observed during
+        // the removal is not read as a crash and relaunched against a driver
+        // that is being deleted.
+        // A value type cannot be captured weakly, and it does not need to be:
+        // the completion runs on the main queue and touches no view state.
+        appDelegate.prepareForUninstall {
+            DispatchQueue.main.async { self.removeDriverAndFinish() }
+        }
+    }
+
+    /// Step 3 and 4, on the main thread, after the Host is gone.
+    private func removeDriverAndFinish() {
+        do {
+            try DriverUninstaller.remove()
+        } catch {
+            // Nothing else has been touched: onboarding state is cleared only
+            // after the path is confirmed gone.
+            presentUninstallMessage(
+                title: "Driver Not Removed",
+                message: "\(error.localizedDescription)\n\nThe app is still running and your EQ settings are untouched."
+            )
+            return
         }
 
-        // Step 1: Kill host and remove driver (requires admin).
-        // Each command is guarded with "|| true" so a single failure
-        // (e.g. coreaudiod restart returning non-zero) does not abort
-        // the entire script and cause the app to skip cleanup.
-        let script = """
-        do shell script "killall SoundBridgeHost 2>/dev/null || true; \
-        rm -rf /Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver || true; \
-        rm -f /tmp/soundbridge-devices.txt 2>/dev/null || true; \
-        rm -f /tmp/soundbridge-* 2>/dev/null || true; \
-        killall coreaudiod 2>/dev/null || true" with administrator privileges
-        """
-
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        appleScript?.executeAndReturnError(&error)
-
-        // Proceed with user-level cleanup regardless of AppleScript result.
-        // The admin script may report an error even when it partially succeeded
-        // (e.g. coreaudiod restart returns non-zero), so we always clean up.
-
-        // Clean up Application Support data
-        let fm = FileManager.default
-        if let appSupport = fm.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first?.appendingPathComponent("SoundBridge") {
-            try? fm.removeItem(at: appSupport)
-        }
-
-        // Clean up log directory
-        if let logsDir = fm.urls(
-            for: .libraryDirectory,
-            in: .userDomainMask
-        ).first?.appendingPathComponent("Logs/SoundBridge") {
-            try? fm.removeItem(at: logsDir)
-        }
-
-        // Clean up UserDefaults (onboarding state)
+        // The driver is gone, so the next launch should explain the install
+        // again. EQ values (`eq_default_*`), logs and Application Support are
+        // deliberately kept: they are what a reinstall resumes from.
         let defaults = UserDefaults.standard
         for key in ["hasCompletedOnboarding", "onboardingVersion",
-                     "driverInstallDate", "lastDriverVersionCheck"] {
+                    "driverInstallDate", "lastDriverVersionCheck"] {
             defaults.removeObject(forKey: key)
         }
         defaults.synchronize()
 
-        // Give coreaudiod time to restart, then quit
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            NSApp.terminate(nil)
-        }
+        let done = NSAlert()
+        done.messageText = "Driver Removed"
+        done.informativeText = """
+        \(DriverUninstallPolicy.driverPath) is gone. \(DriverUninstallPolicy.restartAdvice)
+
+        Kept: \(DriverUninstallPolicy.kept.joined(separator: ", ")).
+        """
+        done.alertStyle = .informational
+        done.addButton(withTitle: "Quit SoundBridge")
+        done.runModal()
+
+        NSApp.terminate(nil)
+    }
+
+    private func presentUninstallMessage(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 

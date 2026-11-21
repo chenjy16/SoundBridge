@@ -1,6 +1,8 @@
-# SoundBridge 1.2.0 — 安装指南
+# SoundBridge 1.2.0 — 安装与卸载指南
 
-本文面向**从 GitHub Release 下载** SoundBridge 的用户。
+本文面向**从 GitHub Release 下载** SoundBridge 的用户，不需要本地编译。
+
+版本：`1.2.0` ｜ App/驱动协议：`0x00020200`（131584）
 
 ---
 
@@ -10,13 +12,18 @@ SoundBridge 由两部分组成：
 
 | 组件 | 位置 | 作用 |
 |---|---|---|
-| **SoundBridge.app** | `/Applications/` | 菜单栏应用，显示控制、均衡器、更新 |
+| **SoundBridge.app** | `/Applications/` | 菜单栏应用：控制、均衡器、Host 生命周期 |
 | **SoundBridgeDriver.driver** | `/Library/Audio/Plug-Ins/HAL/` | macOS 音频驱动，向系统注册虚拟输出设备 |
 
-只安装 App 是不够的：驱动在系统目录里，需要管理员权限才能写入。这也是为什么有两个下载文件。
+只安装 App 是不够的：驱动在系统目录里，只有安装包能写入。**因此有两个下载文件，用途不同。**
 
-**本版本的两个安装包都未经过 Apple 公证（notarization），程序使用 ad-hoc 签名。**
-这不是 Developer ID 签名，macOS 无法验证它的来源，因此首次运行时系统会要求你手动确认一次。这是预期行为，不是安装失败。
+**本版本未经 Apple 公证（notarization），使用 ad-hoc 签名。** 这不是 Developer ID
+签名，macOS 无法验证发布者，首次运行时系统会要求手动确认一次。这是预期行为，不是
+安装失败。本项目不提供、也不承诺 Developer ID 签名或公证版本。
+
+**安装前请先退出 SoundBridge。** 安装器不检查 App 或 Host 是否在运行（见
+[Known-Limitations](risks/Known-Limitations.md) P2-5）：一个正在运行的 Host 会在驱动
+被替换后继续持有旧映射，直到它自己退出。菜单栏 → **Quit SoundBridge** 之后再安装。
 
 ---
 
@@ -24,130 +31,172 @@ SoundBridge 由两部分组成：
 
 | 文件 | 适用场景 | 是否安装驱动 |
 |---|---|---|
-| `SoundBridge-1.2.0.pkg` | **推荐**。首次安装，或从旧版本驱动升级 | 是 |
-| `SoundBridge-1.2.0.dmg` | 只想更新 App，或想手动查看包内容 | 否 |
+| `SoundBridge-1.2.0.pkg` | **推荐**。首次安装，或从旧版本升级 | 是 |
+| `SoundBridge-1.2.0.dmg` | 只想替换 App，或查看包内容 | 否 |
 
-两者的关系：
+两者的关系，也是唯一需要记住的一条：
 
-- 拖 DMG 里的 App 到 `/Applications` 只会替换 App，**不会**改动 `/Library/Audio/Plug-Ins/HAL/` 里的驱动。如果你机器上已有旧驱动，它会保持旧版本，App 会提示版本不匹配。
-- PKG 同时安装 App 和驱动，并把驱动替换做成一个带校验和回滚的事务。**升级请用 PKG。**
+- PKG 同时安装 App 和驱动，驱动替换是一个带预检、备份、校验和回滚的事务
+  （`tools/sb_install_transaction.sh`）。**升级一律用 PKG。**
+- DMG 里只有 App，拖进 `/Applications` **不会**改动
+  `/Library/Audio/Plug-Ins/HAL/`。机器上已有的旧驱动会保持旧版本，App 会提示版本
+  不匹配，并且**不会**自行替换驱动。
+
+协议已从 1.1.x 的线格式变更到 `0x00020200`。旧驱动配新 App 不会出声，这就是 DMG
+不能用来升级的原因。
 
 ---
 
 ## 2. 校验下载文件（建议执行）
 
-Release 页面附带的 `SHA256SUMS.txt` 覆盖两个二进制文件。
-
-把下载的文件和 `SHA256SUMS.txt` 放在同一个目录，然后：
+Release 页面附带的 `SHA256SUMS.txt` 覆盖两个二进制文件。把下载的文件和它放在同一
+目录，然后：
 
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-期望输出：
-
-```
-SoundBridge-1.2.0.pkg: OK
-SoundBridge-1.2.0.dmg: OK
-```
-
-任何一行不是 `OK` 都说明文件在传输中损坏或被篡改，请重新下载，不要继续安装。
-
-校验值只在 Release 页面上的 `SHA256SUMS.txt` 里维护，本文不复制一份。复制的那份会在重新构建后过时，而「下载的文件对不上文档里的校验值」会让人以为文件坏了。
-
-需要人工核对时，从 Release 页面打开 `SHA256SUMS.txt`，里面两行分别对应 `.dmg` 与 `.pkg`。
+期望两行都是 `OK`。任何一行不是 `OK` 都说明文件在传输中损坏或被篡改，请重新下载，
+不要继续安装。校验值只在 Release 页面的 `SHA256SUMS.txt` 里维护，本文不复制一份
+（复制的那份会在重新构建后过时）。
 
 ---
 
-## 3. 正常打开（未触发安全提示时）
+## 3. 用 PKG 安装（推荐路径）
 
-### 用 PKG
+1. 退出 SoundBridge：菜单栏图标 → **Quit SoundBridge**。
+2. 双击 `SoundBridge-1.2.0.pkg`。
+3. 安装器显示 `SoundBridge 1.2.0`，点「继续」→「安装」。
+4. **管理员授权**：macOS 会要求输入一次管理员用户名与密码。
+   - 这是安装器自身的授权，不是 SoundBridge 在后台提权。
+   - 安装脚本只在 `/Library/Audio/Plug-Ins/HAL/` 与 `/Applications/` 写入，
+     不发送任何网络请求。
+5. 看到「安装成功」后关闭窗口。
+6. 打开 `/Applications/SoundBridge.app`，引导流程会**读取**已装驱动并确认结果。
 
-1. 双击 `SoundBridge-1.2.0.pkg`。
-2. 安装器窗口显示 `SoundBridge 1.2.0`，点击「继续」→「安装」。
-3. 输入管理员密码。
-4. 看到「安装成功」后关闭窗口。
+安装器在写入任何文件之前先检查已装驱动：
 
-驱动在安装结束时就位，但不会主动重启系统音频服务。它会随下一次音频设备扫描加载；打开 SoundBridge.app 或切换一次输出设备即可。
+| 已装状态 | 结果 |
+|---|---|
+| 更旧 | 升级，继续 |
+| 相同 | 重装，继续 |
+| 更新 | 拒绝，并说明未写入任何文件 |
+| 协议更新 | 拒绝，不降级线格式 |
+| 声明了不认识的协议 | 拒绝 |
 
-### 用 DMG
+驱动替换本身是事务：校验载荷 → 暂存 → 校验副本 → 备份旧驱动 → 重命名换位 → 再次
+校验；任一步失败则回滚，旧驱动保留或还原。**安装器不会重启 `coreaudiod`。**
 
-1. 双击 `SoundBridge-1.2.0.dmg`，挂载出磁盘映像。
-2. 把 `SoundBridge.app` 拖到 `Applications` 别名（或 Finder 的「应用程序」）。
-3. 在 Finder 里推出该磁盘映像。
-4. 打开 `/Applications/SoundBridge.app`。
+驱动在安装结束时已就位。它随下一次音频设备扫描加载：打开 SoundBridge.app，或在
+「系统设置 → 声音」里切换一次输出设备即可。
 
 ---
 
-## 4. 被系统拦下时怎么办
+## 4. 用 DMG 安装（仅替换 App）
 
-### 4.1 App 被拦：「无法打开，因为无法验证开发者」
+1. 退出 SoundBridge。
+2. 双击 `SoundBridge-1.2.0.dmg`，挂载出磁盘映像。
+3. 把 `SoundBridge.app` 拖到「应用程序」。
+4. 在 Finder 里推出该磁盘映像。
+5. 打开 `/Applications/SoundBridge.app`。
 
-**不要关闭 Gatekeeper，不要执行 `spctl --master-disable`。** 正确做法是逐个程序授权：
+如果这台机器上还没有 1.2.0 驱动，App 会显示安装引导并指向 PKG —— 它不会自己装。
+
+---
+
+## 5. 被系统拦下时怎么办
+
+**不要关闭 Gatekeeper，不要执行 `spctl --master-disable`，不要关闭 SIP。** 正确做法
+是逐个程序授权。
+
+### 5.1 App 被拦：「无法打开，因为无法验证开发者」
 
 1. 双击 App，弹窗后点「好」（或「取消」）。
 2. 打开 **系统设置 → 隐私与安全性**。
-3. 滚动到底部，会看到「已阻止 "SoundBridge" 使用…」的提示，点 **「仍要打开」**。
-4. 回到 Finder，再次双击 App，在确认框里点「打开」。
+3. 滚动到底部，看到「已阻止 "SoundBridge" 使用…」的提示，点 **「仍要打开」**。
+4. 回到 Finder 再次双击 App，在确认框里点「打开」。
 
-替代做法：在 Finder 里 **按住 Control 点按** App 图标 →「打开」→ 在确认框里再点「打开」。这个动作只需做一次，之后系统会记住。
+替代做法：在 Finder 里 **按住 Control 点按** App 图标 →「打开」→ 再点「打开」。
+只需做一次，之后系统会记住。
 
-### 4.2 PKG 被拦：「无法打开，因为 Apple 无法检查是否包含恶意软件」
-
-未签名的安装包在较新的 macOS 上会被拦截：
+### 5.2 PKG 被拦：「无法打开，因为 Apple 无法检查是否包含恶意软件」
 
 1. 双击 PKG，点「好」关闭弹窗。
 2. **系统设置 → 隐私与安全性**。
-3. 底部出现该安装包的条目，点 **「仍要打开」**。
+3. 底部出现该安装包条目，点 **「仍要打开」**。
 4. 再次双击 PKG，确认后继续安装。
 
-### 4.3 关于不同 macOS 版本
-
-不同系统版本的提示文字和位置略有差异（macOS 13 到 26 的「隐私与安全性」页面布局并不相同）。上面的路径在 macOS 13 及以上都适用；如果你的系统把入口放在别处，请在「系统设置 → 隐私与安全性」页内查找被阻止项目的列表。
-
-**本指南不提供、也不建议任何降低系统安全级别的操作**（关闭 Gatekeeper、关闭 SIP、修改 `spctl` 策略）。如果上述授权路径在你的系统上不生效，请提 issue 说明系统版本，而不是关闭系统保护。
+不同 macOS 版本（13 到 26）的提示文字与页面布局略有差异，入口都在
+「系统设置 → 隐私与安全性」的被阻止项目列表里。如果上述路径在你的系统上不生效，
+请提 issue 并附系统版本，而不是降低系统安全级别。
 
 ---
 
-## 5. 确认驱动已安装
+## 6. 确认驱动已安装
 
-### 5.1 看版本
+### 6.1 看版本
 
 ```bash
 /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
   "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
 ```
 
-期望输出 `1.2.0`。
+期望输出 `1.2.0`。如果是 `1.1.x` 或更早，说明驱动没有被替换 —— 通常是用了 DMG 或
+安装被中断，请重新用 PKG 安装。
 
-如果输出 `1.1.2` 或更早，说明驱动没有被替换 —— 通常是用了 DMG 而不是 PKG，或安装被中断。请重新用 PKG 安装。
+### 6.2 看协议版本
 
-### 5.2 看目录
+```bash
+/usr/libexec/PlistBuddy -c "Print :SBAudioProtocolVersion" \
+  "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
+```
+
+期望 `131584`（即 `0x00020200`）。这个键从 1.2.0 起才写入；输出「Does Not Exist」
+说明装的是 1.1.x 驱动。
+
+### 6.3 看目录
 
 ```bash
 ls -l /Library/Audio/Plug-Ins/HAL/
 ```
 
-应当能看到 `SoundBridgeDriver.driver`。注意该目录里通常还有其它厂商的驱动（BlackHole、eqMac、Parrot 等），它们与本产品无关，安装过程不会触碰它们。
+应当能看到 `SoundBridgeDriver.driver`。该目录通常还有其它厂商的驱动（BlackHole、
+eqMac、Parrot 等），它们与本产品无关，安装与卸载都不会触碰。
 
 ---
 
-## 6. 在「声音」设置里选择设备
+## 7. 在「声音」设置里选择设备
 
-1. 打开 **系统设置 → 声音 → 输出**（或「输出与输入」）。
+1. 打开 **系统设置 → 声音 → 输出**。
 2. 选择 **SoundBridge**。
-3. 打开菜单栏里的 SoundBridge 图标，在设备列表里选择要桥接到的**物理输出设备**（耳机、扬声器、声卡）。
+3. 打开菜单栏 SoundBridge 图标，在设备列表里选择要桥接到的**物理输出设备**。
 
-SoundBridge 自己不出声：它是一个代理，把音频转发给你选定的物理设备。如果没选物理设备，声音不会出来，这不是驱动故障。
+SoundBridge 自己不出声：它是代理，把音频转发给选定的物理设备。没选物理设备就没有
+声音，这不是驱动故障。
 
 ---
 
-## 7. 驱动没有加载时怎么排查
+## 8. 没有声音时的排查
 
-按顺序检查，每一步都能缩小范围：
+### 8.1 HDMI / DisplayPort 显示器完全无声
 
-**7.1 系统是否识别到设备**
+按顺序检查：
+
+1. **输出设备是否选对**：系统设置 → 声音 → 输出，选中 **SoundBridge**，而不是显示器
+   自己的条目。选显示器条目会绕过桥接，得到的是设备的固定音量。
+2. **是否选了物理设备**：菜单栏 → 设备列表，选中显示器对应的物理输出。没有物理目标
+   时 Host 不渲染音频。
+3. **显示器本身是否静音或音量过低**：SoundBridge 控制的是软件增益，部分显示器另有
+   硬件音量菜单，两者都会生效。
+4. **采样率与格式**：在「音频 MIDI 设置」里把 SoundBridge 设备的采样率设为 48 kHz。
+   不支持 Float64 输入（见 Known-Limitations F-1），非常规格式会被拒绝而不是静音。
+5. **Host 是否在运行**：菜单栏弹窗顶部会显示 Host 状态；显示未运行或正在重启时，
+   声音会中断到 Host 恢复为止。
+
+### 8.2 驱动没有加载
+
+**8.2.1 系统是否识别到设备**
 
 ```bash
 system_profiler SPAudioDataType | grep -i -A3 soundbridge
@@ -155,117 +204,171 @@ system_profiler SPAudioDataType | grep -i -A3 soundbridge
 
 没有输出说明 CoreAudio 没有加载驱动。
 
-**7.2 CoreAudio 是否拒绝加载**
+**8.2.2 CoreAudio 是否拒绝加载**
 
 ```bash
-log show --last 10m --predicate 'process == "coreaudiod"' 2>/dev/null | grep -i soundbridge | tail -30
+log show --last 10m --predicate 'process == "coreaudiod"' 2>/dev/null \
+  | grep -i soundbridge | tail -30
 ```
 
-常见原因：架构不匹配（本版本为 `x86_64 + arm64` 通用二进制，正常情况下不会出现）、文件权限不对、bundle 被破坏。
+常见原因：文件权限不对、bundle 被破坏、架构不匹配（本版本是 `x86_64 + arm64`
+通用二进制，正常情况下不会出现这一项）。
 
-**7.3 文件是否完整**
+**8.2.3 文件是否完整**
 
 ```bash
 codesign --verify --strict --verbose=2 \
   "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
 ```
 
-期望 `valid on disk` 与 `satisfies its Designated Requirement`。ad-hoc 签名同样会通过这项检查；它验证的是文件未被改动，不代表 Apple 认可发布者。
+期望 `valid on disk` 与 `satisfies its Designated Requirement`。ad-hoc 签名同样会
+通过这项检查；它证明文件未被改动，不代表 Apple 认可发布者。
 
-**7.4 重启音频服务**
+**8.2.4 让系统重新扫描 HAL 目录**
 
-```bash
-sudo killall coreaudiod
-```
+本产品不会自动重启系统音频服务。加载了旧副本时，需要你手动决定何时重启：
 
-系统会在几秒内自动重启它，然后重新扫描 HAL 目录。这一步不会影响正在录音的其它程序超过一两秒。
+- 注销再登录，或重启 Mac（推荐，影响最小）；或
+- 手动执行 `sudo killall coreaudiod`（系统会在数秒内自动重启它）。
 
-**7.5 仍然不行**
+这两条只是建议，安装器与 App 都不会替你执行。
 
-重启一次系统。若依然没有设备，请附上 7.1–7.3 的输出提 issue。
+**8.2.5 仍然不行**
 
----
-
-## 8. 卸载
-
-分三步，按需执行：
-
-```bash
-# 1. 停掉 App（如果正在运行）
-pkill -f SoundBridgeApp || true
-
-# 2. 删除驱动
-sudo rm -rf "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
-
-# 3. 重启系统音频服务，让设备消失
-sudo killall coreaudiod
-```
-
-再删除 App：把 `/Applications/SoundBridge.app` 拖到废纸篓。
-
-可选：清理安装器留下的状态目录（成功安装后其中只剩日志）：
-
-```bash
-sudo rm -rf "/Library/Application Support/SoundBridge"
-```
-
-**卸载只删除上面列出的两个路径。** `/Library/Audio/Plug-Ins/HAL/` 下的其它驱动不会被触碰。
+重启一次系统。若依然没有设备，请附上 8.2.1–8.2.3 的输出提 issue。
 
 ---
 
-## 9. 恢复到旧版驱动
+## 9. 卸载
 
-安装器没有内置「回退到上一版」按钮。要回退，必须事先有备份。
+### 9.1 统一卸载政策
 
-### 9.1 安装前先备份（建议）
+App 内的「Uninstall Driver」与仓库里的 `tools/uninstall_driver.sh` 执行同一套政策
+（`DriverUninstallPolicy`），行为完全一致：
+
+1. **先识别**：读取 `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist`，
+   确认 `CFBundleIdentifier` 是 `com.soundbridge.driver`。不是这个 id、读不出 plist、
+   或者该路径是个符号链接，一律**拒绝删除**，并说明原因。
+2. **先停 Host**：通过 HostSupervisor 的 `shutdown(intent: .uninstall)` 有序退出 Host
+   并等待完成。退出意图会锁住 supervisor，卸载期间 Host 不会被重新拉起。
+3. **只删一个路径**：`/bin/rm -rf '/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver'`。
+   没有通配符，不碰 `/tmp`，不碰其它厂商的 HAL 驱动。
+4. **删完再确认**：路径消失后才清理引导状态。授权被取消或命令失败时不会宣称成功。
+5. **不重启 `coreaudiod`**：加载中的副本会保留到下次重启，何时重启由用户决定。
+
+### 9.2 用 App 卸载
+
+菜单栏图标 → **Uninstall Driver** → 确认对话框（其中逐条列出删除与保留的内容）→
+一次管理员授权 → 「Driver Removed」→ **Quit SoundBridge**。
+
+随后把 `/Applications/SoundBridge.app` 拖到废纸篓即可。
+
+### 9.3 用命令行卸载
+
+仓库中的 `tools/uninstall_driver.sh` 是同一套政策的脚本版本：
+
+```bash
+tools/uninstall_driver.sh --dry-run   # 只打印将要删除的内容，不改动任何文件
+tools/uninstall_driver.sh             # 执行卸载（一次管理员授权）
+```
+
+它同样拒绝符号链接、校验 bundle id、不重启 `coreaudiod`。
+
+若两者都不可用（例如 App 已被删除），可手动执行，**先确认身份再删除**：
+
+```bash
+/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+  "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
+# 只有当输出为 com.soundbridge.driver 时才继续
+sudo /bin/rm -rf "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
+```
+
+### 9.4 卸载会删除什么、保留什么
+
+**删除**
+
+- `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver`
+- 引导状态（`hasCompletedOnboarding` 等 UserDefaults 键），使下次启动重新说明安装
+
+**保留**
+
+- App 本身（由用户自行拖到废纸篓）
+- EQ 设置与保存的 EQ 配置（`eq_default_*`）
+- 音量状态（`~/Library/Application Support/SoundBridge/volume-state.json`）
+- 日志（`~/Library/Logs/SoundBridge`）
+
+保留这些是有意的：重装后音量与 EQ 直接恢复，日志是重装问题的诊断依据。想彻底清干净
+时，在卸载后再手动删除：
+
+```bash
+rm -rf "$HOME/Library/Application Support/SoundBridge"
+rm -rf "$HOME/Library/Logs/SoundBridge"
+```
+
+`/Library/Application Support/SoundBridge/InstallerPayload/` 是安装器暂存驱动的位置，
+由后续安装覆盖，不需要手动处理。
+
+---
+
+## 10. 恢复到旧版驱动
+
+安装器没有「回退到上一版」按钮。回退必须事先有备份。
+
+### 10.1 安装前备份（建议）
 
 ```bash
 sudo cp -R "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver" \
   "$HOME/SoundBridgeDriver-backup-$(date +%Y%m%d)"
 ```
 
-### 9.2 需要回退时
+### 10.2 需要回退时
 
 ```bash
-sudo rm -rf "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
+sudo /bin/rm -rf "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
 sudo cp -R "$HOME/SoundBridgeDriver-backup-YYYYMMDD" \
   "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
-sudo killall coreaudiod
 ```
 
-注意：旧版驱动与新 App 之间可能存在版本不匹配，App 会提示。此时可以同时回退 App：把旧版 `SoundBridge.app` 放回 `/Applications/`。
+然后注销再登录（或重启 Mac）让系统重新加载。旧驱动与新 App 之间可能有版本或协议
+不匹配，App 会显示说明文字，不会自行替换。
 
 如果你没有备份，且需要一条受支持的降级路径，请提 issue —— 当前版本没有提供。
 
 ---
 
-## 10. 关于安装失败
+## 11. 自动更新
 
-安装器在写入 App 之前先检查已装驱动的版本与共享内存协议版本：
-
-- 已装驱动**更旧** → 升级，继续。
-- 已装驱动**相同** → 重装，继续。
-- 已装驱动**更新** → 拒绝，并明确输出原因。
-
-拒绝发生在任何文件被写入之前：App 不会被安装，驱动目录保持原样。如果你看到「refusing to install」字样，说明这台机器上的驱动比安装包新，请下载更新版本的安装包，而**不要**尝试手动删除驱动来绕过检查。
-
-驱动替换本身是一个事务：校验载荷 → 暂存 → 校验副本 → 备份旧驱动 → 重命名换位 → 再次校验，任一步失败则回滚。驱动器替换失败时，旧驱动会被保留或还原。
+**Sparkle 自动更新当前未启用。** `Info.plist` 的 `SUPublicEDKey` 为空，App 启动时
+会跳过 updater 初始化并打印 `Update feed not configured`。升级方式就是下载新的 PKG
+并按本文第 3 节安装。驱动永远不会自行更新。
 
 ---
 
-## 11. 本指南的验证状态
+## 12. 本指南的验证状态
 
-| 章节 | 状态 |
-|---|---|
-| 1 选择下载文件 | STATICALLY_REVIEWED（依据 PKG/DMG 的实际内容） |
-| 2 校验 SHA256 | **EXECUTED**（发布前对两个文件执行 `shasum -c`，结果 OK） |
-| 3 正常打开 | NOT_TESTED（未在真实机器上执行首次安装） |
-| 4 被系统拦下 | NOT_TESTED（路径依据系统文档与既有经验，未在本发布上实测） |
-| 5 确认驱动已安装 | **PARTIALLY EXECUTED**（读取版本号的命令已在现有 1.1.2 驱动上验证；1.2.0 的安装结果未验证） |
-| 6 声音设置选择设备 | NOT_TESTED |
-| 7 排查未加载 | **PARTIALLY EXECUTED**（`codesign --verify` 与 `log show` 命令可用；未用于诊断真实加载失败） |
-| 8 卸载 | NOT_TESTED（未在真实机器上执行） |
-| 9 恢复旧版驱动 | NOT_TESTED |
-| 10 安装失败语义 | **EXECUTED（模拟）**（对展开后的安装包运行 preinstall，在临时根目录下覆盖 8 类场景；未执行真实 `installer -pkg`） |
+证据等级沿用项目约定：`REAL_MACOS_VERIFIED` > `TEST_VERIFIED` > `SOURCE_VERIFIED` >
+`NOT_VERIFIED`。
 
-标注为 NOT_TESTED 的步骤尚未在真实机器上验证。首次正式发布前应在一个独立的 macOS 环境中完整走一遍第 3、4、5、6、8、9 节。
+| 章节 | 状态 | 依据 |
+|---|---|---|
+| 1 选择下载文件 | SOURCE_VERIFIED | `tools/build_installer_pkg.sh` 与 `tools/create_dmg.sh` 的实际产物 |
+| 2 校验 SHA256 | SOURCE_VERIFIED | Release 流程生成 `SHA256SUMS.txt` |
+| 3 用 PKG 安装 | SOURCE_VERIFIED | 载荷布局与 preinstall 门禁由 `make verify-installer-pkg` 静态校验 |
+| 4 用 DMG 安装 | SOURCE_VERIFIED | DMG 只含 App |
+| 5 被系统拦下 | SOURCE_VERIFIED | ad-hoc 签名的必然结果；未在本版本上实测 |
+| 6 确认驱动已安装 | TEST_VERIFIED（读取命令） | 命令在现有 1.1.x 驱动上执行过；1.2.0 的安装结果未验证 |
+| 7 声音设置 | SOURCE_VERIFIED | 设备选择由 CoreAudio 与菜单栏列表决定 |
+| 8.1 HDMI/DP 无声 | NOT_VERIFIED | 未在真实 HDMI/DP 设备上执行本版排查流程 |
+| 8.2 驱动未加载 | SOURCE_VERIFIED | 命令可用，未用于诊断真实加载失败 |
+| 9 卸载 | TEST_VERIFIED（策略） | 策略与 `tools/uninstall_driver.sh` 由单元测试锁定；真实卸载未执行 |
+| 10 恢复旧版驱动 | NOT_VERIFIED | 未执行 |
+| 11 自动更新 | SOURCE_VERIFIED | `SUPublicEDKey` 为空，updater 不初始化 |
+
+**尚未验证的三件事**（详见 [Release Notes](RELEASE_NOTES.md)）：
+
+- 真实卸载/重装闭环
+- 播放窗口 underrun
+- 实际 EQ 听感
+
+本指南不把未验证项写成已验证。真实设备上的完整走查仍列在
+[发布检查单](release/SoundBridge-1.2.0-Release-Checklist.md) §6。

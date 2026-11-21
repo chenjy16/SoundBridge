@@ -169,7 +169,9 @@ final class HostInstanceLockTests: XCTestCase {
     }
 
     private var expectedFileSize: Int {
-        let frames = rf_frames_for_duration(
+        // Batch 1: same single source of truth as the production SharedMemoryManager
+        // — the power-of-two rounding, not the raw frame count.
+        let frames = rf_ring_capacity_frames_for(
             SoundBridgeConfig.activeSampleRate,
             SoundBridgeConfig.defaultDurationMs
         )
@@ -200,6 +202,84 @@ final class HostInstanceLockTests: XCTestCase {
         munmap(mem, expectedFileSize)
         close(fd)
         return expectedFileSize
+    }
+
+    // MARK: - 会话标识与锁的生命周期
+
+    func testSessionIsStableWhileHeldAndChangesAfterReacquisition() throws {
+        let first = HostInstanceLock(path: lockPath)
+        let second = HostInstanceLock(path: lockPath)
+        XCTAssertNil(first.sessionID)
+        XCTAssertEqual(first.acquire(), .acquired)
+        let original = try XCTUnwrap(first.sessionID)
+        XCTAssertEqual(first.acquire(), .acquired)
+        XCTAssertEqual(first.sessionID, original)
+        XCTAssertTrue(try String(contentsOfFile: lockPath, encoding: .utf8)
+            .contains("session=\(original.uuidString)"))
+
+        guard case .heldByAnotherInstance = second.acquire() else {
+            return XCTFail("持锁期间不能创建第二个会话")
+        }
+        XCTAssertNil(second.sessionID)
+        first.release()
+        XCTAssertNil(first.sessionID)
+
+        XCTAssertEqual(second.acquire(), .acquired)
+        let next = try XCTUnwrap(second.sessionID)
+        XCTAssertNotEqual(next, original)
+        second.release()
+        XCTAssertNil(second.sessionID)
+    }
+
+    func testGlobalLockSerializesDistinctUserLockPaths() throws {
+        let shared = "\(sandbox.path)/global.lock"
+        let first = HostInstanceLock(path: "\(sandbox.path)/user-a.lock", globalPath: shared)
+        let secondPath = "\(sandbox.path)/user-b.lock"
+        let second = HostInstanceLock(path: secondPath, globalPath: shared)
+        XCTAssertEqual(first.acquire(), .acquired)
+        guard case .heldByAnotherInstance = second.acquire() else {
+            return XCTFail("共用 IPC 路径的两个 Host 不能同时启动")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondPath))
+        XCTAssertNil(second.sessionID)
+        first.release()
+        XCTAssertEqual(second.acquire(), .acquired)
+        second.release()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shared))
+    }
+
+    func testGlobalLockIsReleasedIfUserLockAcquisitionFails() throws {
+        let shared = "\(sandbox.path)/global.lock"
+        let invalid = "\(sandbox.path)/missing/user.lock"
+        let failed = HostInstanceLock(path: invalid, globalPath: shared)
+        guard case .failed = failed.acquire() else { return XCTFail("每用户锁应当失败") }
+        let next = HostInstanceLock(path: lockPath, globalPath: shared)
+        XCTAssertEqual(next.acquire(), .acquired)
+        next.release()
+    }
+
+    func testGlobalLockRejectsSymlink() throws {
+        let target = "\(sandbox.path)/target"
+        let shared = "\(sandbox.path)/global.lock"
+        try Data("untouched".utf8).write(to: URL(fileURLWithPath: target))
+        XCTAssertEqual(symlink(target, shared), 0)
+        let contender = HostInstanceLock(path: lockPath, globalPath: shared)
+        guard case .failed = contender.acquire() else { return XCTFail("不能跟随全局锁符号链接") }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: target)), Data("untouched".utf8))
+    }
+
+    func testGlobalLockConflictsWithSeparateProcess() throws {
+        let shared = "\(sandbox.path)/global.lock"
+        let child = try launchChild(mode: "hold", path: shared, holdMS: 1200)
+        XCTAssertTrue(waitUntil { HostInstanceLock.isHeld(path: shared) })
+        let contender = HostInstanceLock(path: lockPath, globalPath: shared)
+        guard case .heldByAnotherInstance = contender.acquire() else {
+            _ = finish(child)
+            return XCTFail("跨进程全局锁冲突未被拒绝")
+        }
+        XCTAssertEqual(finish(child).status, 0)
+        XCTAssertEqual(contender.acquire(), .acquired)
+        contender.release()
     }
 
     // MARK: - 1. The first process acquires

@@ -18,10 +18,14 @@ final class DriverInstallIntentTests: XCTestCase {
     private let newer = DriverVersionStatus.newer(installed: "1.3.0", expected: "1.2.0")
     private let outdated = DriverVersionStatus.outdated(installed: "1.1.3", expected: "1.2.0")
     private let unreadable = DriverVersionStatus.metadataUnreadable(reason: "x")
+    // MARK: - Fixtures
+
+    // The mismatch fixture uses one ABI generation behind whatever this build
+    // speaks, written as a delta so a protocol bump cannot leave a stale literal.
     private let mismatched = DriverVersionStatus.protocolIncompatible(
         installedVersion: "1.2.0",
-        installedProtocol: 0x0001_0400,
-        expectedProtocol: 0x0002_0100
+        installedProtocol: DriverVersionGate.expectedProtocolVersion - 0x100,
+        expectedProtocol: DriverVersionGate.expectedProtocolVersion
     )
     private let unknownExpected = DriverVersionStatus.expectedVersionUnavailable
 

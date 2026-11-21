@@ -149,7 +149,7 @@ final class SharedMemoryMultiProcessTests: XCTestCase {
 
     private func makeManager() -> SharedMemoryManager {
         let root = sandbox.path
-        return SharedMemoryManager { uid in "\(root)/soundbridge-\(uid)" }
+        return SharedMemoryManager(sessionID: UUID()) { uid in "\(root)/soundbridge-\(uid)" }
     }
 
     private func path(for uid: String) -> String {
@@ -157,7 +157,9 @@ final class SharedMemoryMultiProcessTests: XCTestCase {
     }
 
     private var expectedFileSize: Int {
-        let frames = rf_frames_for_duration(
+        // Batch 1: same single source of truth as the production SharedMemoryManager
+        // — the power-of-two rounding, not the raw frame count.
+        let frames = rf_ring_capacity_frames_for(
             SoundBridgeConfig.activeSampleRate,
             SoundBridgeConfig.defaultDurationMs
         )

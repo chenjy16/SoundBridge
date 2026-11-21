@@ -17,6 +17,9 @@
 #   tools/verify_release_bundle.sh [path-to-driver.driver] [expected-version]
 #
 # Defaults to dist/SoundBridge.app/Contents/Resources/SoundBridgeDriver.driver.
+# The expected version defaults to the repository's VERSION file: an empty
+# expectation skipped the comparison below, so `make release-verify` accepted a
+# 1.1.1 driver bundle in a 1.2.0 tree.
 
 set -euo pipefail
 
@@ -24,6 +27,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BUNDLE="${1:-$ROOT/dist/SoundBridge.app/Contents/Resources/SoundBridgeDriver.driver}"
 EXPECTED_VERSION="${2:-${EXPECTED_VERSION:-}}"
+
+# Where the expectation came from, so the header says it instead of leaving a
+# reader to guess whether the tree or the caller named the release.
+EXPECTED_VERSION_SOURCE=""
+if [[ -n "${2:-}" ]]; then
+    EXPECTED_VERSION_SOURCE="argument"
+elif [[ -n "${EXPECTED_VERSION}" ]]; then
+    EXPECTED_VERSION_SOURCE="environment"
+elif [[ -f "$ROOT/VERSION" ]]; then
+    EXPECTED_VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+    EXPECTED_VERSION_SOURCE="VERSION file"
+fi
 
 HEADER="$ROOT/packages/shared/include/RFSharedAudio.h"
 SOURCE_PLIST="$ROOT/packages/driver/Info.plist"
@@ -42,6 +57,7 @@ plist_read() {
 echo "Release driver bundle check"
 echo "==========================="
 echo "Bundle: $BUNDLE"
+echo "Expected version: ${EXPECTED_VERSION:-<not checked>}${EXPECTED_VERSION_SOURCE:+ (from $EXPECTED_VERSION_SOURCE)}"
 echo ""
 
 # ── 1. The bundle exists where the app looks for it ──────────────────────────

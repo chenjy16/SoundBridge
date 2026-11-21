@@ -1,16 +1,23 @@
 import XCTest
+import Foundation
 @testable import SoundBridgeApp
 
-// MARK: - Driver install boundary (Phase 2.1.5-D)
+// MARK: - Driver install and uninstall boundaries (P4 Batch 1A)
 //
-// The product decision is that this build keeps the *capability* to install and
-// upgrade the HAL driver while shipping no entry point that does it on its own.
-// That is a claim about the source, not about a runtime mode, so it is asserted
-// against the source: every place that can reach a privileged copy is enumerated
-// and anything new fails the test.
+// Two claims about this build are claims about the source, not about a runtime
+// mode, so they are asserted against the source:
+//
+//   1. the app does not install the driver — the release's `.pkg` is the only
+//      thing that writes to /Library/Audio/Plug-Ins/HAL;
+//   2. the app's uninstall is the same policy as tools/uninstall_driver.sh —
+//      identify the bundle, remove one constant path, never restart coreaudiod.
+//
+// Every place that can reach a privileged command is enumerated, and anything
+// new fails the test instead of shipping quietly.
 //
 // Evidence level: L1/L2. These tests read files and check policy constants. They
-// deliberately do not launch the App, and nothing here installs anything.
+// deliberately do not launch the App, and nothing here installs, uninstalls or
+// touches the HAL directory.
 
 final class DriverInstallBoundaryTests: XCTestCase {
 
@@ -40,13 +47,16 @@ final class DriverInstallBoundaryTests: XCTestCase {
         }
     }
 
-    /// `Sources/` next to this test bundle's package root, derived from the test
-    /// file's own path so the test works from any working directory.
-    private static func loadSources() throws -> [SourceFile] {
-        let appRoot = URL(fileURLWithPath: #filePath)
+    private static var appRoot: URL {
+        URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // SoundBridgeAppTests
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // SoundBridgeApp
+    }
+
+    /// `Sources/` next to this test bundle's package root, derived from the test
+    /// file's own path so the test works from any working directory.
+    private static func loadSources() throws -> [SourceFile] {
         let sourcesRoot = appRoot.appendingPathComponent("Sources", isDirectory: true)
 
         guard let walker = FileManager.default.enumerator(
@@ -81,124 +91,171 @@ final class DriverInstallBoundaryTests: XCTestCase {
         }
     }
 
-    // MARK: - 1. Who may call the installer
+    private func source(_ suffix: String) throws -> SourceFile {
+        try XCTUnwrap(sources.first { $0.relativePath.hasSuffix(suffix) },
+                      "no source file ends in \(suffix)")
+    }
 
-    func testOnlyTwoCallSitesReachTheInstaller() throws {
-        let callSites = try filesContaining(".installDriver(intent:")
+    // MARK: - 1. The app does not install the driver
 
-        XCTAssertEqual(
-            callSites.map(\.path).sorted(),
-            [
-                "Sources/App/SoundBridgeApp.swift",
-                "Sources/Onboarding/OnboardingView.swift",
-            ],
-            "a new install call site is a product decision, not a refactor"
-        )
-
-        for site in callSites {
-            XCTAssertEqual(site.lines.count, 1, "\(site.path) should hold exactly one install call")
+    func testNoSourceCanInstallTheDriver() throws {
+        // The installer transaction is the package's. Any of these in the app
+        // would be a second implementation of it.
+        for needle in [".installDriver(", "installDriverWithPrivileges", "DriverInstallState", "cp -R"] {
+            let hits = try filesContaining(needle)
+            XCTAssertTrue(hits.isEmpty,
+                          "\(needle) is back in the app: \(hits.map(\.path))")
         }
     }
 
-    func testFirstInstallIsTheOnlyIntentConstructedInTheUi() throws {
-        let onboarding = try XCTUnwrap(sources.first { $0.relativePath.hasSuffix("OnboardingView.swift") })
+    func testOnboardingPointsAtTheInstallerPackage() throws {
+        let onboarding = try source("OnboardingView.swift")
 
-        XCTAssertTrue(onboarding.contains("installDriver(intent: .firstInstall)"),
-                      "onboarding performs a first install and nothing else")
-        XCTAssertFalse(onboarding.contains(".explicitUpgrade"),
-                       "an upgrade intent in onboarding would be an unrequested driver replacement")
+        XCTAssertTrue(onboarding.contains("DriverInstallGuide.action("),
+                      "onboarding must ask the guide where the package is")
+        XCTAssertTrue(onboarding.contains("Open Installer Package"),
+                      "the only way to install is opening the package")
+        XCTAssertFalse(onboarding.contains("NSAppleScript"),
+                       "an admin script here would be the second install transaction again")
+        XCTAssertFalse(onboarding.contains("killall"),
+                       "onboarding must not restart any daemon")
     }
 
-    func testOnboardingInstallIsReachableOnlyFromAUserAction() throws {
-        let onboarding = try XCTUnwrap(sources.first { $0.relativePath.hasSuffix("OnboardingView.swift") })
+    func testOnboardingCompletionIsDecidedByTheVersionGate() throws {
+        let onboarding = try source("OnboardingView.swift")
 
-        // One button wires the install; a timer, notification or launch hook
-        // inside onboarding would show up as a second reference.
-        let references = onboarding.code.filter { line in
-            line.contains("installDriver")
-                && !line.contains("func installDriver()")
-                && !line.contains(".installDriver(intent:")
-        }
-        XCTAssertEqual(references.count, 1,
-                       "the only reference to installDriver() outside its definition must be the button: \(references)")
-        XCTAssertTrue(references[0].contains("Button(action: installDriver)"),
-                      "unexpected install entry point: \(references[0])")
+        // Success is read, never assumed: the page shows completion only for a
+        // driver the gate calls compatible, and re-reads when it becomes active
+        // again (which is what "returned from Installer" looks like).
+        XCTAssertTrue(onboarding.contains("status?.isCompatible == true"),
+                      "completion must hang off the gate, not off a click")
+        XCTAssertTrue(onboarding.contains("isInstalledAndUsable"),
+                      "the page must render from the gate's answer")
+        XCTAssertTrue(onboarding.contains("didBecomeActiveNotification"),
+                      "the page must re-check after Installer closes")
+        XCTAssertTrue(onboarding.contains("installer.currentInstallStatus()"),
+                      "the gate is the only input to the page's state")
     }
 
-    // MARK: - 2. The upgrade prompt is not wired
+    // MARK: - 2. No in-app upgrade surface remains
 
-    func testUpgradePromptHasNoCallSite() throws {
-        let hits = try filesContaining("showDriverUpdatePrompt")
-
-        XCTAssertEqual(hits.count, 1, "showDriverUpdatePrompt must only exist where it is defined")
-        XCTAssertEqual(hits.first?.path, "Sources/App/SoundBridgeApp.swift")
-        XCTAssertEqual(hits.first?.lines.count, 1,
-                       "a call site means the disabled prompt became reachable: \(hits.first?.lines ?? [])")
-    }
-
-    func testPerformDriverUpdateIsUnreachable() throws {
-        let hits = try filesContaining("performDriverUpdate")
-
-        XCTAssertEqual(hits.map(\.path), ["Sources/App/SoundBridgeApp.swift"])
-        // Definition plus the closure inside the (uncallable) prompt window.
-        XCTAssertEqual(hits.first?.lines.count, 2,
-                       "unexpected caller of performDriverUpdate: \(hits.first?.lines ?? [])")
-        for line in hits.first?.lines ?? [] {
-            XCTAssertTrue(
-                line.contains("func performDriverUpdate()") || line.contains("self?.performDriverUpdate()"),
-                "unexpected reference: \(line)"
-            )
+    func testNothingOffersAnInAppUpgrade() throws {
+        for needle in ["showDriverUpdatePrompt", "performDriverUpdate", "DriverUpdateWindow"] {
+            let hits = try filesContaining(needle)
+            XCTAssertTrue(hits.isEmpty,
+                          "\(needle) still exists: \(hits.map(\.path))")
         }
     }
 
     // MARK: - 3. Privileged operations are enumerated
 
-    func testExactlyTwoPrivilegedScriptsExist() throws {
+    func testExactlyOnePrivilegedCommandExists() throws {
         let hits = try filesContaining("with administrator privileges")
 
-        XCTAssertEqual(
-            hits.map(\.path).sorted(),
-            [
-                "Sources/Services/DriverInstaller.swift",
-                "Sources/Views/MenuBarView.swift",
-            ],
-            "a new privileged script needs its own review, not a passing test"
-        )
+        XCTAssertEqual(hits.map(\.path).sorted(), ["Sources/Services/DriverUninstaller.swift"],
+                       "a second privileged command needs its own review, not a passing test")
+        XCTAssertEqual(hits.first?.lines.count, 1,
+                       "the uninstaller should hold a single admin prompt")
+    }
 
-        for site in hits {
-            XCTAssertEqual(site.lines.count, 1, "\(site.path) should hold a single admin prompt")
+    func testTheAppNeverRestartsCoreAudio() throws {
+        // The daemon is not the app's to restart: the loaded copy survives until
+        // the next login, and cutting audio for every process is the user's
+        // decision. `tools/uninstall_driver.sh` prints the same advice.
+        let hits = try filesContaining("killall")
+        XCTAssertTrue(hits.isEmpty, "killall is back in the app: \(hits.map(\.path))")
+        XCTAssertFalse(DriverUninstallPolicy.restartsCoreAudio)
+    }
+
+    func testTheUninstallerOnlyRunsThePolicyCommand() throws {
+        let uninstaller = try source("DriverUninstaller.swift")
+        XCTAssertTrue(uninstaller.contains("DriverUninstallPolicy.removalCommand"),
+                      "the privileged string must come from the policy, not be retyped")
+        XCTAssertFalse(uninstaller.contains("/tmp/"),
+                       "the uninstaller must not touch /tmp at all")
+        XCTAssertFalse(uninstaller.contains("*"),
+                       "no wildcard belongs in a removal command")
+
+        let menuBar = try source("MenuBarView.swift")
+        XCTAssertTrue(menuBar.contains("DriverUninstallPolicy.decide("),
+                      "the app must decide with the shared policy")
+        XCTAssertTrue(menuBar.contains("prepareForUninstall {"),
+                      "the Host must be stopped before the driver is removed")
+        XCTAssertFalse(menuBar.contains("FileManager.default.removeItem"),
+                       "nothing outside the driver path may be deleted by a view")
+    }
+
+    // MARK: - 4. The app's policy is the script's policy
+
+    func testUninstallPolicyRefusesWhatIsNotOurs() {
+        typealias Identity = DriverUninstallPolicy.Identity
+
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: true, isSymlink: true,
+                                                  isDirectory: true,
+                                                  bundleIdentifier: DriverBundleLocation.bundleIdentifier)),
+            .refuse("the HAL path is a symlink, not a bundle"),
+            "a symlink is never a bundle, even when it declares the right id"
+        )
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: false, isSymlink: false,
+                                                  isDirectory: false, bundleIdentifier: nil)),
+            .nothingToRemove
+        )
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: true, isSymlink: false,
+                                                  isDirectory: false, bundleIdentifier: nil)),
+            .refuse("the HAL path is a file, not a bundle")
+        )
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: true, isSymlink: false,
+                                                  isDirectory: true, bundleIdentifier: nil)),
+            .refuse("the bundle has no readable Info.plist")
+        )
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: true, isSymlink: false,
+                                                  isDirectory: true, bundleIdentifier: "com.example.other")),
+            .refuse("the HAL path declares 'com.example.other', not com.soundbridge.driver"),
+            "another vendor's HAL bundle must be left alone"
+        )
+        XCTAssertEqual(
+            DriverUninstallPolicy.decide(Identity(isPresent: true, isSymlink: false,
+                                                  isDirectory: true,
+                                                  bundleIdentifier: DriverBundleLocation.bundleIdentifier)),
+            .remove
+        )
+    }
+
+    func testUninstallPolicyMatchesTheScript() throws {
+        let script = Self.appRoot
+            .deletingLastPathComponent()   // mac
+            .deletingLastPathComponent()   // apps
+            .deletingLastPathComponent()   // repository root
+            .appendingPathComponent("tools/uninstall_driver.sh")
+        guard FileManager.default.fileExists(atPath: script.path) else {
+            throw XCTSkip("tools/uninstall_driver.sh is not next to the app sources")
         }
-    }
+        let text = try String(contentsOf: script, encoding: .utf8)
 
-    func testOnlyTheInstallerAndTheUninstallerRestartCoreAudio() throws {
-        let hits = try filesContaining("killall coreaudiod")
+        XCTAssertTrue(text.contains(DriverUninstallPolicy.driverPath),
+                      "the script and the app must name the same driver path")
+        XCTAssertTrue(text.contains(DriverUninstallPolicy.expectedBundleIdentifier),
+                      "the script and the app must check the same bundle identifier")
 
+        // The script parameterises the path (it has a dry-run seam); the app
+        // hard-codes it. What must be identical is the command those two
+        // produce, so the shape is compared with the path substituted.
+        let shape = "/bin/rm -rf '$DRIVER_PATH'"
+        XCTAssertTrue(text.contains(shape),
+                      "the script must remove with the same command shape the policy uses")
         XCTAssertEqual(
-            hits.map(\.path).sorted(),
-            [
-                "Sources/Services/DriverInstaller.swift",
-                "Sources/Views/MenuBarView.swift",
-            ],
-            "coreaudiod may only be restarted from an explicit driver install or removal"
+            shape.replacingOccurrences(of: "$DRIVER_PATH", with: DriverUninstallPolicy.driverPath),
+            DriverUninstallPolicy.removalCommand,
+            "the script's default and the app's command must expand to the same string"
         )
     }
 
-    func testPrivilegedCopyIsPrivateAndCalledOnce() throws {
-        let installer = try XCTUnwrap(sources.first { $0.relativePath.hasSuffix("DriverInstaller.swift") })
-
-        let references = installer.occurrences(of: "installDriverWithPrivileges")
-        XCTAssertEqual(references.count, 2, "expected the declaration and exactly one call: \(references)")
-        XCTAssertTrue(
-            references.contains { $0.contains("private func installDriverWithPrivileges") },
-            "the privileged step must stay private to the installer"
-        )
-        XCTAssertEqual(
-            installer.occurrences(of: "cp -R").count, 1,
-            "a second copy step would be a second unguarded way to replace the driver"
-        )
-    }
-
-    // MARK: - 4. Policy is still the source of truth
+    // MARK: - 5. Policy is still the source of truth
 
     func testShippingPolicyRemainsReportOnly() {
         XCTAssertFalse(DriverUpgradePolicy.allowsUserFacingPrompt,
@@ -210,8 +267,8 @@ final class DriverInstallBoundaryTests: XCTestCase {
     }
 
     func testInstallerStillRefusesIntentsThatDoNotMatch() {
-        // The gate the two call sites depend on. If this loosens, the boundary
-        // above stops meaning anything.
+        // The gate is what a future surface would have to go through. If this
+        // loosens, the boundary above stops meaning anything.
         XCTAssertFalse(DriverInstallIntent.firstInstall.permits(.outdated(installed: "1.1.3", expected: "1.2.0")))
         XCTAssertFalse(DriverInstallIntent.firstInstall.permits(.compatible(version: "1.2.0")))
         XCTAssertFalse(
@@ -230,37 +287,6 @@ final class DriverInstallBoundaryTests: XCTestCase {
         XCTAssertNil(
             DriverVersionStatus.newer(installed: "1.1.2", expected: "1.1.1").installIntent,
             "nothing is installed for a newer driver"
-        )
-    }
-
-    // MARK: - 5. Onboarding offers no action for a newer driver (Phase 3.2C)
-
-    func testOnboardingOffersAnInstallOnlyWhenNothingIsInstalled() throws {
-        let onboarding = try XCTUnwrap(sources.first { $0.relativePath.hasSuffix("OnboardingView.swift") })
-
-        // The button and the action are both gated on `isFirstInstall`, which is
-        // exactly `status == .notInstalled`. `.newer` must reach neither: a
-        // button there would replace a driver that is ahead of this build.
-        XCTAssertTrue(
-            onboarding.contains("private var isFirstInstall: Bool {"),
-            "the install decision moved; re-check what gates the button"
-        )
-        XCTAssertTrue(onboarding.contains("status == .notInstalled"))
-        XCTAssertTrue(
-            onboarding.contains("} else if isFirstInstall {"),
-            "the install button must sit behind the first-install check"
-        )
-        XCTAssertTrue(
-            onboarding.contains("guard isFirstInstall else {"),
-            "the install action must refuse every state other than first install"
-        )
-        XCTAssertTrue(
-            onboarding.contains("Text(headline)"),
-            "the page must use the notice's own title rather than a hardcoded one"
-        )
-        XCTAssertTrue(
-            onboarding.contains("if let notice { return notice.title }"),
-            "the newer-driver headline comes from the notice"
         )
     }
 }

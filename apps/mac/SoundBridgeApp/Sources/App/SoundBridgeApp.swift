@@ -12,21 +12,64 @@ import Sparkle
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover: NSPopover?
-    var hostProcess: Process?
+    /// The App's single EQ writer.
+    ///
+    /// Created with this delegate — before `SharedMemoryMappingManager.start()`
+    /// and before any View exists. That ordering is the Gate 3 fix:
+    /// `mappingPublished` does not replay, so a writer that only appeared when
+    /// the popover opened left the Host's new mapping at `eq_sequence = 0` while
+    /// `UserDefaults` held the real values.
+    private let eqService = EQService.shared
+    /// The App's single owner of the Host process.
+    ///
+    /// Replaces `hostProcess` and the termination handler that called
+    /// `NSApp.terminate(nil)`: a Host that dies is a state to report and recover
+    /// from, not a reason for the App to exit.
+    private let hostSupervisor = HostSupervisor()
+    /// Set for the whole of `applicationWillTerminate`. A restart accepted after
+    /// this point would be cancelled by the shutdown a few lines later, and the
+    /// user would see a Host disappear instead of being replaced.
+    private(set) var isTerminating = false
+    /// The policy in front of `restartHost()`. See `HostRestartEntry`.
+    private lazy var hostRestartEntry = HostRestartEntry(
+        supervisor: hostSupervisor,
+        isUninstalling: { [weak self] in self?.isUninstalling ?? true },
+        isTerminating: { [weak self] in self?.isTerminating ?? true }
+    )
     var eventMonitor: EventMonitor?
     var onboardingCoordinator: OnboardingCoordinator?
     var updaterController: SPUStandardUpdaterController?
-    var driverUpdateWindow: DriverUpdateWindow?
-    /// Set to true during uninstall to suppress Host terminationHandler from
-    /// calling NSApp.terminate prematurely.
+    /// Set to true during uninstall. `prepareForUninstall(completion:)` has
+    /// already stopped the Host and latched the supervisor shut; this flag keeps
+    /// `applicationWillTerminate` from re-running cleanup for an install that is
+    /// being removed.
     var isUninstalling = false
+    /// One "Host not found" alert per launch. Retrying cannot make a missing
+    /// binary appear, so the supervisor reports `degraded` and this shows once.
+    private var didPresentHostMissingAlert = false
     /// One compatibility alert per launch. The check runs once anyway; this keeps
     /// a future second caller from stacking windows on top of each other.
     private var didPresentCompatibilityNotice = false
+    /// Slow fallback re-resolve of the Host state; see
+    /// `startHostStatusFallbackTimer()`.
+    private var hostStatusTimer: DispatchSourceTimer?
+    /// How long to wait for a Host to finish its own shutdown before the App
+    /// escalates. The Host's ordered teardown (stop listeners → detach from the
+    /// driver → unlink shared memory → publish `stopped` → drop the instance
+    /// lock) needs roughly 1.2s on a loaded machine, so 0.15s could only ever
+    /// end in SIGKILL. SIGKILL skips state saving and lock release, which is
+    /// exactly what made a killed Host look healthy to the next launch.
+    private let hostTerminationTimeout: TimeInterval = 2.5
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Register custom font
         registerCustomFont()
+
+        // Supervisor state is logged here and folded into the menu bar state.
+        // Nothing on this path may quit the App: that was the Gate 3 defect.
+        hostSupervisor.onStateChange = { [weak self] state in
+            self?.hostSupervisorDidChange(to: state)
+        }
 
         // Initialize Sparkle updater
         initializeUpdater()
@@ -52,12 +95,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             VolumeController.shared.refreshDeviceList()
             VolumeController.shared.findAndBindProxyDevice()
             self?.applyHostLifecycle(state.lifecycle)
+            // The Host reports a new state after it publishes a mapping. Treat
+            // that as a hint and re-read the identity from the file rather than
+            // trusting it: a notification is not a state.
+            SharedMemoryMappingManager.shared.revalidate()
+        }
+        IPCController.shared.onDeviceStateUnavailable = { [weak self] in
+            self?.applyHostLifecycle(nil)
+            SharedMemoryMappingManager.shared.revalidate()
         }
         IPCController.shared.startMonitoring()
+
+        // The EQ writer's mapping is owned here, not by `MenuBarView`.
+        //
+        // P2 Batch 3: the attach used to happen only in the menu bar's
+        // `onReceive`, so a closed popover meant the App kept writing into
+        // whichever inode it had mapped first. An App-level owner plus a
+        // structural fallback means the mapping follows the Host even when no
+        // View was ever created.
+        SharedMemoryMappingManager.shared.deviceUIDProvider = { VolumeController.shared.activeDeviceUID }
+        SharedMemoryMappingManager.shared.start()
 
         // The lock decides "is a Host alive"; the report decides what it is doing.
         // Reading only the file is how a killed Host kept looking healthy.
         applyHostLifecycle(IPCController.shared.latestLifecycle)
+
+        // Let the menu bar ask for a fresh answer when it opens, and keep a slow
+        // fallback running for the case where a notification is lost.
+        HostStatusModel.shared.refreshHandler = { [weak self] in
+            self?.resyncHostStatus()
+        }
+        startHostStatusFallbackTimer()
 
         // Retry proxy device binding after a short delay to handle the race
         // where Host hasn't created the proxy device yet at startup.
@@ -104,9 +172,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// this path may open a window: an unsolicited upgrade prompt is a product
     /// decision this build does not make. See `DriverUpgradePolicy`.
     ///
-    /// `showDriverUpdatePrompt` / `performDriverUpdate` are kept intact and
-    /// deliberately unwired — the capability stays tested, the entry point is
-    /// not shipped.
+    /// P4 Batch 1A removed the unwired `showDriverUpdatePrompt` /
+    /// `performDriverUpdate` pair that used to sit below this comment. They were
+    /// the second install transaction: the package is the only thing that writes
+    /// to the HAL directory now, and a window offering an in-app update would
+    /// have promised something the app can no longer do.
     @discardableResult
     func checkDriverVersionMismatch() -> DriverVersionStatus {
         let status = DriverInstaller().currentInstallStatus()
@@ -158,6 +228,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showAlert(notice.title, notice.message)
     }
 
+    /// Low-frequency re-resolve of the Host state.
+    ///
+    /// The Darwin notification is the primary mechanism; this exists because a
+    /// notification that never arrives used to leave the popover saying "Audio
+    /// host is not running" about a Host that had been healthy for minutes. Five
+    /// seconds of staleness is the floor this build accepts, not a substitute for
+    /// the event channel.
+    private func startHostStatusFallbackTimer() {
+        hostStatusTimer?.cancel()
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 5.0, repeating: 5.0, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            self?.resyncHostStatus()
+        }
+        timer.resume()
+        hostStatusTimer = timer
+    }
+
+    /// Re-read the Host's report from disk and re-resolve the UI state.
+    ///
+    /// Reading first is what makes this a fallback rather than a repeat of the
+    /// last value: `latestLifecycle` is only as fresh as the last notification
+    /// that arrived, so a lost one would otherwise be re-applied every tick and
+    /// look exactly like a state that never changed.
+    ///
+    /// Low frequency on purpose. The notification channel is the mechanism;
+    /// this only bounds how long a missed notification costs.
+    private func resyncHostStatus() {
+        IPCController.shared.refreshAndNotify()
+        applyHostLifecycle(IPCController.shared.latestLifecycle)
+    }
+
     /// Fold the Host's lifecycle report into the state the UI shows.
     ///
     /// Two inputs on purpose: the instance lock answers "is a Host alive" and the
@@ -165,110 +268,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// this replaces — a stale `ready` file from a killed Host, or a live Host
     /// that never found its proxy device and said nothing.
     private func applyHostLifecycle(_ report: HostLifecycleReport?) {
-        let state = HostRunState.resolve(
-            report: report,
-            hostRunning: HostInstanceProbe.isHostRunning()
-        )
-        HostStatusModel.shared.update(state, report: report)
+        let lock = HostInstanceProbe.state()
+        let validatedReport: HostLifecycleReport?
+        let state: HostRunState
+        switch lock {
+        case .held(let session):
+            let latest = IPCController.shared.latestState
+            let sameSession = session.map { latest?.sessionID.flatMap(UUID.init(uuidString:)) == $0 }
+                ?? (latest?.sessionID == nil && latest?.protocolVersion == nil)
+            validatedReport = sameSession && latest?.lifecycle == report ? report : nil
+            state = HostRunState.resolve(report: validatedReport, hostRunning: true)
+        case .notRunning:
+            validatedReport = nil
+            // The lock is free, but a supervisor that gave up is not the same
+            // thing as a Host nobody asked to start. Reporting `notRunning` here
+            // would hide the difference and invite a restart loop.
+            state = hostSupervisor.isDegraded ? .degraded : .notRunning
+        case .unavailable:
+            validatedReport = nil
+            state = .unknown
+        }
+        HostStatusModel.shared.update(state, report: validatedReport)
 
         if state.isProblem {
-            print("[HostState] \(state.shortMessage) — \(report?.detail ?? "no detail reported")")
-        }
-    }
-
-    /// Present the driver update window.
-    ///
-    /// Not called from any launch path as of Phase 2.1.3. Kept so a future
-    /// release can wire it to an explicit user action without rebuilding the
-    /// upgrade flow from scratch.
-    ///
-    /// The policy check is deliberately inside the function rather than at each
-    /// call site: one switch is easier to review than an argument about whether
-    /// every caller remembered, and it means a future caller cannot ship an
-    /// unsolicited prompt by accident.
-    func showDriverUpdatePrompt(currentVersion: String, newVersion: String) {
-        guard DriverUpgradePolicy.allowsUserFacingPrompt else {
-            print("Driver update prompt suppressed by DriverUpgradePolicy (\(currentVersion) -> \(newVersion))")
-            return
-        }
-
-        // Close existing window if any
-        driverUpdateWindow?.close()
-
-        // Create and show driver update window
-        driverUpdateWindow = DriverUpdateWindow(
-            currentVersion: currentVersion,
-            newVersion: newVersion,
-            onUpdate: { [weak self] in
-                self?.performDriverUpdate()
-            },
-            onDismiss: { [weak self] in
-                self?.driverUpdateWindow?.close()
-                self?.driverUpdateWindow = nil
-            }
-        )
-
-        driverUpdateWindow?.center()
-        driverUpdateWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func performDriverUpdate() {
-        // Close the update window
-        driverUpdateWindow?.close()
-        driverUpdateWindow = nil
-
-        // Use existing DriverInstaller logic. The install intent is derived from
-        // the current status rather than assumed: this is an upgrade path, so a
-        // first install cannot be launched from here, and a compatible or newer
-        // driver is refused by the installer's intent check.
-        let installer = DriverInstaller()
-
-        Task {
-            do {
-                let status = installer.currentInstallStatus()
-                guard let intent = status.installIntent, !intent.isFirstInstall else {
-                    print("Driver update requested but nothing to upgrade (\(status.summary))")
-                    return
-                }
-
-                try await installer.installDriver(intent: intent)
-
-                // Re-read the gate instead of trusting the call above. This is
-                // what makes a phantom "updated to X" alert impossible: the
-                // alert now reflects what is actually on disk.
-                let verified = installer.currentInstallStatus()
-                print("Driver update finished: \(verified.summary)")
-
-                await MainActor.run {
-                    let alert = NSAlert()
-                    if verified.isCompatible {
-                        alert.messageText = "Driver Updated"
-                        alert.informativeText = "The SoundBridge audio driver has been updated to version \(VersionManager.bundledDriverVersion() ?? "unknown")."
-                        alert.alertStyle = .informational
-                    } else if case .newer = verified {
-                        alert.messageText = "Driver Kept"
-                        alert.informativeText = "The installed driver is newer than this build, so it was left untouched (\(verified.summary))."
-                        alert.alertStyle = .informational
-                    } else {
-                        alert.messageText = "Update Failed"
-                        alert.informativeText = "The driver still does not match this build: \(verified.summary)"
-                        alert.alertStyle = .critical
-                    }
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                }
-            } catch {
-                print("Driver update failed: \(error)")
-                await MainActor.run {
-                    let alert = NSAlert()
-                    alert.messageText = "Update Failed"
-                    alert.informativeText = "Failed to update driver: \(error.localizedDescription)"
-                    alert.alertStyle = .critical
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                }
-            }
+            print("[HostState] \(state.shortMessage) — \(validatedReport?.detail ?? "no detail reported")")
         }
     }
 
@@ -328,7 +351,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover = NSPopover()
         popover?.behavior = .transient
         popover?.animates = false
-        popover?.contentViewController = NSHostingController(rootView: MenuBarView())
+        // The view observes the App's writer; it never creates one. A closed
+        // popover is then only a closed window, not a missing EQ writer.
+        popover?.contentViewController = NSHostingController(rootView: MenuBarView(eqController: eqService.controller))
         
         // Set up event monitor to dismiss popover when clicking outside
         eventMonitor = EventMonitor(mask: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
@@ -340,6 +365,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+
         // If uninstalling, driver and host are already gone — skip heavy cleanup
         if isUninstalling {
             print("=== applicationWillTerminate (uninstall mode, skipping cleanup) ===")
@@ -382,93 +409,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Clean up CoreAudio listeners to prevent leaks
         VolumeController.shared.cleanup()
 
+        // Release the shared-memory mapping last, after every writer has been
+        // told to stop, so the last `munmap` cannot land under an in-flight EQ
+        // write.
+        SharedMemoryMappingManager.shared.stop()
+
         // Stop IPC monitoring
         IPCController.shared.stopMonitoring()
 
-        // Perform cleanup directly from the app
-        performCleanup(logger: log)
-
-        terminateHostAndProxies(logger: log)
+        // 共享资源和默认输出只能由持锁的 Host 清理。The supervisor owns the
+        // process, so it also owns the ordered stop: SIGTERM, bounded grace,
+        // SIGKILL. Waiting here is the App's one synchronous wait, and it exists
+        // so the Host cannot outlive the delegate that launched it.
+        hostSupervisor.shutdown(intent: .appTermination, waitTimeout: hostTerminationTimeout + 0.5) {
+            log("Host supervisor released the Host it owned")
+        }
 
         logHandle?.closeFile()
         print("=== applicationWillTerminate COMPLETE ===")
     }
 
-    /// Best-effort fallback to stop any running SoundBridgeHost even if we did not launch it.
-    private func terminateHostAndProxies(logger: (String) -> Void) {
-        if let process = hostProcess, process.isRunning {
-            logger("Terminating tracked host process (pid \(process.processIdentifier))...")
-            process.terminate()
-            waitForProcessExit(process, timeout: 0.15, logger: logger)
-            if process.isRunning {
-                logger("Host still running, sending SIGKILL")
-                kill(process.processIdentifier, SIGKILL)
-            }
-        }
-
-        logger("Attempting best-effort shutdown via pgrep/kill for any remaining hosts")
-
-        let pgrep = Process()
-        pgrep.launchPath = "/usr/bin/pgrep"
-        pgrep.arguments = ["-f", "SoundBridgeHost"]
-
-        let pipe = Pipe()
-        pgrep.standardOutput = pipe
-        pgrep.standardError = Pipe()
-
-        do {
-            try pgrep.run()
-            pgrep.waitUntilExit()
-        } catch {
-            logger("Failed to run pgrep: \(error)")
-            return
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?
-            .split(separator: "\n")
-            .compactMap({ Int32($0) }),
-              !output.isEmpty else {
-            logger("No additional SoundBridgeHost processes found")
-            return
-        }
-
-        for pid in output {
-            guard pid != getpid() else { continue }
-            logger("Sending SIGTERM to SoundBridgeHost pid \(pid)")
-            kill(pid, SIGTERM)
-            if !waitForPIDExit(pid, timeout: 0.15) {
-                logger("PID \(pid) still alive, sending SIGKILL")
-                kill(pid, SIGKILL)
-            }
-        }
-
-        // Remove any lingering shared memory/control files so the driver tears down proxies
-        cleanupTempIPC(logger: logger)
-    }
-
-    /// Poll a Process for exit up to timeout seconds.
-    private func waitForProcessExit(_ process: Process, timeout: TimeInterval, logger: (String) -> Void) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if process.isRunning {
-            logger("Process \(process.processIdentifier) did not exit within \(timeout)s")
-        }
-    }
-
-    /// Poll a PID for exit up to timeout seconds.
-    private func waitForPIDExit(_ pid: Int32, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if kill(pid, 0) != 0 {
-                return true // no longer running
-            }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        return kill(pid, 0) != 0
-    }
+    // The Host stop path lives in `HostSupervisor` since Gate 3. What was here —
+    // `terminateHostAndProxies` plus a `Process` poll on the main thread — could
+    // only ever stop the process that this App happened to hold in a variable,
+    // and it had no answer for "who restarts it". The supervisor keeps the same
+    // SIGTERM → bounded grace → SIGKILL escalation, but does the waiting on its
+    // own queue; `applicationWillTerminate` is the one caller that waits.
+    //
+    // Untracked Host processes and shared IPC resources are still left alone: they
+    // belong to whichever process holds the instance lock.
 
     /// Clean up temporary files that keep proxies alive.
     ///
@@ -499,179 +468,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func performCleanup(logger: (String) -> Void = { print($0) }) {
-        logger("[Cleanup] Starting cleanup process...")
-
-        // 1. Restore default device to physical device (if currently on proxy)
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var currentDeviceID: AudioDeviceID = 0
-        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-
-        if AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            &currentDeviceID
-        ) == noErr {
-            // Get current device name
-            var nameAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceNameCFString,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var deviceName: Unmanaged<CFString>?
-            var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-
-            let nameStatus = withUnsafeMutablePointer(to: &deviceName) { ptr in
-                AudioObjectGetPropertyData(currentDeviceID, &nameAddress, 0, nil, &nameSize, ptr)
-            }
-            if nameStatus == noErr, let name = deviceName?.takeUnretainedValue() as String? {
-
-                // If currently on a SoundBridge proxy, switch back to physical device
-                if name.contains("SoundBridge") {
-                    logger("[Cleanup] Currently on proxy device: \(name)")
-
-                    // Get proxy UID
-                    var uidAddress = AudioObjectPropertyAddress(
-                        mSelector: kAudioDevicePropertyDeviceUID,
-                        mScope: kAudioObjectPropertyScopeGlobal,
-                        mElement: kAudioObjectPropertyElementMain
-                    )
-
-                    var deviceUID: Unmanaged<CFString>?
-                    var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-
-                    let uidStatus = withUnsafeMutablePointer(to: &deviceUID) { ptr in
-                        AudioObjectGetPropertyData(currentDeviceID, &uidAddress, 0, nil, &uidSize, ptr)
-                    }
-                    if uidStatus == noErr, let proxyUIDStr = deviceUID?.takeUnretainedValue() as String? {
-
-                        // Extract physical device UID (remove "-soundbridge" suffix)
-                        if let physicalUID = proxyUIDStr.components(separatedBy: "-soundbridge").first {
-                            logger("[Cleanup] Looking for physical device with UID: \(physicalUID)")
-
-                            // Find the physical device
-                            if let physicalDeviceID = findDeviceByUID(physicalUID) {
-                                logger("[Cleanup] Restoring default device to physical device (ID: \(physicalDeviceID))")
-
-                                var newDeviceID = physicalDeviceID
-                                let result = AudioObjectSetPropertyData(
-                                    AudioObjectID(kAudioObjectSystemObject),
-                                    &propertyAddress,
-                                    0,
-                                    nil,
-                                    UInt32(MemoryLayout<AudioDeviceID>.size),
-                                    &newDeviceID
-                                )
-
-                                // Also restore system output device
-                                var systemAddress = AudioObjectPropertyAddress(
-                                    mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
-                                    mScope: kAudioObjectPropertyScopeGlobal,
-                                    mElement: kAudioObjectPropertyElementMain
-                                )
-                                var systemDeviceID = physicalDeviceID
-                                AudioObjectSetPropertyData(
-                                    AudioObjectID(kAudioObjectSystemObject),
-                                    &systemAddress,
-                                    0,
-                                    nil,
-                                    UInt32(MemoryLayout<AudioDeviceID>.size),
-                                    &systemDeviceID
-                                )
-
-                                if result == noErr {
-                                    logger("[Cleanup] Restored to physical device")
-                                    // CoreAudio device switch is synchronous, no sleep needed
-                                } else {
-                                    logger("[Cleanup] WARNING: Failed to restore device (error \(result))")
-                                }
-                            } else {
-                                logger("[Cleanup] WARNING: Could not find physical device with UID: \(physicalUID)")
-                            }
-                        }
-                    }
-                } else {
-                    logger("[Cleanup] Already on physical device: \(name)")
-                }
-            }
-        }
-
-        // 2. Remove control file - driver will detect and remove proxies
-        let controlFilePath = "/tmp/soundbridge-devices.txt"
-        logger("[Cleanup] Removing control file: \(controlFilePath)")
-        unlink(controlFilePath)
-
-        // 3. Wait for driver to remove devices (driver polls every 100ms)
-        logger("[Cleanup] Waiting for driver to remove proxy devices...")
-        Thread.sleep(forTimeInterval: 0.5)
-
-        logger("[Cleanup] Cleanup complete")
-    }
-
-    func findDeviceByUID(_ targetUID: String) -> AudioDeviceID? {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize
-        ) == noErr else {
-            return nil
-        }
-
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
-
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            &deviceIDs
-        ) == noErr else {
-            return nil
-        }
-
-        // Find device with matching UID
-        for deviceID in deviceIDs {
-            var uidAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceUID,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-
-            var deviceUID: Unmanaged<CFString>?
-            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-
-            let uidStatus = withUnsafeMutablePointer(to: &deviceUID) { ptr in
-                AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, ptr)
-            }
-            if uidStatus == noErr, let uid = deviceUID?.takeUnretainedValue() as String? {
-                if uid == targetUID {
-                    return deviceID
-                }
-            }
-        }
-
-        return nil
-    }
+    // P2 Batch 2 removed `performCleanup()` and `findDeviceByUID(_:)` from this
+    // class. Both were dead (zero call sites), and what they described was the
+    // last automatic default-output write in the product: on quit, if the system
+    // output happened to be a SoundBridge proxy, `performCleanup` moved it to the
+    // physical device — and also wrote `kAudioHardwarePropertyDefaultSystemOutputDevice`.
+    // Quitting is not a request to change where the machine's audio goes, so
+    // there is nothing here to keep. `DefaultOutputSwitch` is now the only code in
+    // the app that writes the default output, and it is reached from one place:
+    // a click in the device list.
 
     // Phase 2.1.4 removed `checkAndLoadDriverIfNeeded()` and `isDriverLoaded()`
     // from this class. Both were dead (zero call sites) and neither answered a
@@ -691,8 +496,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // lifecycle report (`driverFile`, `driverLoad`, `halDiscovery`,
     // `proxyDevice`), which arrives through IPC and is rendered by
     // `HostRunState`. Nothing on the app side inspects the HAL directory or
-    // restarts `coreaudiod`; the only remaining caller of `killall coreaudiod`
-    // is `DriverInstaller`, inside an explicit install after a user action.
+    // restarts `coreaudiod`: after P4 Batch 1A the app has no `killall` at all.
+    // The package installs, `tools/uninstall_driver.sh` and the app's uninstall
+    // item remove through one shared policy, and neither restarts the daemon.
 
     /// Launch the Host unless one already holds this user's instance lock.
     ///
@@ -713,136 +519,84 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         startHost()
     }
 
+    /// Start the Host through the supervisor.
+    ///
+    /// The supervisor owns the `Process` from here on: it decides when a launch
+    /// counts as successful (the instance lock is taken within `launchTimeout`),
+    /// when an exit is a crash to recover from, and when repeated failures become
+    /// `degraded`. `AppDelegate` no longer holds the process, and nothing on this
+    /// path reacts to a Host exit by quitting.
     func startHost() {
-        // Find the host executable - try multiple possible locations
-        let fileManager = FileManager.default
-        var possiblePaths: [String] = []
+        hostSupervisor.start()
+    }
 
-        // PRIORITY 1: Check for auxiliary executable in .app bundle (production)
-        if let helperURL = Bundle.main.url(forAuxiliaryExecutable: "SoundBridgeHost") {
-            possiblePaths.append(helperURL.path)
-        }
+    /// Host-only restart: terminate the Host this App owns, wait for it to exit,
+    /// and start a replacement. The App keeps its PID, its mapping manager and
+    /// its EQ writer; the new Host gets a new session and a new mapping, and
+    /// `EQController` re-applies the persisted EQ when that publication arrives.
+    ///
+    /// Reached from the popover's "Restart Host" item through
+    /// `requestHostRestart()`; `HostSupervisorTests` drives the same call path.
+    func restartHost() {
+        hostSupervisor.restart()
+    }
 
-        // PRIORITY 2: Check for embedded binary in MacOS directory (for distribution)
-        if let executablePath = Bundle.main.executableURL?.deletingLastPathComponent().path {
-            let embeddedHost = "\(executablePath)/SoundBridgeHost"
-            possiblePaths.append(embeddedHost)
-        }
+    /// The user-facing entry: "Restart Host" in the menu bar popover.
+    ///
+    /// Refused while uninstalling or terminating, where a replacement Host would
+    /// be undone immediately. Every other case is the supervisor's to judge, and
+    /// it coalesces a click that arrives while a stop is already in flight.
+    @discardableResult
+    func requestHostRestart() -> HostRestartOutcome {
+        let outcome = hostRestartEntry.request { [weak self] in self?.restartHost() }
+        print("[HostSupervisor] Restart Host item: \(outcome.description)")
+        return outcome
+    }
 
-        // PRIORITY 3: Check Contents/Helpers/ directory
-        if let bundlePath = Bundle.main.bundlePath as String? {
-            possiblePaths.append("\(bundlePath)/Contents/Helpers/SoundBridgeHost")
-        }
+    /// Uninstall path: stop the Host through the supervisor, then let the caller
+    /// remove the driver.
+    ///
+    /// The completion is the ordering, not a convenience: `shutdown(intent:
+    /// .uninstall)` sets the supervisor's shutdown latch as it stops the process,
+    /// so a Host exit observed during the removal is not read as a crash and
+    /// relaunched. Starting the removal before that latch is set would race a
+    /// relaunch against a driver that is being deleted, which is exactly what
+    /// the old `killall SoundBridgeHost` inside the privileged script invited.
+    ///
+    /// P4 Batch 1A: nothing here kills the Host by name any more. A `killall`
+    /// skipped the Host's ordered teardown and could match a Host this App does
+    /// not own.
+    func prepareForUninstall(completion: @escaping () -> Void) {
+        isUninstalling = true
+        hostSupervisor.shutdown(intent: .uninstall, completion: completion)
+    }
 
-        #if DEBUG
-        // Development builds - relative to app bundle
-        var possibleBasePaths: [String] = []
-
-        if let appPath = Bundle.main.bundlePath as String? {
-            // If running from Xcode/build, go up to project root
-            let appURL = URL(fileURLWithPath: appPath)
-            if appPath.contains("/SoundBridgeApp/") {
-                let projectRoot = appURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                possibleBasePaths.append(projectRoot.path)
+    /// Fold a supervisor transition into the log and the menu bar.
+    ///
+    /// Deliberately no `NSApp.terminate`: the App outliving the Host is the whole
+    /// point of the supervisor. `degraded` is reported as a state, so the popover
+    /// can say so instead of the App disappearing.
+    private func hostSupervisorDidChange(to state: HostSupervisorState) {
+        switch state {
+        case .degraded(let failure, let attempts):
+            print("[HostSupervisor] degraded after \(attempts) attempt(s): \(failure.description)")
+            HostStatusModel.shared.update(.degraded)
+            if case .executableMissing = failure {
+                presentHostMissingAlertOnce()
             }
-        }
-
-        // Try current working directory
-        if let cwd = fileManager.currentDirectoryPath as String? {
-            possibleBasePaths.append(cwd)
-        }
-
-        // Try home directory
-        if let homeDir = ProcessInfo.processInfo.environment["HOME"] {
-            possibleBasePaths.append("\(homeDir)/soundbridge")
-        }
-
-        // Build development paths
-        for basePath in possibleBasePaths {
-            // Try release build (with architecture subdirectory)
-            if let arch = getArchitecture() {
-                possiblePaths.append("\(basePath)/packages/host/.build/\(arch)/release/SoundBridgeHost")
-            }
-            possiblePaths.append("\(basePath)/packages/host/.build/release/SoundBridgeHost")
-            // Try debug build
-            if let arch = getArchitecture() {
-                possiblePaths.append("\(basePath)/packages/host/.build/\(arch)/debug/SoundBridgeHost")
-            }
-            possiblePaths.append("\(basePath)/packages/host/.build/debug/SoundBridgeHost")
-        }
-
-        // Also try absolute path based on current user
-        if let homeDir = ProcessInfo.processInfo.environment["HOME"] {
-            if let arch = getArchitecture() {
-                possiblePaths.append("\(homeDir)/soundbridge/packages/host/.build/\(arch)/release/SoundBridgeHost")
-            }
-            possiblePaths.append("\(homeDir)/soundbridge/packages/host/.build/release/SoundBridgeHost")
-        }
-
-        // Try environment variable if set
-        if let soundbridgeRoot = ProcessInfo.processInfo.environment["SOUNDBRIDGE_ROOT"] {
-            if let arch = getArchitecture() {
-                possiblePaths.append("\(soundbridgeRoot)/packages/host/.build/\(arch)/release/SoundBridgeHost")
-            }
-            possiblePaths.append("\(soundbridgeRoot)/packages/host/.build/release/SoundBridgeHost")
-        }
-        #endif
-
-        guard let hostPath = possiblePaths.first(where: { fileManager.fileExists(atPath: $0) }) else {
-            print("ERROR: Could not find SoundBridgeHost executable")
-            print("Searched in:")
-            for path in possiblePaths {
-                print("  - \(path)")
-            }
-            showAlert("SoundBridge Host Not Found", "Please build the host first:\ncd packages/host && swift build -c release")
-            return
-        }
-
-        hostProcess = Process()
-        hostProcess?.launchPath = hostPath
-        hostProcess?.arguments = []
-
-        // Capture output for debugging
-        let outputPipe = Pipe()
-        hostProcess?.standardOutput = outputPipe
-        hostProcess?.standardError = outputPipe
-
-        hostProcess?.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                print("SoundBridgeHost terminated (status: \(process.terminationStatus), reason: \(process.terminationReason.rawValue))")
-                // During uninstall, Host is killed intentionally — don't auto-quit
-                if !self.isUninstalling {
-                    NSApp.terminate(nil)
-                }
-            }
-        }
-
-        do {
-            try hostProcess?.run()
-            print("Started SoundBridgeHost at: \(hostPath)")
-        } catch {
-            print("Failed to launch host: \(error)")
-            showAlert("Failed to Launch Host", error.localizedDescription)
+        default:
+            print("[HostSupervisor] \(state.description)")
         }
     }
 
-    func getArchitecture() -> String? {
-        var size = 0
-        sysctlbyname("hw.machine", nil, &size, nil, 0)
-        var machine = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.machine", &machine, &size, nil, 0)
-        let arch = String(cString: machine)
-        
-        // Map to SwiftPM architecture names
-        if arch.contains("arm64") {
-            return "arm64-apple-macosx"
-        } else if arch.contains("x86_64") {
-            return "x86_64-apple-macosx"
-        }
-        return nil
+    /// The old launch path alerted on a missing binary. Keep that one message,
+    /// once per launch, now that locating the executable is the locator's job.
+    private func presentHostMissingAlertOnce() {
+        guard !didPresentHostMissingAlert else { return }
+        didPresentHostMissingAlert = true
+        showAlert("SoundBridge Host Not Found", "Please build the host first:\ncd packages/host && swift build -c release")
     }
-    
+
     func loadLogoImage() -> NSImage? {
         let fileManager = FileManager.default
         var logoURL: URL?

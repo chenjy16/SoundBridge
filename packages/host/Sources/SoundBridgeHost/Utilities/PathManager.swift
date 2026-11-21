@@ -24,9 +24,12 @@ struct PathManager {
         return url
     }()
 
-    static func sharedMemoryPath(uid: String) -> String {
+    /// Mapping path identity (Batch 1): the owning UID is part of the file name
+    /// so mappings from different users can never collide. Must match the
+    /// driver's `SharedMemoryPath()` and the App's EQController path.
+    static func sharedMemoryPath(uid: String, ownerUID: uid_t = getuid()) -> String {
         let safeUID = sanitizeUID(uid)
-        return "/tmp/soundbridge-\(safeUID)"
+        return "/tmp/soundbridge-\(ownerUID)-\(safeUID)"
     }
 
     static var controlFilePath: String {

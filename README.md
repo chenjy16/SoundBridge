@@ -30,9 +30,8 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 - 10-band parametric EQ with preset support
 - Automatic device detection and hot-plug support
 - Universal binary (Apple Silicon + Intel)
-- Guided onboarding with one-click driver install
-- Auto-update via Sparkle
-- Code signed and notarized
+- Guided onboarding that points at the official installer package
+- Ad-hoc signed (not notarized — see [Installation](#installation))
 
 ## Requirements
 
@@ -41,18 +40,31 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 
 ## Installation
 
-1. Download the latest `.dmg` from [Releases](https://github.com/chenjy16/SoundBridge/releases)
-2. Drag `SoundBridge.app` to Applications
-3. Launch SoundBridge — the onboarding wizard will guide you through driver installation
-4. Your HDMI/DisplayPort audio device will appear with a working volume slider
+Two files are published, and they install different things:
 
-> **First launch on macOS 15+**: releases are ad-hoc signed rather than notarized, so Gatekeeper asks for confirmation once. If the app is blocked, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Older systems also accept right-click → **Open**. From Terminal: `xattr -dr com.apple.quarantine /Applications/SoundBridge.app`.
+| File | What it does |
+|---|---|
+| `SoundBridge-1.2.0.pkg` | Installs the app **and** the HAL driver. This is the supported path for a first install and for any upgrade. |
+| `SoundBridge-1.2.0.dmg` | Replaces the app only. It never touches `/Library/Audio/Plug-Ins/HAL/`. |
 
-To uninstall, use the "Uninstall" option in the SoundBridge menu bar dropdown.
+1. Quit SoundBridge if it is running (the installer does not check).
+2. Open `SoundBridge-1.2.0.pkg` from [Releases](https://github.com/chenjy16/SoundBridge/releases) and approve the administrator prompt. That is the installer's own authorization; it is the only thing that writes to the HAL directory, and it replaces the driver as a transaction with a backup and a rollback.
+3. Launch `SoundBridge.app`. Onboarding reads the installed driver and shows success only when it matches this build. The app does not install anything itself.
+4. Choose **SoundBridge** as the output device, then pick the physical HDMI/DisplayPort device in the menu bar.
+
+Upgrading from 1.1.x **must** use the PKG: the shared-memory protocol changed to `0x00020200`, so an old driver with a new app produces no audio.
+
+> **First launch**: releases are ad-hoc signed rather than notarized, so Gatekeeper asks for confirmation once. If the app or the package is blocked, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Older systems also accept right-click → **Open**. Do not disable Gatekeeper or SIP.
+
+Full steps, troubleshooting and the data a removal keeps are in [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
+
+### Uninstalling
+
+Menu bar → **Uninstall Driver**, or `tools/uninstall_driver.sh` (add `--dry-run` first). Both run the same policy (`DriverUninstallPolicy`): they read the bundle identifier and refuse anything that is not `com.soundbridge.driver`, stop the Host through its supervisor, remove exactly one constant path, never touch `/tmp` or another vendor's HAL bundle, and never restart `coreaudiod`. EQ settings, volume state, logs and the app itself are kept.
 
 ### Updating
 
-The app updates itself through Sparkle. The audio driver does **not** update itself: SoundBridge installs the driver only from its onboarding step, never replaces the installed driver in the background, never restarts `coreaudiod` after a version check, and never asks for an administrator password on its own.
+**Sparkle is not enabled in this build** (`SUPublicEDKey` is empty), so the app does not update itself. Upgrades are a downloaded PKG, as above. The driver never updates on its own.
 
 Onboarding runs once. If a later release changes the driver's shared-memory protocol, the app detects the mismatch at launch, tells you which driver version it needs and which one is installed, and points at the [releases page](https://github.com/chenjy16/SoundBridge/releases) — it does not offer an in-app upgrade, and it will not re-run the install step by itself.
 
@@ -113,9 +125,9 @@ SoundBridge/
 │       ├── src/                # Biquad filters, limiter, engine
 │       ├── bridge/             # Objective-C++ wrapper for Swift
 │       └── tests/              # 33 automated tests
-├── tools/                      # Build, sign, notarize, DMG scripts
+├── tools/                      # Build, sign, verify, PKG and DMG scripts
 ├── Makefile                    # Development shortcuts
-└── .github/workflows/          # Release CI (build + sign + notarize + DMG)
+└── .github/workflows/          # Release CI (build + ad-hoc sign + PKG/DMG)
 ```
 
 ## Building from Source
@@ -197,14 +209,17 @@ make full-release
 
 | 命令 | 说明 |
 |------|------|
-| `make sign` | 使用 Developer ID 证书对 .app 进行代码签名 |
-| `make verify` | 验证所有组件的代码签名 |
-| `make dmg` | 创建带拖拽安装布局的 DMG 文件 |
-| `make release` | 构建 + 签名 + 验证 |
-| `make full-release` | 构建 + 签名 + 验证 + DMG（完整流水线） |
-| `make test-release` | 测试已签名的 release 构建 |
+| `make sign` | Sign the .app (ad-hoc by default; `SIGN_MODE=developer-id` requires a certificate) |
+| `make verify` | Verify the code signatures of every component |
+| `make dmg` | Create the DMG with a drag-to-Applications layout |
+| `make release` | Build + sign + verify |
+| `make full-release` | Build + sign + verify + DMG (full pipeline) |
+| `make test-release` | Test the signed release build |
 
-> 代码签名需要有效的 Apple Developer ID 证书。如果仅本地开发测试，可以跳过签名步骤直接使用 `make build` + `make run`。
+> This product ships **ad-hoc signed and notarized = no**. `make sign` succeeds without
+> an Apple Developer account; Developer ID signing and notarization are not part of the
+> 1.2.0 release path. Users approve the first launch once, as described in
+> [Installation](#installation).
 
 ### 手动构建各组件
 
@@ -250,15 +265,20 @@ Releases are automated via GitHub Actions. When you publish a release with a `vX
 1. Builds all components as universal binaries (arm64 + x86_64)
 2. Creates the `.app` bundle
 3. Ad-hoc signs the bundle (no Apple Developer account needed)
-4. Creates the DMG
-5. Generates the Sparkle `appcast.xml` feed
-6. Uploads the DMG, checksums and appcast to the GitHub Release
+4. Builds the installer PKG (`tools/build_installer_pkg.sh`) and the DMG (`tools/create_dmg.sh`)
+5. Generates the Sparkle `appcast.xml` feed (only when the Sparkle secrets exist)
+6. Uploads the PKG, DMG, checksums and appcast to the GitHub Release
 
 The only optional secrets are the two Sparkle ones below. Builds are not notarized, so users approve the first launch once, as described in [Installation](#installation).
 
-To produce a notarized build locally instead (requires a Developer ID certificate), run `SIGN_MODE=developer-id ./tools/codesign.sh` and then `./tools/notarize.sh`.
+To produce a Developer ID signed and notarized build locally instead, run `SIGN_MODE=developer-id ./tools/codesign.sh` and then `./tools/notarize.sh`. That is **not** what 1.2.0 ships, and the project does not promise a notarized release.
 
-### Auto-updates
+### Auto-updates (not enabled in 1.2.0)
+
+**The shipped build has an empty `SUPublicEDKey`, so `initializeUpdater()` returns early
+and Sparkle never starts.** There is no in-app update check in 1.2.0; upgrades are a
+downloaded PKG. The rest of this section describes the pipeline that exists for a future
+release, not current behaviour.
 
 Sparkle discovers new versions through an appcast feed. `SUFeedURL` is set to
 `https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml`, and the
@@ -301,7 +321,7 @@ SPARKLE_ED_PRIVATE_KEY_FILE=/path/to/sparkle_private_key ./tools/generate_appcas
 Contributions are welcome. The codebase is structured so each component can be built and tested independently:
 
 - DSP changes: `make test` runs the C++ test suite
-- Driver changes: rebuild and `sudo killall coreaudiod` to reload
+- Driver changes: rebuild the driver, then log out and back in (or run `sudo killall coreaudiod` yourself) to have coreaudiod reload it. Nothing in the product restarts a daemon for you.
 - Host/App changes: `make quick` for fast Swift-only rebuilds
 
 ## License

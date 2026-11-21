@@ -108,22 +108,25 @@ enum DriverVersionStatus: Equatable {
     }
 }
 
-/// What the caller is asking the installer to do.
+/// What the caller is asking an install to do.
 ///
-/// The distinction is load-bearing, not cosmetic. Phase 2.1.4 keeps the
-/// capability to install and upgrade, removes every user-facing upgrade entry
-/// point, and requires that a version incompatibility is *reported* rather than
-/// silently repaired. Passing an intent makes that visible at the call site: an
-/// automatic path cannot accidentally ask for `.explicitUpgrade` because no
-/// automatic path has a user action to attribute it to.
+/// The distinction is load-bearing, not cosmetic: an automatic path cannot
+/// accidentally ask for `.explicitUpgrade` because no automatic path has a user
+/// action to attribute it to, and a first install must never overwrite a bundle
+/// that is already there.
+///
+/// P4 Batch 1A: the app no longer installs the driver — the release's `.pkg`
+/// owns that — so nothing in `Sources/` constructs these cases any more. The type
+/// stays because the gate (`permits`) is still the rule any future install flow
+/// would have to satisfy, and the tests still hold it to that rule.
 enum DriverInstallIntent: Equatable {
-    /// Nothing is installed at the HAL path. This is the first-install flow that
-    /// onboarding offers.
+    /// Nothing is installed at the HAL path: the state onboarding guides the
+    /// user out of with the installer package.
     case firstInstall
     /// Replacing an existing bundle: outdated, unreadable metadata, a different
-    /// protocol, or an unknown expected version. Unreachable from this build's
-    /// UI; kept so the capability stays testable and a future release can wire it
-    /// to an explicit user action.
+    /// protocol, or an unknown expected version. No surface offers it; kept so
+    /// the rule stays testable and a future release can wire it to an explicit
+    /// user action.
     case explicitUpgrade(from: String, to: String)
 
     var isFirstInstall: Bool {
@@ -165,12 +168,11 @@ enum DriverInstallIntent: Equatable {
 
 /// What this build is allowed to do about the installed driver.
 ///
-/// Phase 2.1.3 draws a line the code has to keep visible: the *capability* to
-/// install and upgrade exists and is tested, while the *decision* to expose it
-/// to users is off. Four questions that are easy to collapse into one are kept
-/// apart on purpose — whether the driver is compatible, whether upgrading would
-/// help, whether this build may upgrade, and whether the user is shown an entry
-/// point.
+/// Phase 2.1.3 drew a line the code has to keep visible: an upgrade prompt is a
+/// user-facing entry point and this build ships none. Four questions that are
+/// easy to collapse into one are kept apart on purpose — whether the driver is
+/// compatible, whether upgrading would help, whether this build may upgrade, and
+/// whether the user is shown an entry point.
 ///
 /// These are constants rather than dead flags so that turning them on is a
 /// deliberate, reviewable release decision instead of a code cleanup.

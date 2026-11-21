@@ -6,305 +6,340 @@ private let logger = Logger(subsystem: "com.soundbridge.host", category: "ProxyD
 
 class ProxyDeviceManager {
     private let registry: DeviceRegistry
-    private var isAutoSwitching = false
-    /// Timestamp until which DeviceMonitor should ignore default-output changes (bounce window).
-    private var bounceUntilTime: Date = .distantPast
-    /// Whether a device bounce is in progress (checked by DeviceMonitor).
-    var isDeviceBouncing: Bool { Date() < bounceUntilTime }
-    private var lastSwitchTime: Date = .distantPast
-    private let switchCooldown: TimeInterval = 0.5
+    let lifecycleGate: HostLifecycleGate
+    /// Every CoreAudio question about the default output goes through this.
+    ///
+    /// The Host only reads through it. P2 Batch 2 removed every write — no
+    /// startup, reconnect, recovery, device callback or shutdown path calls
+    /// `setDefaultOutput(_:)` — and `DefaultOutputGovernanceTests` installs a
+    /// recorder here so a regression that puts one back fails a test instead of
+    /// silently moving a user's audio.
+    private let hal: DefaultOutputHAL
+    /// Whether a CoreAudio rebuild is being recovered.
+    ///
+    /// DeviceMonitor must not act on default-output notifications while the
+    /// object graph is being rebuilt: the notifications are about devices that
+    /// are being replaced, and reacting to them would start a second recovery.
+    private(set) var isRecovering = false
     private var monitoredProxyDeviceID: AudioDeviceID?
     private var monitoredVolumeElements: [UInt32] = []
     private var monitoredMuteRegistered = false
-    private let volumeForwardQueue = DispatchQueue(label: "com.soundbridge.host.proxy-volume-forward")
+    // 与 Recovery、Shutdown 和路由操作串行，避免后台音量写入越过停止边界。
+    private let volumeForwardQueue = DispatchQueue.main
     private let volumeForwardEpsilon: Float32 = 0.001
     private var lastForwardedProxyVolume: Float32?
     let volumePersistence: VolumePersistence
 
-    var activeProxyUID: String? {
+    /// The physical device whose proxy this Host is routing through.
+    ///
+    /// Phase 6A split this from the system default output. The two disagree
+    /// exactly when the user is listening somewhere else, and conflating them
+    /// is what made a reconnect drag the output back to a proxy the user had
+    /// already left. `didSet` therefore publishes `managedProxyUID`, not
+    /// `activeDeviceUID`.
+    var managedProxyUID: String? {
         didSet {
-            registry.activeDeviceUID = activeProxyUID
+            guard managedProxyUID != oldValue else { return }
+            registry.managedProxyUID = managedProxyUID
             registry.writeDeviceStateFile()
+            // The render callback must not read this property: it is a String,
+            // so every read would be an ARC retain/release pair on the audio
+            // thread. Publishing the new UID here keeps that work on whichever
+            // control thread changed the routing.
+            onManagedProxyChanged?(managedProxyUID)
         }
     }
+
+    /// Called on the thread that changes the routing, once per change.
+    ///
+    /// `main.swift` points this at `SharedMemoryManager.setPreferredRenderUID`,
+    /// which republishes the mapping the render callback reads.
+    var onManagedProxyChanged: ((String?) -> Void)?
+
+    /// Pre-Phase-6A name for `managedProxyUID`.
+    ///
+    /// Kept as an alias rather than renamed at every call site: the render path
+    /// and the response builders read the same fact, and two names for one
+    /// stored property is a rename, not a second state source.
+    var activeProxyUID: String? {
+        get { managedProxyUID }
+        set { managedProxyUID = newValue }
+    }
+
     var activePhysicalDeviceID: AudioDeviceID = 0
     var activeProxyDeviceID: AudioDeviceID = 0
 
-    init(registry: DeviceRegistry, volumePersistence: VolumePersistence = VolumePersistence()) {
+    init(registry: DeviceRegistry, volumePersistence: VolumePersistence = VolumePersistence(),
+         lifecycleGate: HostLifecycleGate = HostLifecycleGate(),
+         hal: DefaultOutputHAL = CoreAudioDefaultOutputHAL()) {
         self.registry = registry
         self.volumePersistence = volumePersistence
+        self.lifecycleGate = lifecycleGate
+        self.hal = hal
     }
 
     deinit {
         stopVolumeForwarding()
     }
 
+    // MARK: - Ownership of the default output
+
+    /// Classify what the system default output currently is.
+    ///
+    /// Reads CoreAudio every time rather than trusting a cached value: the
+    /// whole point is to answer "where is the audio going right now", and a
+    /// cache is what produced the wrong answer in 1.2.0.
+    func currentDefaultOutputOwner() -> DefaultOutputOwner {
+        guard let deviceID = hal.defaultOutputDevice() else { return .unknown }
+        guard deviceID != AudioDeviceID(kAudioObjectUnknown) else { return .none }
+        let uid = hal.deviceUID(deviceID)
+        let managed = Set(registry.devices.map { $0.uid })
+        return DefaultOutputPolicy.owner(uid: uid, managedPhysicalUIDs: managed)
+    }
+
+    /// The UID of the system default output, or `nil` when the query failed.
+    func currentDefaultOutputUID() -> String? {
+        guard let deviceID = hal.defaultOutputDevice() else { return nil }
+        return hal.deviceUID(deviceID)
+    }
+
+    /// One sample of "where is the audio going", including the device the HAL
+    /// reports so callers can debounce on it.
+    ///
+    /// `nil` only when the HAL refuses the query; a device whose UID cannot be
+    /// read comes back with `uid == nil`, which is a different fact. DeviceMonitor
+    /// treats the first as rebuild evidence and the second as nothing to act on,
+    /// and it reads through this seam for the same reason it writes through it:
+    /// one place answers every default-output question.
+    struct CurrentDefaultOutput: Equatable {
+        var deviceID: AudioDeviceID
+        var uid: String?
+    }
+
+    func currentDefaultOutput() -> CurrentDefaultOutput? {
+        guard let deviceID = hal.defaultOutputDevice() else { return nil }
+        return CurrentDefaultOutput(deviceID: deviceID, uid: hal.deviceUID(deviceID))
+    }
+
+    /// Publish what CoreAudio says the default output is.
+    ///
+    /// Called on every default-output notification and after every recovery
+    /// pass, so `device-state.json` cannot drift from the system's answer.
+    @discardableResult
+    func refreshSystemDefaultOutput() -> String? {
+        let uid = currentDefaultOutputUID()
+        if registry.systemDefaultOutputUID != uid {
+            registry.systemDefaultOutputUID = uid
+            registry.writeDeviceStateFile()
+        }
+        return uid
+    }
+
+    // MARK: - CoreAudio rebuild
+
+    /// Forget every AudioObjectID this manager holds.
+    ///
+    /// A `coreaudiod` restart invalidates all of them; keeping one and calling
+    /// a setter with it produces `kAudioHardwareBadObjectError` (560947818 on
+    /// the machine this was found on) and, worse, made the Host believe it was
+    /// still routed through a device that no longer existed.
+    func invalidateDeviceReferences() {
+        stopVolumeForwarding()
+        activeProxyDeviceID = 0
+        activePhysicalDeviceID = 0
+        lastForwardedProxyVolume = nil
+    }
+
+    /// What a rebuild left to re-establish, without changing the user's output.
+    struct RemapResult: Equatable {
+        var managedPhysicalUID: String?
+        var proxyDeviceID: AudioDeviceID
+        var physicalDeviceID: AudioDeviceID
+        var proxyPresent: Bool
+        var systemDefaultOutputUID: String?
+        /// The default output is the proxy this Host just re-mapped.
+        var defaultIsProxy: Bool
+    }
+
+    /// Re-resolve every held ID after CoreAudio rebuilt its object graph.
+    ///
+    /// Deliberately does **not** touch the default output: a recovery
+    /// restores objects, listeners and volume state, and a reconnect restores
+    /// connections — neither is a request to re-assert ownership of the default
+    /// output. If the system is back on the proxy, it stays there; if the user
+    /// is listening somewhere else, that choice survives.
+    @discardableResult
+    func remapAfterCoreAudioRebuild(in devices: [PhysicalDevice]) -> RemapResult {
+        invalidateDeviceReferences()
+
+        let defaultUID = currentDefaultOutputUID()
+        registry.systemDefaultOutputUID = defaultUID
+
+        let owner = DefaultOutputPolicy.owner(
+            uid: defaultUID,
+            managedPhysicalUIDs: Set(devices.map { $0.uid })
+        )
+
+        // 仅选择内部路由目标；旧设备消失后可映射新设备，但不更改默认输出。
+        let candidateUID = DefaultOutputPolicy.recoveryTarget(
+            current: owner, previousUID: managedProxyUID, availableUIDs: devices.map { $0.uid }
+        )
+
+        guard let physicalUID = candidateUID,
+              let physical = devices.first(where: { $0.uid == physicalUID }),
+              let proxyID = findProxyDevice(forPhysicalUID: physicalUID) else {
+            // Nothing to route through yet. The driver may still be creating
+            // the proxy; the caller retries.
+            registry.writeDeviceStateFile()
+            return RemapResult(
+                managedPhysicalUID: nil,
+                proxyDeviceID: 0,
+                physicalDeviceID: 0,
+                proxyPresent: false,
+                systemDefaultOutputUID: defaultUID,
+                defaultIsProxy: false
+            )
+        }
+
+        managedProxyUID = physicalUID
+        activePhysicalDeviceID = physical.id
+        activeProxyDeviceID = proxyID
+        startVolumeForwarding(proxyDeviceID: proxyID)
+        restoreVolumeState(proxyDeviceID: proxyID, physicalUID: physicalUID)
+        registry.writeDeviceStateFile()
+
+        let defaultIsProxy = owner.isProxy(of: physicalUID)
+        logger.notice(
+            "Remapped after rebuild: physical=\(physicalUID, privacy: .public) proxy=\(proxyID) defaultIsProxy=\(defaultIsProxy, privacy: .public)"
+        )
+        return RemapResult(
+            managedPhysicalUID: physicalUID,
+            proxyDeviceID: proxyID,
+            physicalDeviceID: physical.id,
+            proxyPresent: true,
+            systemDefaultOutputUID: defaultUID,
+            defaultIsProxy: defaultIsProxy
+        )
+    }
+
+    /// Mark a recovery as in flight so notification handling stands down.
+    func beginRecovery() {
+        isRecovering = true
+    }
+
+    /// Release the recovery latch. Must run on every exit path.
+    func endRecovery() {
+        isRecovering = false
+    }
+
     func findProxyDevice(forPhysicalUID physicalUID: String) -> AudioDeviceID? {
-        let proxyUID = physicalUID + "-soundbridge"
-
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize
-        ) == noErr else {
-            return nil
-        }
-
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
-
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            &deviceIDs
-        ) == noErr else {
-            return nil
-        }
-
-        for deviceID in deviceIDs {
-            if let uid = getDeviceUID(deviceID), uid == proxyUID {
-                return deviceID
-            }
-        }
-
-        return nil
+        hal.deviceID(forUID: physicalUID + "-soundbridge")
     }
 
-    func setDefaultOutputDevice(_ deviceID: AudioDeviceID) -> Bool {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+    // P2 Batch 2 removed `setDefaultOutputDevice`, `bounceDevice`,
+    // `setDefaultOnly` and `setDefaultAndSystemDevice` from this class. A bounce
+    // changed the system default output twice, on a lifecycle event, and the
+    // App's "Reconnect Audio" button was reaching it — the exact behaviour this
+    // batch exists to end. A reconnect now re-establishes the Host's own route
+    // (`remapAfterCoreAudioRebuild`) and leaves the default output where the
+    // user put it. `DefaultOutputGovernanceTests` drives startup, reconnect,
+    // recovery, device callbacks and shutdown through this class and asserts no
+    // write was requested.
 
-        var newDeviceID = deviceID
-        let result = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &newDeviceID
-        )
-
-        // Also set system output device (system sounds / alerts)
-        var systemAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var systemDeviceID = deviceID
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &systemAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &systemDeviceID
-        )
-
-        return result == noErr
-    }
-
-    /// Bounce the default device: proxy → physical → proxy.
-    /// Forces apps that cache the device ID to re-bind to the new default.
-    func bounceDevice() {
-        let proxyID = activeProxyDeviceID
-        let physicalID = activePhysicalDeviceID
-        guard proxyID != 0, physicalID != 0 else {
-            logger.info("[Bounce] No active proxy/physical pair — skipping")
-            return
-        }
-
-        print("[Bounce] Triggering device bounce to recapture audio streams...")
-        isAutoSwitching = true
-        bounceUntilTime = Date().addingTimeInterval(1.0) // 1s window for async callbacks
-
-        // Step 1: Switch both default + system output to physical device
-        setDefaultAndSystemDevice(physicalID)
-
-        // Step 2: Wait for apps to notice the change
-        Thread.sleep(forTimeInterval: 0.2)
-
-        // Step 3: Switch both back to proxy
-        setDefaultAndSystemDevice(proxyID)
-
-        lastSwitchTime = Date()
-        DispatchQueue.main.asyncAfter(deadline: .now() + switchCooldown) { [weak self] in
-            self?.isAutoSwitching = false
-        }
-        print("[Bounce] Device bounce complete")
-    }
-
-    /// Set both default output and system output device in one call.
-    private func setDefaultAndSystemDevice(_ deviceID: AudioDeviceID) {
-        var defaultAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var id1 = deviceID
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &defaultAddress, 0, nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size), &id1
-        )
-
-        var systemAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var id2 = deviceID
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &systemAddress, 0, nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size), &id2
-        )
-    }
-
-    /// What `autoSelectProxy()` actually achieved.
+    /// What `resolveProxyRouting(forPhysicalUID:)` achieved.
     ///
     /// It used to return `Void` while logging failures at warning level, which is
     /// how startup reported success with no audio path: every early return was
-    /// indistinguishable from the successful path.
-    enum ProxySelectionOutcome: Equatable {
-        /// The default output is now the proxy for `physicalUID`.
-        case switched(proxyDeviceID: AudioDeviceID)
-        /// The default output already was the proxy; state was re-mapped.
-        case alreadyOnProxy(proxyDeviceID: AudioDeviceID)
-        /// No default output device could be queried.
-        case noDefaultDevice
-        /// The current device has no UID/name, or the proxy UID does not resolve
-        /// back to a device this Host knows.
-        case noPhysicalMapping
-        /// A physical device we do not manage is the default; nothing to route.
+    /// indistinguishable from the successful path. P2 Batch 2 replaced the old
+    /// `switch`/`alreadyOnProxy` pair with one `routed` case carrying the fact
+    /// that mattered: whether macOS is *also* sending audio through the proxy.
+    enum ProxyRoutingOutcome: Equatable {
+        /// The driver's proxy for `physicalUID` is now the Host's route.
+        /// `defaultOutputIsProxy` says whether macOS is sending audio to it too;
+        /// `false` is a supported state, not a failure.
+        case routed(proxyDeviceID: AudioDeviceID, defaultOutputIsProxy: Bool)
+        /// The lifecycle forbids work right now: stopping, or a recovery pass.
+        case lifecycleBlocked
+        /// `physicalUID` is not a device this Host has a mapping for.
         case notManagedDevice
-        /// The driver's proxy device for this physical device is not in the HAL
-        /// device list.
+        /// The driver has not published a proxy device for this device yet.
         case proxyDeviceMissing
-        /// CoreAudio refused to make the proxy the default output.
-        case switchFailed
 
-        /// Whether the Host is now routing through a proxy device.
-        var isRouted: Bool {
-            switch self {
-            case .switched, .alreadyOnProxy:
-                return true
-            case .noDefaultDevice, .noPhysicalMapping, .notManagedDevice, .proxyDeviceMissing, .switchFailed:
-                return false
-            }
+        /// Whether the Host has an audio path to configure.
+        var isRoutable: Bool {
+            if case .routed = self { return true }
+            return false
+        }
+
+        /// Whether macOS is currently sending audio through that proxy.
+        var isDefaultOutput: Bool {
+            if case .routed(_, let isDefault) = self { return isDefault }
+            return false
         }
 
         /// One line for logs and for the lifecycle snapshot's `detail`.
         var diagnostic: String {
             switch self {
-            case .switched(let id):
-                return "switched default output to proxy \(id)"
-            case .alreadyOnProxy(let id):
-                return "default output already was the proxy (\(id)); re-mapped"
-            case .noDefaultDevice:
-                return "no default output device could be queried"
-            case .noPhysicalMapping:
-                return "proxy device is the default but no physical device maps to it"
+            case .routed(let id, let isDefault):
+                return isDefault
+                    ? "routed through proxy \(id), which is also the system default output"
+                    : "routed through proxy \(id); the system default output is elsewhere and was left alone"
+            case .lifecycleBlocked:
+                return "the lifecycle does not permit routing right now"
             case .notManagedDevice:
-                return "default output is not a device this Host manages"
+                return "the target is not a device this Host manages"
             case .proxyDeviceMissing:
                 return "the driver's proxy device is not in the HAL device list"
-            case .switchFailed:
-                return "CoreAudio refused to make the proxy the default output"
             }
         }
     }
 
+    /// Resolve the Host's proxy route for `physicalUID`.
+    ///
+    /// This is the startup / recovery entry point, and it deliberately takes the
+    /// device it should route *for* instead of asking which device is the system
+    /// default: the default output is not this Host's to choose. It reads the
+    /// default output only to report where the audio is actually going.
+    ///
+    /// Nothing in here writes the default output. The one caller that used to
+    /// (the old `autoSelectProxy`) was removed in P2 Batch 2.
     @discardableResult
-    func autoSelectProxy() -> ProxySelectionOutcome {
-        guard let currentDeviceID = getCurrentDefaultDevice() else {
-            logger.error("Could not get current default device")
-            return .noDefaultDevice
-        }
-
-        guard let uid = getDeviceUID(currentDeviceID),
-              let name = getDeviceName(currentDeviceID) else {
-            logger.error("Could not get device info")
-            return .noDefaultDevice
-        }
-
-        print("[AutoSelect] Current default device: \(name) (\(uid))")
-
-        if name.contains("SoundBridge") {
-            // If we're already on a proxy, make sure we map it to the physical device.
-            if let physicalUID = uid.components(separatedBy: "-soundbridge").first,
-               let physicalDevice = registry.find(uid: physicalUID) {
-                activeProxyUID = physicalUID
-                activePhysicalDeviceID = physicalDevice.id
-                activeProxyDeviceID = currentDeviceID
-                startVolumeForwarding(proxyDeviceID: currentDeviceID)
-                enqueueProxyVolumeForward(force: true)
-                restoreVolumeState(proxyDeviceID: currentDeviceID, physicalUID: physicalUID)
-                print("[AutoSelect] Already on proxy device - mapped to \(physicalDevice.name)")
-                return .alreadyOnProxy(proxyDeviceID: currentDeviceID)
-            }
-            print("[AutoSelect] Already on proxy device - but no physical mapping found")
-            return .noPhysicalMapping
-        }
-
-        guard registry.find(uid: uid) != nil else {
-            print("[AutoSelect] Current device not in registry - no proxy available")
+    func resolveProxyRouting(forPhysicalUID physicalUID: String) -> ProxyRoutingOutcome {
+        guard lifecycleGate.permitsNormal(), !isRecovering else { return .lifecycleBlocked }
+        guard let physicalDevice = registry.find(uid: physicalUID) else {
+            logger.info("Routing target \(physicalUID, privacy: .public) is not a device this Host manages")
             return .notManagedDevice
         }
-
-        guard let proxyID = findProxyDevice(forPhysicalUID: uid) else {
-            logger.warning("Could not find proxy for device: \(name)")
+        guard let proxyID = findProxyDevice(forPhysicalUID: physicalUID) else {
+            logger.warning("No proxy device for \(physicalUID, privacy: .public) yet")
             return .proxyDeviceMissing
         }
 
-        // Capture physical volume and sync to proxy BEFORE switching
-        let originalVolume = getDeviceVolume(currentDeviceID)
-        if let volume = originalVolume {
-            print("[AutoSelect] Physical device volume: \(String(format: "%.0f%%", volume * 100))")
-            if setDeviceVolume(proxyID, volume: volume) {
-                logger.info("Set proxy volume to \(String(format: "%.0f%%", volume * 100))")
-            }
-        }
+        activeProxyUID = physicalUID
+        activePhysicalDeviceID = physicalDevice.id
+        activeProxyDeviceID = proxyID
+        startVolumeForwarding(proxyDeviceID: proxyID)
+        enqueueProxyVolumeForward(force: true)
+        restoreVolumeState(proxyDeviceID: proxyID, physicalUID: physicalUID)
 
-        print("[AutoSelect] Switching to proxy device...")
-        isAutoSwitching = true
-        lastSwitchTime = Date()
-        if setDefaultOutputDevice(proxyID) {
-            logger.info("Successfully switched to proxy")
-            activeProxyUID = uid
-            activePhysicalDeviceID = currentDeviceID
-            activeProxyDeviceID = proxyID
-            startVolumeForwarding(proxyDeviceID: proxyID)
-            enqueueProxyVolumeForward(force: true)
-            restoreVolumeState(proxyDeviceID: proxyID, physicalUID: uid)
-            return .switched(proxyDeviceID: proxyID)
-        }
-
-        logger.error("Failed to set proxy as default")
-        isAutoSwitching = false
-        return .switchFailed
+        refreshSystemDefaultOutput()
+        let isDefault = currentDefaultOutputOwner().isProxy(of: physicalUID)
+        print("[Route] \(physicalDevice.name) via proxy \(proxyID); default output left untouched")
+        logger.notice(
+            "Proxy route resolved: physical=\(physicalUID, privacy: .public) proxy=\(proxyID) defaultOutputIsProxy=\(isDefault, privacy: .public)"
+        )
+        return .routed(proxyDeviceID: proxyID, defaultOutputIsProxy: isDefault)
     }
 
     /// Resolve the current output device to a physical device, if possible.
     /// If current output is a proxy, this also updates activeProxy* state.
+    ///
+    /// Read-only. It answers "where is the audio going", which is how startup
+    /// picks the device to route for; it does not make that device the default.
     func resolveCurrentOutputDevice(in devices: [PhysicalDevice]) -> PhysicalDevice? {
-        guard let currentDeviceID = getCurrentDefaultDevice(),
-              let uid = getDeviceUID(currentDeviceID),
-              let name = getDeviceName(currentDeviceID) else {
+        guard let currentDeviceID = hal.defaultOutputDevice(),
+              let uid = hal.deviceUID(currentDeviceID),
+              let name = hal.deviceName(currentDeviceID) else {
             return nil
         }
 
@@ -322,7 +357,15 @@ class ProxyDeviceManager {
         return devices.first(where: { $0.uid == uid })
     }
 
+    /// Adopt the routing state for a proxy the user just made the default output.
+    ///
+    /// Reached from `DeviceMonitor` when the default output *becomes* a proxy this
+    /// Host publishes — in practice, the user picking SoundBridge in the App or
+    /// in System Settings. It never writes: the change already happened, and
+    /// this only brings the Host's own view of it up to date so volume can be
+    /// forwarded.
     func handleProxySelection(_ proxyUID: String, deviceID: AudioDeviceID) {
+        guard lifecycleGate.permitsNormal(), !isRecovering else { return }
         if let physicalUID = proxyUID.components(separatedBy: "-soundbridge").first,
            let physicalDevice = registry.find(uid: physicalUID) {
             print("Routing to: \(physicalDevice.name)")
@@ -340,139 +383,46 @@ class ProxyDeviceManager {
             activePhysicalDeviceID = 0
             activeProxyDeviceID = 0
         }
-
-        // Delay resetting the flag to prevent race conditions with rapid callbacks
-        DispatchQueue.main.asyncAfter(deadline: .now() + switchCooldown) { [weak self] in
-            self?.isAutoSwitching = false
-        }
     }
 
-    func handlePhysicalSelection(_ physicalUID: String) {
-        // Prevent rapid re-triggering
-        let now = Date()
-        guard now.timeIntervalSince(lastSwitchTime) > switchCooldown else {
-            return
-        }
+    /// Note that a physical device is currently the default output.
+    ///
+    /// This used to switch the default output back to the proxy for any device
+    /// the Host manages. That is exactly what P2 Batch 2 removed: the user chose
+    /// the physical output, and the Host's job is to stop assuming the audio is
+    /// coming through the proxy — not to undo the choice. Picking the proxy again
+    /// reaches `handleProxySelection`, which restores the forwarding state.
+    ///
+    /// `managedProxyUID` deliberately survives both branches: it says what this
+    /// Host manages, not where the audio is going right now.
+    func notePhysicalSelection(_ physicalUID: String) {
+        guard lifecycleGate.permitsNormal(), !isRecovering else { return }
 
-        guard !isAutoSwitching else { return }
-
-        guard let physicalDevice = registry.find(uid: physicalUID) else {
-            stopVolumeForwarding()
-            return
-        }
-
-        if let proxyID = findProxyDevice(forPhysicalUID: physicalUID) {
-            // Sync volume before switching
-            if let volume = getDeviceVolume(physicalDevice.id) {
-                _ = setDeviceVolume(proxyID, volume: volume)
-            }
-
-            print("Auto-switching to SoundBridge proxy")
-            isAutoSwitching = true
-            lastSwitchTime = now
-            if setDefaultOutputDevice(proxyID) {
-                activeProxyUID = physicalUID
-                activeProxyDeviceID = proxyID
-                activePhysicalDeviceID = physicalDevice.id
-                startVolumeForwarding(proxyDeviceID: proxyID)
-                enqueueProxyVolumeForward(force: true)
-                restoreVolumeState(proxyDeviceID: proxyID, physicalUID: physicalUID)
-            } else {
-                logger.error("Failed to switch system default output to proxy device")
-                isAutoSwitching = false
-                stopVolumeForwarding()
-            }
+        if let physicalDevice = registry.find(uid: physicalUID) {
+            logger.info(
+                "Default output is the physical device \(physicalUID, privacy: .public) (\(physicalDevice.name, privacy: .public)); leaving the user's choice alone"
+            )
         } else {
-            stopVolumeForwarding()
-            logger.warning("No proxy found for this device")
+            logger.info(
+                "Default output \(physicalUID, privacy: .public) is not a device this Host manages; nothing to route"
+            )
         }
-        // Note: isAutoSwitching is reset in handleProxySelection after delay
-    }
 
-    func restorePhysicalDevice() -> Bool {
+        // Forwarding is already gated on the proxy being the default output
+        // (`mayForwardToPhysical`); dropping the listeners here also releases
+        // the HAL resources for a device that is no longer in the audio path.
         stopVolumeForwarding()
-
-        guard let currentDeviceID = getCurrentDefaultDevice(),
-              let name = getDeviceName(currentDeviceID),
-              name.contains("SoundBridge") else {
-            return false
-        }
-
-        guard let proxyUID = getDeviceUID(currentDeviceID),
-              let physicalUID = proxyUID.components(separatedBy: "-soundbridge").first,
-              let physicalDevice = registry.find(uid: physicalUID) else {
-            return false
-        }
-
-        // Restore both default and system output to physical device
-        setDefaultAndSystemDevice(physicalDevice.id)
-
-        logger.info("Restored to \(physicalDevice.name)")
-        Thread.sleep(forTimeInterval: SoundBridgeConfig.physicalDeviceSwitchDelay)
-        return true
+        activeProxyDeviceID = 0
+        activePhysicalDeviceID = 0
     }
 
-    private func getCurrentDefaultDevice() -> AudioDeviceID? {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+    // P2 Batch 2 removed `restorePhysicalDevice()`. It put the physical device
+    // back as the default output while the Host was shutting down — a lifecycle
+    // event changing the user's default output, which is now forbidden.
 
-        var deviceID: AudioDeviceID = 0
-        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            &deviceID
-        ) == noErr else {
-            return nil
-        }
-
-        return deviceID
-    }
-
-    private func getDeviceUID(_ deviceID: AudioDeviceID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var uid: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-
-        let status = withUnsafeMutablePointer(to: &uid) { ptr in
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
-        }
-        guard status == noErr, let cfUID = uid?.takeUnretainedValue() else {
-            return nil
-        }
-        return cfUID as String
-    }
-
-    private func getDeviceName(_ deviceID: AudioDeviceID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceNameCFString,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-
-        let status = withUnsafeMutablePointer(to: &name) { ptr in
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
-        }
-        guard status == noErr, let cfName = name?.takeUnretainedValue() else {
-            return nil
-        }
-        return cfName as String
-    }
+    // The property getters that used to live here now belong to
+    // `CoreAudioDefaultOutputHAL`, so that a test can answer them instead of
+    // asking the machine.
 
     private func getDeviceVolume(_ deviceID: AudioDeviceID) -> Float32? {
         var address = AudioObjectPropertyAddress(
@@ -676,7 +626,7 @@ class ProxyDeviceManager {
     }
 
     fileprivate func handleProxyVolumeChanged(from objectID: AudioObjectID) {
-        guard monitoredProxyDeviceID == objectID, activeProxyDeviceID == objectID else {
+        guard lifecycleGate.permitsNormal(), monitoredProxyDeviceID == objectID, activeProxyDeviceID == objectID else {
             return
         }
 
@@ -684,7 +634,7 @@ class ProxyDeviceManager {
     }
 
     fileprivate func handleProxyMuteChanged(from objectID: AudioObjectID) {
-        guard monitoredProxyDeviceID == objectID, activeProxyDeviceID == objectID else {
+        guard let token = lifecycleGate.normalToken(), monitoredProxyDeviceID == objectID, activeProxyDeviceID == objectID else {
             return
         }
 
@@ -693,12 +643,21 @@ class ProxyDeviceManager {
         guard proxyDeviceID != 0, physicalDeviceID != 0 else { return }
 
         volumeForwardQueue.async { [weak self] in
-            self?.forwardProxyMuteToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID)
+            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
+            self.forwardProxyMuteToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID)
         }
     }
 
+    private func mayForwardToPhysical(proxyDeviceID: AudioDeviceID, physicalDeviceID: AudioDeviceID) -> Bool {
+        guard lifecycleGate.permitsNormal(), proxyDeviceID == activeProxyDeviceID,
+              physicalDeviceID == activePhysicalDeviceID, let uid = activeProxyUID else { return false }
+        return DefaultOutputPolicy.mayForwardVolume(current: currentDefaultOutputOwner(), physicalUID: uid)
+    }
+
     private func forwardProxyMuteToPhysical(proxyDeviceID: AudioDeviceID, physicalDeviceID: AudioDeviceID) {
-        guard let muted = getDeviceMute(proxyDeviceID) else { return }
+        guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID),
+              let muted = getDeviceMute(proxyDeviceID),
+              mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID) else { return }
         _ = setDeviceMute(physicalDeviceID, muted: muted)
 
         // Persist mute state for the physical device
@@ -763,6 +722,7 @@ class ProxyDeviceManager {
     /// Because coreaudiod may not be ready immediately after wake, this method retries
     /// registration with increasing delays if the initial attempt fails.
     func reregisterVolumeForwarding(attempt: Int = 1) {
+        guard let token = lifecycleGate.normalToken() else { return }
         // stopVolumeForwarding clears monitoredProxyDeviceID, so the same-ID
         // early-return guard in startVolumeForwarding will not block re-registration.
         stopVolumeForwarding()
@@ -779,7 +739,8 @@ class ProxyDeviceManager {
                 let delay = SoundBridgeConfig.wakeRetryDelays[attempt]
                 print("[VolumeForward] Listener registration failed (attempt \(attempt)/\(SoundBridgeConfig.wakeRetryMaxAttempts)) — retrying in \(delay)s")
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    self?.reregisterVolumeForwarding(attempt: attempt + 1)
+                    guard let self, self.lifecycleGate.permitsNormal(token) else { return }
+                    self.reregisterVolumeForwarding(attempt: attempt + 1)
                 }
             } else {
                 logger.error("Listener registration failed after \(SoundBridgeConfig.wakeRetryMaxAttempts) attempts")
@@ -792,7 +753,8 @@ class ProxyDeviceManager {
         let proxyID = activeProxyDeviceID
         let physicalID = activePhysicalDeviceID
         volumeForwardQueue.async { [weak self] in
-            self?.forwardProxyMuteToPhysical(proxyDeviceID: proxyID, physicalDeviceID: physicalID)
+            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
+            self.forwardProxyMuteToPhysical(proxyDeviceID: proxyID, physicalDeviceID: physicalID)
         }
 
         if attempt > 1 {
@@ -803,6 +765,7 @@ class ProxyDeviceManager {
     }
 
     private func enqueueProxyVolumeForward(force: Bool = false) {
+        guard let token = lifecycleGate.normalToken() else { return }
         let proxyDeviceID = activeProxyDeviceID
         let physicalDeviceID = activePhysicalDeviceID
         guard proxyDeviceID != 0, physicalDeviceID != 0 else {
@@ -810,7 +773,8 @@ class ProxyDeviceManager {
         }
 
         volumeForwardQueue.async { [weak self] in
-            self?.forwardProxyVolumeToPhysical(
+            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
+            self.forwardProxyVolumeToPhysical(
                 proxyDeviceID: proxyDeviceID,
                 physicalDeviceID: physicalDeviceID,
                 force: force
@@ -823,13 +787,13 @@ class ProxyDeviceManager {
         physicalDeviceID: AudioDeviceID,
         force: Bool = false
     ) {
-        guard let proxyVolume = getDeviceVolume(proxyDeviceID) else {
-            return
-        }
+        guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID),
+              let proxyVolume = getDeviceVolume(proxyDeviceID) else { return }
 
         if !force, let lastForwardedProxyVolume, abs(proxyVolume - lastForwardedProxyVolume) < volumeForwardEpsilon {
             return
         }
+        guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID) else { return }
 
         lastForwardedProxyVolume = proxyVolume
         _ = setDeviceVolume(physicalDeviceID, volume: proxyVolume)
@@ -850,7 +814,11 @@ private func proxyVolumeChangedCallback(
 ) -> OSStatus {
     guard let clientData else { return noErr }
     let manager = Unmanaged<ProxyDeviceManager>.fromOpaque(clientData).takeUnretainedValue()
-    manager.handleProxyVolumeChanged(from: objectID)
+    guard let token = manager.lifecycleGate.normalToken() else { return noErr }
+    DispatchQueue.main.async {
+        guard manager.lifecycleGate.permitsNormal(token) else { return }
+        manager.handleProxyVolumeChanged(from: objectID)
+    }
     return noErr
 }
 
@@ -862,6 +830,10 @@ private func proxyMuteChangedCallback(
 ) -> OSStatus {
     guard let clientData else { return noErr }
     let manager = Unmanaged<ProxyDeviceManager>.fromOpaque(clientData).takeUnretainedValue()
-    manager.handleProxyMuteChanged(from: objectID)
+    guard let token = manager.lifecycleGate.normalToken() else { return noErr }
+    DispatchQueue.main.async {
+        guard manager.lifecycleGate.permitsNormal(token) else { return }
+        manager.handleProxyMuteChanged(from: objectID)
+    }
     return noErr
 }

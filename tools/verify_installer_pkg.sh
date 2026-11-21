@@ -104,6 +104,25 @@ if [[ "$TOP_LEVEL" != "$EXPECTED_TOP_LEVEL" ]]; then
 fi
 pass "payload has exactly Applications/ and Library/"
 
+# --- 1b. no bundle relocation ------------------------------------------------
+# When a package allows relocation, Installer resolves each bundle by identifier
+# and installs over whichever copy it finds on the target volume -- the payload
+# path is a suggestion. 1.2.0 shipped that way: on a machine with a checkout of
+# this repository under $HOME, the app was installed over that checkout's
+# dist/SoundBridge.app and /Applications was never created.
+#
+# The allow-list is recorded inside <relocate> in the component's PackageInfo.
+# An empty <relocate/> is the only shape that pins every bundle to its payload
+# path, so a single <bundle> entry between the tags is a release blocker.
+PKGINFO="$(find "$WORK/expanded" -maxdepth 3 -type f -name PackageInfo | head -1)"
+[[ -n "$PKGINFO" ]] || fail "no PackageInfo in the expanded package"
+RELOCATION_LIST="$(/usr/bin/sed -n '/<relocate>/,/<\/relocate>/p' "$PKGINFO" | /usr/bin/grep '<bundle' || true)"
+if [[ -n "$RELOCATION_LIST" ]]; then
+    echo "$RELOCATION_LIST" | sed 's/^/      /'
+    fail "the package allows bundle relocation; Installer would install over any same-identifier bundle on the volume instead of the payload path"
+fi
+pass "no bundle in the package may be relocated"
+
 APP="$PAYLOAD/Applications/SoundBridge.app"
 STAGE="$PAYLOAD/$SUPPORT_REL"
 DRIVER="$STAGE/driver/$DRIVER_NAME"

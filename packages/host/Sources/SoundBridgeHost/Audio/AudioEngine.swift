@@ -201,12 +201,6 @@ class AudioEngine {
         let newSampleRate = getDeviceNominalSampleRate(deviceID)
         let needsFormatUpdate = (newSampleRate != SoundBridgeConfig.activeSampleRate)
 
-        if needsFormatUpdate {
-            print("[AudioEngine] Sample rate change detected: \(SoundBridgeConfig.activeSampleRate)Hz → \(newSampleRate)Hz")
-            SoundBridgeConfig.activeSampleRate = newSampleRate
-            renderer.updateSampleRate(newSampleRate)
-        }
-
         var isRunning: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         let wasRunning = AudioUnitGetProperty(
@@ -220,6 +214,17 @@ class AudioEngine {
 
         if wasRunning {
             AudioOutputUnitStop(unit)
+        }
+
+        if needsFormatUpdate {
+            print("[AudioEngine] Sample rate change detected: \(SoundBridgeConfig.activeSampleRate)Hz → \(newSampleRate)Hz")
+            SoundBridgeConfig.activeSampleRate = newSampleRate
+            // P2 Batch 4: after `AudioOutputUnitStop`, never before. The DSP
+            // call rebuilds every biquad's coefficients and is documented as
+            // "NOT realtime-safe"; running it while the IO thread is still
+            // inside `soundbridge_dsp_process_interleaved` is a data race on
+            // the filter state.
+            renderer.updateSampleRate(newSampleRate)
         }
 
         // 切换设备

@@ -41,6 +41,6 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2025 SoundBridge. All rights reserved.</string>
 	<key>SBAudioProtocolVersion</key>
-	<integer>131328</integer>
+	<integer>131584</integer>
 </dict>
 </plist>

@@ -11,7 +11,10 @@ private func _notify_post(_ name: UnsafePointer<CChar>) -> UInt32
 private let logger = Logger(subsystem: "com.soundbridge.app", category: "VolumeController")
 
 /// Format an OSStatus as a FourCC string for readable CoreAudio error logging.
-private func formatOSStatus(_ status: OSStatus) -> String {
+///
+/// Internal rather than private so `DefaultOutputSwitch` can report the same
+/// spelling of a failure in the alert it shows and in the log.
+func formatOSStatus(_ status: OSStatus) -> String {
     if status == noErr { return "noErr" }
     let chars: [Character] = [
         Character(UnicodeScalar(UInt8((status >> 24) & 0xFF))),
@@ -58,6 +61,13 @@ class VolumeController: ObservableObject {
     private var proxyDeviceID: AudioObjectID = kAudioObjectUnknown
     private var physicalDeviceID: AudioObjectID = kAudioObjectUnknown
     private var listenedDeviceID: AudioObjectID = kAudioObjectUnknown
+
+    /// The only route to `kAudioHardwarePropertyDefaultOutputDevice` in this app.
+    ///
+    /// P2 Batch 2: volume and EQ never go through it, and nothing automatic does.
+    /// It is called from `switchDevice(to:)`, which is reachable from the device
+    /// list the user clicks.
+    private let defaultOutputSwitch = DefaultOutputSwitch()
 
     // Block references for proper listener removal (P0 fix: prevents listener leak)
     private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
@@ -495,35 +505,19 @@ class VolumeController: ObservableObject {
 
     // MARK: - Device Switching (Task 10.5)
 
-    /// Switch the system default output device via CoreAudio API.
-    /// Prefers the SoundBridge proxy device for the target physical device
-    /// so audio continues to flow through the DSP pipeline.
-    func switchDevice(to device: OutputDevice) {
-        // Try to find the corresponding SoundBridge proxy device first.
-        // Proxy UIDs follow the pattern: "<physicalUID>-soundbridge"
-        let targetDeviceID = findProxyDeviceID(forPhysicalUID: device.uid) ?? device.id
-
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var deviceID = targetDeviceID
-        let status = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &deviceID
-        )
-
-        if status != noErr {
-            logger.error("switchDevice failed: \(formatOSStatus(status))")
-        } else if targetDeviceID != device.id {
-            logger.info("Switched to proxy device (ID: \(targetDeviceID)) for \(device.name)")
-        }
+    /// Switch the system default output device. **Explicit user action only.**
+    ///
+    /// Prefers the SoundBridge proxy device for the target physical device so
+    /// audio continues to flow through the DSP pipeline. Returns the outcome so
+    /// the menu can tell the user when the write failed; it does not retry.
+    ///
+    /// Nothing in the app calls this on launch, on a device notification, on a
+    /// host state change or on quit — a default output that moves on its own is
+    /// exactly what P2 Batch 2 removed.
+    @discardableResult
+    func switchDevice(to device: OutputDevice) -> DefaultOutputSwitchResult {
+        let proxyID = findProxyDeviceID(forPhysicalUID: device.uid)
+        return defaultOutputSwitch.switchToDevice(device, proxyDeviceID: proxyID)
         // 切换默认输出设备会触发 kAudioHardwarePropertyDefaultOutputDevice 监听器，
         // 该监听器会自动调用 findAndBindProxyDevice() 更新 UI 状态。
     }
@@ -658,12 +652,16 @@ class VolumeController: ObservableObject {
 
     // MARK: - Device Bounce (Reconnect Audio)
 
-    /// Request the Host process to bounce the audio device via IPC.
+    /// Request the Host process to re-establish its audio path via IPC.
     /// This triggers a Darwin notification that the Host listens for.
-    func bounceDevice() {
-        // Use _notify_post to send bounce request to Host — Host is the single
-        // source of truth for CoreAudio device control.
+    func requestAudioReconnect() {
+        // Ask the Host to re-establish its own audio path (Host ↔ Driver ↔ Proxy).
+        // It used to be called a bounce: the Host briefly pointed the default
+        // output somewhere else and back, which re-bound apps but also moved a
+        // system-wide setting on a button press. P2 Batch 2 kept the request and
+        // the notification name (the App and Host ship together) and dropped the
+        // default-output part. Nothing here changes the default output.
         _ = _notify_post("com.soundbridge.bounce-request")
-        logger.info("Sent bounce request to Host")
+        logger.info("Sent audio reconnect request to Host")
     }
 }

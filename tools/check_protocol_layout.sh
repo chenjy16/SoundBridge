@@ -31,11 +31,11 @@ cat > "$TMP_DIR/layout_probe.c" <<'EOF'
 
 /* The protocol version is part of the contract, not an implementation detail:
  * a bump must be deliberate, so pin the literal here as well. */
-#if RF_AUDIO_PROTOCOL_VERSION != 0x00020100
+#if RF_AUDIO_PROTOCOL_VERSION != 0x00020200
 #error "RF_AUDIO_PROTOCOL_VERSION changed; bump the Host/driver together and update the release notes"
 #endif
 
-#if RF_SHARED_AUDIO_HEADER_SIZE != 256
+#if RF_SHARED_AUDIO_HEADER_SIZE != 320
 #error "RF_SHARED_AUDIO_HEADER_SIZE changed; every offset below must be re-derived"
 #endif
 
@@ -86,6 +86,13 @@ int main(void) {
         {"state_revision",      offsetof(RFSharedAudio, state_revision),      sizeof(uint64_t)},
         {"underrun_frames",     offsetof(RFSharedAudio, underrun_frames),     sizeof(uint32_t)},
         {"_reserved",           offsetof(RFSharedAudio, _reserved),           sizeof(((RFSharedAudio*)0)->_reserved)},
+        /* Batch 2 admission gateway */
+        {"admission_state",     offsetof(RFSharedAudio, admission_state),     sizeof(uint32_t)},
+        {"admission_pad0",      offsetof(RFSharedAudio, admission_pad0),      sizeof(uint32_t)},
+        {"admission_epoch",     offsetof(RFSharedAudio, admission_epoch),     sizeof(uint64_t)},
+        {"producer_owner_token",offsetof(RFSharedAudio, producer_owner_token),sizeof(uint64_t)},
+        {"admission_claim_seq", offsetof(RFSharedAudio, admission_claim_seq), sizeof(uint64_t)},
+        {"_reserved2",          offsetof(RFSharedAudio, _reserved2),          sizeof(((RFSharedAudio*)0)->_reserved2)},
     };
 
     printf("protocol version : 0x%08X\n", RF_AUDIO_PROTOCOL_VERSION);

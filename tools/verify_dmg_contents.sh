@@ -33,11 +33,21 @@
 # inspects.
 #
 # Usage
-#   tools/verify_dmg_contents.sh                              # dist/SoundBridge-<app version>.dmg
+#   tools/verify_dmg_contents.sh                              # dist/SoundBridge-<repository VERSION>.dmg
 #   tools/verify_dmg_contents.sh dist/SoundBridge-1.1.1.dmg
 #   tools/verify_dmg_contents.sh --expect-version 1.1.1 <dmg>
 #   tools/verify_dmg_contents.sh --app dist/Other.app <dmg>     # version from a different bundle
 #   tools/verify_dmg_contents.sh --driver-report out.tsv <dmg>  # record the copy inside the image
+#   tools/verify_dmg_contents.sh --print-target                 # say which image would be read, then stop
+#
+# Which image the default is
+# --------------------------
+# The repository's VERSION file names the release, so the default target is
+# dist/SoundBridge-$(cat VERSION).dmg. The bundle in dist/ does *not* choose the
+# file and does *not* set the expected version: a 1.1.1 bundle left behind used
+# to select dist/SoundBridge-1.1.1.dmg, and that old image passed every check
+# while the tree said 1.2.0. A named bundle (--app) still wins, because the
+# caller then said which bundle the image was built from.
 #
 # The driver inside the image
 # ---------------------------
@@ -92,11 +102,13 @@ EXPECT_VERSION=""
 APP_BUNDLE=""
 APP_BUNDLE_EXPLICIT=0
 DRIVER_REPORT_OUT=""
+PRINT_TARGET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --expect-version) EXPECT_VERSION="$2"; shift 2 ;;
         --app) APP_BUNDLE="$2"; APP_BUNDLE_EXPLICIT=1; shift 2 ;;
         --driver-report) DRIVER_REPORT_OUT="$2"; shift 2 ;;
+        --print-target) PRINT_TARGET=1; shift ;;
         -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
         --*) echo "error: unknown option '$1'" >&2; exit 2 ;;
         *) DMG="$1"; shift ;;
@@ -159,14 +171,49 @@ write_driver_report() {
         || echo "warning: could not write the driver report to $DRIVER_REPORT_OUT" >&2
 }
 
+# --- which release this run is about ----------------------------------------
+# Precedence, and why each step is there:
+#
+#   --expect-version   the caller named the release being checked
+#   --app <bundle>     the caller named the bundle the image was built from
+#   VERSION file       the repository names the release. The bundle in dist/ is
+#                      deliberately below this: it is the copy that goes stale,
+#                      and letting it choose the image is what made a 1.1.1 DMG
+#                      look verified next to a 1.2.0 tree
+#   dist/ bundle       last resort, when there is no VERSION file at all (an
+#                      unpacked payload); the header says which source was used
+resolve_release_version() {
+    if [[ -n "$EXPECT_VERSION" ]]; then
+        printf '%s\n%s\n' "$EXPECT_VERSION" "--expect-version"
+    elif [[ "$APP_BUNDLE_EXPLICIT" -eq 1 ]]; then
+        printf '%s\n%s\n' \
+            "$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString)" \
+            "app bundle (--app)"
+    elif [[ -f "$ROOT_DIR/VERSION" ]]; then
+        printf '%s\n%s\n' "$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")" "VERSION file"
+    else
+        printf '%s\n%s\n' \
+            "$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString)" \
+            "app bundle (no VERSION file)"
+    fi
+}
+VERSION_LINES="$(resolve_release_version)"
+RESOLVED_VERSION="${VERSION_LINES%%$'\n'*}"
+EXPECT_SOURCE="${VERSION_LINES#*$'\n'}"
+
 if [[ -z "$DMG" ]]; then
-    DEFAULT_APP_PLIST="$APP_BUNDLE/Contents/Info.plist"
-    VERSION_FROM_APP="$(plist_read "$DEFAULT_APP_PLIST" CFBundleShortVersionString)"
-    if [[ -n "$VERSION_FROM_APP" ]]; then
-        DMG="$ROOT_DIR/dist/SoundBridge-$VERSION_FROM_APP.dmg"
+    if [[ -n "$RESOLVED_VERSION" ]]; then
+        DMG="$ROOT_DIR/dist/SoundBridge-$RESOLVED_VERSION.dmg"
     else
         DMG="$ROOT_DIR/dist/SoundBridge.dmg"
     fi
+fi
+
+if [[ "$PRINT_TARGET" -eq 1 ]]; then
+    echo "VERSION=$RESOLVED_VERSION"
+    echo "VERSION_SOURCE=$EXPECT_SOURCE"
+    echo "DMG=$DMG"
+    exit 0
 fi
 
 DMG_BASENAME="$(basename "$DMG")"
@@ -199,14 +246,15 @@ if [[ ! -f "$DMG" ]]; then
 fi
 
 # --- expected version -------------------------------------------------------
-# From the bundle the image was built from (--app, or dist/ by default) or from
-# --expect-version, never from the file name: a rename would otherwise make the
-# image agree with itself.
+# Resolved once by resolve_release_version above: --expect-version, or the
+# bundle named with --app, or the repository's VERSION file, and only then the
+# bundle in dist/. It is never taken from the file name: a rename would
+# otherwise make the image agree with itself.
 #
 # Read through plist_read: PlistBuddy answers a missing file on stdout ("File
 # Doesn't Exist, Will Create: ..."), which is not a version but reads like one.
 if [[ -z "$EXPECT_VERSION" ]]; then
-    EXPECT_VERSION="$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString)"
+    EXPECT_VERSION="$RESOLVED_VERSION"
     # A bundle the caller named is the bundle the caller meant. Falling back to
     # dist/ here would compare the image against something nobody asked about.
     if [[ -z "$EXPECT_VERSION" && "$APP_BUNDLE_EXPLICIT" -eq 1 ]]; then
@@ -244,7 +292,7 @@ echo "Verifying disk image: $DMG"
 info "sha256: $(/usr/bin/shasum -a 256 "$DMG" | awk '{print $1}')"
 info "size:   $(/usr/bin/stat -f '%z' "$DMG") bytes"
 info "name declares version: ${FILENAME_VERSION:-<not a SoundBridge-<version>.dmg name>}"
-info "expected version:      ${EXPECT_VERSION:-<unknown>}"
+info "expected version:      ${EXPECT_VERSION:-<unknown>}${EXPECT_SOURCE:+ (from $EXPECT_SOURCE)}"
 echo ""
 
 # --- mount (read-only) ------------------------------------------------------
@@ -501,7 +549,7 @@ info "expected:         ${EXPECT_VERSION:-<unknown>}"
 echo ""
 
 if [[ -z "$EXPECT_VERSION" ]]; then
-    fail "no expected version: pass --expect-version or keep dist/SoundBridge.app in place"
+    fail "no expected version: pass --expect-version, or keep a VERSION file (or dist/SoundBridge.app) in place"
 else
     [[ "$APP_BUNDLE_VERSION" == "$EXPECT_VERSION" ]] \
         && pass "app version is $EXPECT_VERSION (the app's own Info.plist)" \

@@ -33,10 +33,22 @@ struct ShutdownSequence {
         case markStopping
         case stopConnectionMonitor
         case stopSleepWakeMonitor
+        /// Remove the HAL property listeners.
+        ///
+        /// Before anything that publishes state: a notification delivered after
+        /// this point could otherwise re-enter the device path and write into a
+        /// Host that is leaving. Removal must ignore
+        /// `kAudioHardwareBadObjectError` — after a rebuild the objects are
+        /// already gone.
+        case removePropertyListeners
         /// Before the shared memory is unmapped, so no heartbeat writes into a
         /// mapping that is being torn down.
         case stopHeartbeat
-        case restorePhysicalDevice
+        // P2 Batch 2 removed `restorePhysicalDevice` from this list. It put the
+        // physical device back as the system default output during a normal
+        // quit — a lifecycle event changing the user's default output, which the
+        // product forbids. A shutdown now releases resources and leaves the
+        // default output exactly where the user put it.
         case stopAudioEngine
         case removeControlFile
         /// The driver reads the control file and its mapping without a lock, so
@@ -44,6 +56,13 @@ struct ShutdownSequence {
         case waitForDriverDetach
         case unlinkSharedMemory
         case maybeRestartCoreAudio
+        /// Publish `.stopped` while the instance lock is still held.
+        ///
+        /// The App resolves "is a Host alive" from the lock and "what is it
+        /// doing" from this file, and the lock outranks the file. Writing the
+        /// final state after the release would mean it was never readable as
+        /// "stopped" — the lock would already say "gone".
+        case publishStopped
         /// Last: the instance lock covers every resource touched above.
         case releaseInstanceLock
     }

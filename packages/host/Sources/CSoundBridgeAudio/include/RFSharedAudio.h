@@ -36,12 +36,33 @@ extern "C" {
 //     it was 264 before because the base offset for the expression was wrong)
 //   - new state fields inserted into the reserved area (see below)
 //
+// Bumped to 0x00020200 for Phase 2.2 / Batch 2: the admission gateway adds a
+// 64-byte block at offset 256 and the fixed header grows 256 -> 320 bytes. The
+// layout change is the reason for the bump, not a side effect of it.
+//
 // The driver compares this value for EXACT equality (Plugin.cpp,
 // ValidateConnection). A version mismatch is a hard connection refusal,
 // never a best-effort attach: reading a layout you do not know is how you
 // get silent data corruption in an audio path.
 // ============================================================================
-#define RF_AUDIO_PROTOCOL_VERSION 0x00020100
+#define RF_AUDIO_PROTOCOL_VERSION 0x00020200
+
+// ============================================================================
+// Admission gateway states (Batch 2)
+//
+// CLOSED  -> no producer may write. The state a freshly initialized mapping
+//            is in, and the state a Host leaves behind after tearing it down.
+// OPEN    -> exactly one producer owner may write (the holder of
+//            producer_owner_token). Set by the Host, never by the driver.
+// CLOSING -> the Host has revoked admission; producers must stop writing but
+//            in-flight callbacks may still be running. This is NOT a drain
+//            proof and NOT permission to unmap or reuse the mapping.
+//
+// Any other value is invalid and every helper fails closed on it.
+// ============================================================================
+#define RF_ADMISSION_CLOSED 0u
+#define RF_ADMISSION_OPEN 1u
+#define RF_ADMISSION_CLOSING 2u
 
 // Audio format types
 typedef enum {
@@ -130,12 +151,46 @@ static const uint32_t RF_SUPPORTED_SAMPLE_RATES[] = {
 // while `eq_snapshot` actually starts at offset 156, which made the header 264
 // bytes instead of the 256 the comment promised. Phase 2.1 fixes the base and
 // pins every offset with static_assert so this cannot drift again.
+//
+// Batch 2 (Phase 2.2) appends a 64-byte admission block after the untouched
+// 28-byte `_reserved` area, so the fixed header is now 320 bytes. `_reserved`
+// (the Phase 6A marker + Host session UUID) did NOT move: every pre-Batch-2
+// field keeps its offset.
 // ============================================================================
-#define RF_SHARED_AUDIO_HEADER_SIZE 256u
+#define RF_SHARED_AUDIO_HEADER_SIZE 320u
 
 // Calculate frames for given sample rate and duration
 static inline uint32_t rf_frames_for_duration(uint32_t sample_rate, uint32_t duration_ms) {
     return (sample_rate * duration_ms) / 1000;
+}
+
+/**
+ * Next power of two of a 32-bit value.
+ *
+ * Returns 0 when the next power of two would not fit in uint32_t; callers
+ * must treat 0 as "capacity cannot be represented" and fail closed.
+ */
+static inline uint32_t rf_next_power_of_two_u32(uint32_t n) {
+    if (n == 0) return 0;
+    if (n > (1u << 31)) return 0;
+    uint32_t p = 1u;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+/**
+ * Ring capacity for a requested duration, rounded UP to a power of two.
+ *
+ * Batch 0 contract: ring_capacity_frames must be > 0 and a power of two so
+ * the slot mask (capacity - 1) is exact and every capacity-dependent check
+ * (validate, size, prefill) sees the SAME single source of truth. The
+ * requested duration stays in ring_duration_ms; the actual capacity may
+ * exceed the requested frame count (e.g. 48 kHz / 100 ms requests 4800
+ * frames, the ring holds 8192). Returns 0 if the rounded capacity cannot be
+ * represented, which every caller must treat as init failure.
+ */
+static inline uint32_t rf_ring_capacity_frames_for(uint32_t sample_rate, uint32_t duration_ms) {
+    return rf_next_power_of_two_u32(rf_frames_for_duration(sample_rate, duration_ms));
 }
 
 /**
@@ -251,7 +306,30 @@ typedef struct {
     _Atomic uint32_t underrun_frames;    // cumulative frames of silence inserted on underrun
 
     // Reserved bytes for forward-compatible header growth.
-    uint8_t _reserved[RF_SHARED_AUDIO_HEADER_SIZE - 228];
+    // Phase 6A 使用前 20 字节保存标识和 Host UUID；旧读写者忽略这些字节。
+    //
+    // Batch 2 froze the size at 28 (offset 228, ending exactly where the
+    // admission block starts at 256) instead of deriving it from
+    // RF_SHARED_AUDIO_HEADER_SIZE — otherwise growing the header would have
+    // swallowed the admission fields below.
+    uint8_t _reserved[28];
+
+    // ===== ADMISSION GATEWAY (Batch 2) =====
+    //
+    // One mapping incarnation has at most ONE valid producer owner. The Host
+    // creates the mapping, initializes it CLOSED and publishes it OPEN; the
+    // driver claims the single owner slot with a token that encodes its uid.
+    // Producer writes are refused unless admission is OPEN and the caller
+    // holds that exact token (see rf_ring_write).
+    //
+    // See Batch-2-Admission-Protocol.md for the state machine, the claim /
+    // release rules and why CLOSED is not a drain proof.
+    _Atomic uint32_t admission_state;       // RF_ADMISSION_CLOSED / _OPEN / _CLOSING
+    uint32_t admission_pad0;                // explicit padding: keeps the block 8-byte aligned
+    _Atomic uint64_t admission_epoch;       // mapping incarnation token; written by the Host before OPEN
+    _Atomic uint64_t producer_owner_token;  // 0 = no producer owner; else the claiming token
+    _Atomic uint64_t admission_claim_seq;   // successful claim transitions (diagnostics only)
+    uint8_t _reserved2[32];                 // future drain ACK / quarantine (Batch 3+), zero for now
 
     // ===== RING BUFFER DATA =====
     // Interleaved audio data in the negotiated format
@@ -286,12 +364,23 @@ typedef struct {
     static_assert(offsetof(RFSharedAudio, state_revision) == 216,   "state_revision moved");
     static_assert(offsetof(RFSharedAudio, underrun_frames) == 224,  "underrun_frames moved");
     static_assert(offsetof(RFSharedAudio, _reserved) == 228,        "_reserved moved");
+    static_assert(offsetof(RFSharedAudio, admission_state) == 256,  "admission_state moved");
+    static_assert(offsetof(RFSharedAudio, admission_epoch) == 264,  "admission_epoch moved");
+    static_assert(offsetof(RFSharedAudio, producer_owner_token) == 272, "producer_owner_token moved");
+    static_assert(offsetof(RFSharedAudio, admission_claim_seq) == 280,  "admission_claim_seq moved");
+    static_assert(offsetof(RFSharedAudio, _reserved2) == 288,       "_reserved2 moved");
     static_assert(offsetof(RFSharedAudio, audio_data) == RF_SHARED_AUDIO_HEADER_SIZE,
         "fixed header size does not match RF_SHARED_AUDIO_HEADER_SIZE");
     static_assert(sizeof(RFSharedAudio) == RF_SHARED_AUDIO_HEADER_SIZE,
         "sizeof(RFSharedAudio) must equal the fixed header size");
     static_assert(sizeof(RFEQSnapshot) == 48, "RFEQSnapshot must stay 48 bytes");
     static_assert(sizeof(RFVolumeStateSnapshot) == 24, "RFVolumeStateSnapshot layout changed");
+    // RT contract: the admission fields are read inside the audio callback. If
+    // any of them were not lock-free, the atomic would become a libatomic call
+    // (a lock) in the render path — exactly the priority inversion the gateway
+    // exists to prevent. These asserts are compile-time on every target.
+    static_assert(ATOMIC_INT_LOCK_FREE == 2, "admission_state must be lock-free on every target");
+    static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "admission epoch / owner token must be lock-free");
 #else
     _Static_assert(offsetof(RFSharedAudio, protocol_version) == 0,   "protocol_version moved");
     _Static_assert(offsetof(RFSharedAudio, header_size) == 4,        "header_size moved");
@@ -309,13 +398,36 @@ typedef struct {
     _Static_assert(offsetof(RFSharedAudio, state_revision) == 216,   "state_revision moved");
     _Static_assert(offsetof(RFSharedAudio, underrun_frames) == 224,  "underrun_frames moved");
     _Static_assert(offsetof(RFSharedAudio, _reserved) == 228,        "_reserved moved");
+    _Static_assert(offsetof(RFSharedAudio, admission_state) == 256,  "admission_state moved");
+    _Static_assert(offsetof(RFSharedAudio, admission_epoch) == 264,  "admission_epoch moved");
+    _Static_assert(offsetof(RFSharedAudio, producer_owner_token) == 272, "producer_owner_token moved");
+    _Static_assert(offsetof(RFSharedAudio, admission_claim_seq) == 280,  "admission_claim_seq moved");
+    _Static_assert(offsetof(RFSharedAudio, _reserved2) == 288,       "_reserved2 moved");
     _Static_assert(offsetof(RFSharedAudio, audio_data) == RF_SHARED_AUDIO_HEADER_SIZE,
         "fixed header size does not match RF_SHARED_AUDIO_HEADER_SIZE");
     _Static_assert(sizeof(RFSharedAudio) == RF_SHARED_AUDIO_HEADER_SIZE,
         "sizeof(RFSharedAudio) must equal the fixed header size");
     _Static_assert(sizeof(RFEQSnapshot) == 48, "RFEQSnapshot must stay 48 bytes");
     _Static_assert(sizeof(RFVolumeStateSnapshot) == 24, "RFVolumeStateSnapshot layout changed");
+    _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "admission_state must be lock-free on every target");
+    _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "admission epoch / owner token must be lock-free");
 #endif
+
+// Session 扩展只在新建且尚未发布的映射上写入一次；发布后不可修改。
+// UUID 使用 RFC 4122 的 16 字节顺序，与控制文件中的 UUID 对应。
+#define RF_HOST_SESSION_SIZE 16u
+static inline void rf_set_host_session(RFSharedAudio* mem, const uint8_t* uuid) {
+    static const uint8_t marker[4] = {'S', 'B', '6', 'A'};
+    memcpy(mem->_reserved, marker, sizeof(marker));
+    memcpy(mem->_reserved + sizeof(marker), uuid, RF_HOST_SESSION_SIZE);
+}
+
+static inline bool rf_host_session_matches(const RFSharedAudio* mem, const uint8_t* uuid) {
+    static const uint8_t marker[4] = {'S', 'B', '6', 'A'};
+    return mem != NULL && uuid != NULL &&
+        memcmp(mem->_reserved, marker, sizeof(marker)) == 0 &&
+        memcmp(mem->_reserved + sizeof(marker), uuid, RF_HOST_SESSION_SIZE) == 0;
+}
 
 // Capability flags
 #define RF_CAP_MULTI_SAMPLE_RATE    (1 << 0)  // Supports multiple sample rates
@@ -372,8 +484,10 @@ static inline void rf_shared_audio_init(
 
     mem->bytes_per_frame = mem->bytes_per_sample * channels;
 
-    // Ring buffer sizing
-    mem->ring_capacity_frames = rf_frames_for_duration(sample_rate, duration_ms);
+    // Ring buffer sizing (power of two, single source of truth — see
+    // rf_ring_capacity_frames_for). A 0 result means the capacity cannot be
+    // represented; callers check ring_capacity_frames before publishing.
+    mem->ring_capacity_frames = rf_ring_capacity_frames_for(sample_rate, duration_ms);
     mem->ring_duration_ms = duration_ms;
 
     // Capabilities - driver advertises what it supports
@@ -414,6 +528,18 @@ static inline void rf_shared_audio_init(
     mem->state_pad0 = 0;
     atomic_init(&mem->state_revision, 0);
     atomic_init(&mem->underrun_frames, 0);
+
+    // Admission gateway (Batch 2): a new mapping starts CLOSED with no epoch
+    // and no producer owner. The Host must call rf_admission_open() after the
+    // mapping is fully initialized (and, in practice, after the pre-publish
+    // prefill) but before it is published. memset above already zeroed these;
+    // the explicit atomic_init documents the initial state as a contract, not
+    // an accident of zero-fill (RF_ADMISSION_CLOSED is 0 by design).
+    atomic_init(&mem->admission_state, RF_ADMISSION_CLOSED);
+    mem->admission_pad0 = 0;
+    atomic_init(&mem->admission_epoch, 0);
+    atomic_init(&mem->producer_owner_token, 0);
+    atomic_init(&mem->admission_claim_seq, 0);
 }
 
 /**
@@ -437,7 +563,9 @@ typedef enum {
     RF_VALIDATE_PROTOCOL_VERSION = 2,
     RF_VALIDATE_HEADER_SIZE = 3,
     RF_VALIDATE_SAMPLE_RATE = 4,
-    RF_VALIDATE_CHANNELS = 5
+    RF_VALIDATE_CHANNELS = 5,
+    RF_VALIDATE_CAPACITY = 6,
+    RF_VALIDATE_ADMISSION = 7
 } RFValidateResult;
 
 /**
@@ -469,6 +597,24 @@ static inline RFValidateResult rf_validate_header(const RFSharedAudio* mem) {
     if (mem->channels == 0 || mem->channels > RF_MAX_CHANNELS) {
         return RF_VALIDATE_CHANNELS;
     }
+    // Ring capacity must be a usable power of two: the slot addressing uses
+    // (capacity - 1) as a mask, and a zero or non-power-of-two capacity would
+    // make every ring helper undefined (previously a `% 0` UB on a corrupt
+    // header). Fail closed instead of guessing.
+    if (mem->ring_capacity_frames == 0 ||
+        (mem->ring_capacity_frames & (mem->ring_capacity_frames - 1u)) != 0u) {
+        return RF_VALIDATE_CAPACITY;
+    }
+    // Admission must hold one of the three defined values. CLOSED is valid
+    // (a mapping is published CLOSED only if the Host failed before opening
+    // it, and the driver answers that by refusing every write), but a value
+    // nobody defines means we cannot reason about the gateway at all — fail
+    // closed rather than let an unknown state be treated as "not OPEN".
+    const uint32_t admission = atomic_load_explicit(&mem->admission_state, memory_order_acquire);
+    if (admission != RF_ADMISSION_CLOSED && admission != RF_ADMISSION_OPEN &&
+        admission != RF_ADMISSION_CLOSING) {
+        return RF_VALIDATE_ADMISSION;
+    }
     return RF_VALIDATE_OK;
 }
 
@@ -483,8 +629,234 @@ static inline const char* rf_validate_result_string(RFValidateResult result) {
         case RF_VALIDATE_HEADER_SIZE:      return "header size mismatch";
         case RF_VALIDATE_SAMPLE_RATE:      return "unsupported sample rate";
         case RF_VALIDATE_CHANNELS:         return "invalid channel count";
+        case RF_VALIDATE_CAPACITY:         return "invalid ring capacity";
+        case RF_VALIDATE_ADMISSION:        return "invalid admission state";
         default:                           return "unknown validation result";
     }
+}
+
+// ============================================================================
+// ADMISSION GATEWAY (Batch 2)
+//
+// Control split — one writer per field, no shared ownership:
+//   Host   : admission_state transitions (CLOSED -> OPEN -> CLOSING -> CLOSED)
+//            and admission_epoch. It is the only writer of both.
+//   Driver : producer_owner_token only, through rf_producer_claim() /
+//            rf_producer_release(). It can never open admission itself.
+//
+// Memory ordering:
+//   The Host stores the epoch, then publishes OPEN with a release CAS, so a
+//   driver that acquire-loads OPEN also sees a fully initialized header. The
+//   claim CAS is acq_rel: everything the owner writes afterwards is ordered
+//   after the claim, and the next release is ordered after its last write.
+//
+// What this does NOT prove: CLOSING is not a drain. Closing refuses new
+// writes; it says nothing about a callback already past the check. Drain ACK
+// and mapping retirement belong to the next batch.
+// ============================================================================
+
+/**
+ * Result of an admission transition or a producer claim.
+ */
+typedef enum {
+    RF_ADMISSION_OK = 0,
+    RF_ADMISSION_ERR_NULL = 1,   // NULL header / NULL token
+    RF_ADMISSION_ERR_STATE = 2,  // illegal current state or illegal transition
+    RF_ADMISSION_ERR_EPOCH = 3,  // epoch is zero (no incarnation identity)
+    RF_ADMISSION_ERR_OWNED = 4   // the owner slot belongs to someone else
+} RFAdmissionResult;
+
+static inline const char* rf_admission_result_string(RFAdmissionResult result) {
+    switch (result) {
+        case RF_ADMISSION_OK:          return "ok";
+        case RF_ADMISSION_ERR_NULL:    return "null argument";
+        case RF_ADMISSION_ERR_STATE:   return "illegal admission state transition";
+        case RF_ADMISSION_ERR_EPOCH:   return "zero admission epoch";
+        case RF_ADMISSION_ERR_OWNED:   return "mapping already owned by another producer";
+        default:                       return "unknown admission result";
+    }
+}
+
+/** Current admission state; any undefined value is returned as-is so callers can fail closed. */
+static inline uint32_t rf_admission_state(const RFSharedAudio* mem) {
+    if (mem == NULL) { return RF_ADMISSION_CLOSED; }
+    return atomic_load_explicit(&mem->admission_state, memory_order_acquire);
+}
+
+/** Mapping incarnation token published by the Host. 0 means "never opened". */
+static inline uint64_t rf_admission_epoch(const RFSharedAudio* mem) {
+    if (mem == NULL) { return 0; }
+    return atomic_load_explicit(&mem->admission_epoch, memory_order_acquire);
+}
+
+/** The producer owner token, or 0 when no producer has claimed this mapping. */
+static inline uint64_t rf_producer_owner_token(const RFSharedAudio* mem) {
+    if (mem == NULL) { return 0; }
+    return atomic_load_explicit(&mem->producer_owner_token, memory_order_acquire);
+}
+
+/** Number of successful claim transitions (diagnostics; never used for admission). */
+static inline uint64_t rf_admission_claim_seq(const RFSharedAudio* mem) {
+    if (mem == NULL) { return 0; }
+    return atomic_load_explicit(&mem->admission_claim_seq, memory_order_acquire);
+}
+
+/**
+ * Monotonic producer cursor in frames. Read-only: the only writer is
+ * rf_ring_write_unchecked, and exposing a setter would break the single-writer
+ * contract the whole ring depends on.
+ */
+static inline uint64_t rf_ring_write_index(const RFSharedAudio* mem) {
+    if (mem == NULL) { return 0; }
+    return atomic_load_explicit(&mem->write_index, memory_order_acquire);
+}
+
+/** Monotonic consumer cursor in frames. Read-only, same reasoning. */
+static inline uint64_t rf_ring_read_index(const RFSharedAudio* mem) {
+    if (mem == NULL) { return 0; }
+    return atomic_load_explicit(&mem->read_index, memory_order_acquire);
+}
+
+/**
+ * Host only: publish the mapping incarnation and move CLOSED -> OPEN.
+ *
+ * The epoch is written first, while the mapping is still CLOSED, so no
+ * producer can be running against a half-updated incarnation. Re-opening an
+ * already OPEN mapping is refused: an epoch must never change under a live
+ * owner.
+ *
+ * The state is therefore checked BEFORE the epoch is stored. Storing first
+ * would let a second opener clobber the incarnation identity of a mapping a
+ * producer has already claimed under — the open would still be refused, but
+ * the damage (a permanently unbindable owner token) would already be done.
+ */
+static inline RFAdmissionResult rf_admission_open(RFSharedAudio* mem, uint64_t epoch) {
+    if (mem == NULL) { return RF_ADMISSION_ERR_NULL; }
+    if (epoch == 0) { return RF_ADMISSION_ERR_EPOCH; }
+    if (atomic_load_explicit(&mem->admission_state, memory_order_acquire) != RF_ADMISSION_CLOSED) {
+        return RF_ADMISSION_ERR_STATE;
+    }
+    atomic_store_explicit(&mem->admission_epoch, epoch, memory_order_release);
+    uint32_t expected = RF_ADMISSION_CLOSED;
+    if (!atomic_compare_exchange_strong_explicit(
+            &mem->admission_state, &expected, RF_ADMISSION_OPEN,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return RF_ADMISSION_ERR_STATE;
+    }
+    return RF_ADMISSION_OK;
+}
+
+/**
+ * Host only: revoke admission (OPEN -> CLOSING). Idempotent for CLOSING and
+ * already-CLOSED mappings. Does NOT stop a callback that is already running.
+ */
+static inline RFAdmissionResult rf_admission_begin_close(RFSharedAudio* mem) {
+    if (mem == NULL) { return RF_ADMISSION_ERR_NULL; }
+    uint32_t expected = RF_ADMISSION_OPEN;
+    if (atomic_compare_exchange_strong_explicit(
+            &mem->admission_state, &expected, RF_ADMISSION_CLOSING,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return RF_ADMISSION_OK;
+    }
+    if (expected == RF_ADMISSION_CLOSING || expected == RF_ADMISSION_CLOSED) {
+        return RF_ADMISSION_OK;
+    }
+    return RF_ADMISSION_ERR_STATE;
+}
+
+/**
+ * Host only: finish the close (CLOSING -> CLOSED). Refuses to skip CLOSING so
+ * every teardown passes through the state the next batch will attach a drain
+ * proof to. CLOSED is idempotent for the same reason.
+ */
+static inline RFAdmissionResult rf_admission_finalize_close(RFSharedAudio* mem) {
+    if (mem == NULL) { return RF_ADMISSION_ERR_NULL; }
+    uint32_t expected = RF_ADMISSION_CLOSING;
+    if (atomic_compare_exchange_strong_explicit(
+            &mem->admission_state, &expected, RF_ADMISSION_CLOSED,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return RF_ADMISSION_OK;
+    }
+    if (expected == RF_ADMISSION_CLOSED) {
+        return RF_ADMISSION_OK;
+    }
+    return RF_ADMISSION_ERR_STATE;
+}
+
+/**
+ * Driver only, non-realtime (OnStartIO): claim the single producer slot.
+ *
+ * Succeeds only when admission is OPEN and the owner slot is either empty
+ * (first claim) or already holds this exact token (the same handler restarting
+ * IO — idempotent, never a second producer). A different token is refused:
+ * another handler, another device instance or another process must not write
+ * into this mapping.
+ *
+ * The post-CAS re-read covers the race where the Host closes admission while
+ * the claim is in flight; the claim is rolled back rather than leaving an
+ * owner on a closed mapping.
+ */
+static inline bool rf_producer_claim(RFSharedAudio* mem, uint64_t token) {
+    if (mem == NULL || token == 0) { return false; }
+    if (atomic_load_explicit(&mem->admission_state, memory_order_acquire) != RF_ADMISSION_OPEN) {
+        return false;
+    }
+    uint64_t expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &mem->producer_owner_token, &expected, token,
+            memory_order_acq_rel, memory_order_acquire)) {
+        if (atomic_load_explicit(&mem->admission_state, memory_order_acquire) != RF_ADMISSION_OPEN) {
+            uint64_t owned = token;
+            atomic_compare_exchange_strong_explicit(
+                &mem->producer_owner_token, &owned, (uint64_t)0,
+                memory_order_acq_rel, memory_order_acquire);
+            return false;
+        }
+        atomic_fetch_add_explicit(&mem->admission_claim_seq, 1, memory_order_release);
+        return true;
+    }
+    // expected now holds the current owner. Same token = this producer already
+    // owns the slot (Stop -> Start on the same handler): idempotent success.
+    return expected == token;
+}
+
+/**
+ * Driver only, non-realtime: give the owner slot back after the handler can
+ * prove it will not write again (see Plugin.cpp OnStopIO). Only the current
+ * owner may release; releasing a token you do not hold is a no-op.
+ */
+static inline bool rf_producer_release(RFSharedAudio* mem, uint64_t token) {
+    if (mem == NULL || token == 0) { return false; }
+    uint64_t expected = token;
+    return atomic_compare_exchange_strong_explicit(
+        &mem->producer_owner_token, &expected, (uint64_t)0,
+        memory_order_acq_rel, memory_order_acquire);
+}
+
+/**
+ * Realtime-safe admission check (three acquire loads, no CAS, no allocation).
+ *
+ * This is what rf_ring_write consults on every callback. It answers a single
+ * question: may THIS token write into THIS incarnation right now? It is
+ * deliberately read-only so a producer cannot mutate the gateway from the
+ * render thread.
+ *
+ * The epoch comparison is what binds the owner identity to the mapping
+ * incarnation: the token alone is stable across mappings for one handler, so
+ * without it a token would remain "valid" on a mapping it was never claimed
+ * for. The producer records the epoch it claimed under and passes it here.
+ */
+static inline bool rf_producer_may_write(
+    const RFSharedAudio* mem, uint64_t token, uint64_t epoch)
+{
+    if (mem == NULL || token == 0 || epoch == 0) { return false; }
+    if (atomic_load_explicit(&mem->admission_state, memory_order_acquire) != RF_ADMISSION_OPEN) {
+        return false;
+    }
+    if (atomic_load_explicit(&mem->admission_epoch, memory_order_acquire) != epoch) {
+        return false;
+    }
+    return atomic_load_explicit(&mem->producer_owner_token, memory_order_acquire) == token;
 }
 
 /**
@@ -521,30 +893,75 @@ static inline bool rf_is_connection_healthy(const RFSharedAudio* mem) {
 }
 
 /**
- * Write frames to ring buffer with automatic format conversion
+ * Ring write implementation WITHOUT the admission gate.
  *
- * This version accepts float32 input and converts to the ring buffer's format
+ * Only two callers may use it, both of which own the mapping exclusively:
+ *   - rf_ring_write()          after it verified OPEN + owner token (the
+ *                              driver's only producer path);
+ *   - rf_ring_prefill_before_publish() during host-side initialization.
+ *
+ * Do not call it from new code: the gate is what enforces the single
+ * producer invariant, and this function cannot.
+ *
+ * Single-writer contract (Batch 1): this function is the ONLY place
+ * write_index advances, and it NEVER touches read_index — the old Drop-Old
+ * path that advanced the consumer's index from the producer side is gone.
+ *
+ * Overflow: frames that do not fit are DROPPED (the new ones), already
+ * buffered data is never overwritten, the consumer is never blocked.
+ *
+ * SPSC ordering:
+ *   load read_index (acquire)        -> reuse only space the consumer freed
+ *   write payload (plain stores)     -> happens-before the W publish below
+ *   store write_index (release)      -> publishes the new payload
+ *
+ * Returns the number of frames actually written. *out_dropped (may be NULL)
+ * receives the number of dropped input frames. A return of 0 with dropped == 0
+ * means the call was rejected (NULL args, num_frames == 0, invalid capacity):
+ * fail-closed, nothing was accepted. Frames are written whole: both channels
+ * of a frame land together or neither does.
  */
-static inline uint32_t rf_ring_write(
+static inline uint32_t rf_ring_write_unchecked(
     RFSharedAudio* mem,
     const float* input_frames,  // Always float32 input
-    uint32_t num_frames)
+    uint32_t num_frames,
+    uint32_t* out_dropped)
 {
-    uint64_t write_idx = atomic_load(&mem->write_index);
-    uint64_t read_idx = atomic_load(&mem->read_index);
-    uint32_t capacity = mem->ring_capacity_frames;
-
-    // Check for overflow - advance read_index to keep producer timeline intact
-    uint64_t used = write_idx - read_idx;
-    if (used + num_frames > capacity) {
-        uint32_t frames_to_drop = (uint32_t)((used + num_frames) - capacity);
-        atomic_store(&mem->read_index, read_idx + frames_to_drop);
-        atomic_fetch_add(&mem->overrun_count, 1);
+    if (mem == NULL || input_frames == NULL || num_frames == 0) {
+        if (out_dropped) *out_dropped = 0;
+        return 0;
     }
 
-    // Write with format conversion
-    for (uint32_t frame = 0; frame < num_frames; frame++) {
-        uint32_t ring_pos = (uint32_t)((write_idx + frame) % capacity);
+    // Defensive capacity check: rf_validate_header enforces this too, but the
+    // ring helpers must never rely on the caller having validated (the mask
+    // below turns a non-power-of-two capacity into out-of-bounds slots).
+    const uint32_t capacity = mem->ring_capacity_frames;
+    if (capacity == 0 || (capacity & (capacity - 1u)) != 0u) {
+        if (out_dropped) *out_dropped = 0;
+        return 0;
+    }
+    const uint32_t slot_mask = capacity - 1u;
+
+    const uint64_t write_idx = atomic_load_explicit(&mem->write_index, memory_order_relaxed);
+    const uint64_t read_idx = atomic_load_explicit(&mem->read_index, memory_order_acquire);
+    const uint64_t used = write_idx - read_idx;
+
+    // Corrupted state (indices inconsistent beyond wraparound arithmetic):
+    // treat as no room instead of deriving a bogus payload offset.
+    if (used > capacity) {
+        if (out_dropped) *out_dropped = num_frames;
+        atomic_fetch_add(&mem->overrun_count, 1);
+        return 0;
+    }
+
+    const uint64_t free_frames = capacity - used;
+    const uint32_t writable = (num_frames <= free_frames) ? num_frames : (uint32_t)free_frames;
+    const uint32_t dropped = num_frames - writable;
+
+    // Write payload with format conversion (plain stores; published by the
+    // release store to write_index below)
+    for (uint32_t frame = 0; frame < writable; frame++) {
+        uint32_t ring_pos = (uint32_t)((write_idx + frame) & slot_mask);
         uint8_t* dest = &mem->audio_data[ring_pos * mem->bytes_per_frame];
 
         for (uint32_t ch = 0; ch < mem->channels; ch++) {
@@ -591,32 +1008,143 @@ static inline uint32_t rf_ring_write(
         }
     }
 
-    atomic_store(&mem->write_index, write_idx + num_frames);
-    atomic_fetch_add(&mem->total_frames_written, num_frames);
+    // Publish W only after the payload above has been written (release).
+    atomic_store_explicit(&mem->write_index, write_idx + writable, memory_order_release);
+    atomic_fetch_add(&mem->total_frames_written, writable);
+    if (dropped > 0) {
+        atomic_fetch_add(&mem->overrun_count, 1);
+    }
+    if (out_dropped) *out_dropped = dropped;
 
-    return num_frames;
+    return writable;
 }
 
 /**
- * Read frames from ring buffer with automatic format conversion
+ * Host-side pre-publish prefill (initialization only, never a producer path).
  *
- * This version outputs float32 regardless of ring buffer format
+ * Refuses to run unless the mapping is still CLOSED with no owner: that is the
+ * window between rf_shared_audio_init() and rf_admission_open(), while the
+ * staging inode is private and no reader or writer can observe it. Once the
+ * mapping is published OPEN this returns 0 and writes nothing, which is what
+ * makes "Stop -> Start never re-fills" true by construction rather than by
+ * convention.
+ */
+static inline uint32_t rf_ring_prefill_before_publish(
+    RFSharedAudio* mem,
+    const float* input_frames,
+    uint32_t num_frames,
+    uint32_t* out_dropped)
+{
+    if (mem == NULL || input_frames == NULL || num_frames == 0) {
+        if (out_dropped) *out_dropped = 0;
+        return 0;
+    }
+    if (atomic_load_explicit(&mem->admission_state, memory_order_acquire) != RF_ADMISSION_CLOSED ||
+        atomic_load_explicit(&mem->producer_owner_token, memory_order_acquire) != 0) {
+        if (out_dropped) *out_dropped = 0;
+        return 0;
+    }
+    return rf_ring_write_unchecked(mem, input_frames, num_frames, out_dropped);
+}
+
+/**
+ * Write frames to ring buffer (Producer side) — THE producer entry point.
+ *
+ * Admission gate (Batch 2): the call is refused unless
+ *   - admission_state == OPEN,
+ *   - admission_epoch == epoch (this is the incarnation the caller claimed),
+ *     and
+ *   - producer_owner_token == owner_token (this caller is the one owner).
+ * That check is three acquire loads (lock-free, no CAS, allocation-free), so
+ * it is safe inside the audio callback. A refused call writes NOTHING: W, R,
+ * payload and statistics are untouched, and *out_dropped reports num_frames so
+ * the caller can tell "admission refused" from "invalid argument" (0/0).
+ *
+ * Overflow policy, SPSC ordering and the return value are documented on
+ * rf_ring_write_unchecked(), which this function gates and delegates to.
+ */
+static inline uint32_t rf_ring_write(
+    RFSharedAudio* mem,
+    const float* input_frames,
+    uint32_t num_frames,
+    uint64_t owner_token,
+    uint64_t epoch,
+    uint32_t* out_dropped)
+{
+    if (mem == NULL || input_frames == NULL || num_frames == 0) {
+        if (out_dropped) *out_dropped = 0;
+        return 0;
+    }
+    if (!rf_producer_may_write(mem, owner_token, epoch)) {
+        if (out_dropped) *out_dropped = num_frames;
+        return 0;
+    }
+    return rf_ring_write_unchecked(mem, input_frames, num_frames, out_dropped);
+}
+
+/**
+ * Read frames from ring buffer (Consumer side).
+ *
+ * Single-reader contract (Batch 1): this function is the ONLY place
+ * read_index advances, and it never touches write_index.
+ *
+ * SPSC ordering:
+ *   load write_index (acquire) -> the payload below W becomes visible
+ *   read payload (plain loads)
+ *   store read_index (release) -> frees those slots to the producer
+ *
+ * Underrun: the tail of the legal output area [consumed, num_frames) is
+ * zero-filled; zero-filled frames are NOT counted as consumed. Returns the
+ * number of frames actually consumed; *out_zero_filled (may be NULL) receives
+ * the zero-filled frame count. Returns 0 for NULL args / num_frames == 0
+ * without touching the ring; an invalid capacity also fails closed (all
+ * silence, nothing consumed).
  */
 static inline uint32_t rf_ring_read(
     RFSharedAudio* mem,
     float* output_frames,  // Always float32 output
-    uint32_t num_frames)
+    uint32_t num_frames,
+    uint32_t* out_zero_filled)
 {
-    uint64_t write_idx = atomic_load(&mem->write_index);
-    uint64_t read_idx = atomic_load(&mem->read_index);
-    uint32_t capacity = mem->ring_capacity_frames;
-    uint32_t available = (uint32_t)(write_idx - read_idx);
+    if (mem == NULL || output_frames == NULL || num_frames == 0) {
+        if (out_zero_filled) *out_zero_filled = 0;
+        return 0;
+    }
 
-    uint32_t frames_to_read = (available < num_frames) ? available : num_frames;
+    // Defensive capacity check, same rationale as rf_ring_write.
+    const uint32_t capacity = mem->ring_capacity_frames;
+    if (capacity == 0 || (capacity & (capacity - 1u)) != 0u) {
+        for (uint32_t i = 0; i < num_frames * mem->channels; i++) {
+            output_frames[i] = 0.0f;
+        }
+        if (out_zero_filled) *out_zero_filled = num_frames;
+        return 0;
+    }
+    const uint32_t slot_mask = capacity - 1u;
 
-    // Read with format conversion
+    const uint64_t write_idx = atomic_load_explicit(&mem->write_index, memory_order_acquire);
+    const uint64_t read_idx = atomic_load_explicit(&mem->read_index, memory_order_relaxed);
+    const uint64_t available = write_idx - read_idx;
+
+    // Corrupted state: never read garbage slots; emit the legal silence and
+    // account it as underrun without advancing R into unmapped territory.
+    if (available > capacity) {
+        for (uint32_t i = 0; i < num_frames * mem->channels; i++) {
+            output_frames[i] = 0.0f;
+        }
+        atomic_fetch_add(&mem->underrun_count, 1);
+        atomic_fetch_add(&mem->underrun_frames, num_frames);
+        if (out_zero_filled) *out_zero_filled = num_frames;
+        return 0;
+    }
+
+    const uint32_t frames_to_read =
+        (available >= (uint64_t)num_frames) ? num_frames : (uint32_t)available;
+
+    // Read payload with format conversion (plain loads; made visible by the
+    // producer's release store to write_index, acquired above)
     for (uint32_t frame = 0; frame < frames_to_read; frame++) {
-        uint32_t ring_pos = (uint32_t)((read_idx + frame) % capacity);
+        uint32_t ring_pos = (uint32_t)((read_idx + frame) & slot_mask);
         const uint8_t* src = &mem->audio_data[ring_pos * mem->bytes_per_frame];
 
         for (uint32_t ch = 0; ch < mem->channels; ch++) {
@@ -659,11 +1187,12 @@ static inline uint32_t rf_ring_read(
         }
     }
 
-    // Fill remaining with silence if underrun
-    if (frames_to_read < num_frames) {
-        const uint32_t missing_frames = num_frames - frames_to_read;
+    // Zero-fill the remaining legal output area; these frames are NOT
+    // consumed and do not advance R.
+    const uint32_t zero_filled = num_frames - frames_to_read;
+    if (zero_filled > 0) {
         atomic_fetch_add(&mem->underrun_count, 1);
-        atomic_fetch_add(&mem->underrun_frames, missing_frames);
+        atomic_fetch_add(&mem->underrun_frames, zero_filled);
         for (uint32_t frame = frames_to_read; frame < num_frames; frame++) {
             for (uint32_t ch = 0; ch < mem->channels; ch++) {
                 output_frames[frame * mem->channels + ch] = 0.0f;
@@ -671,10 +1200,12 @@ static inline uint32_t rf_ring_read(
         }
     }
 
-    atomic_store(&mem->read_index, read_idx + frames_to_read);
+    // Publish R only after the payload above has been read (release).
+    atomic_store_explicit(&mem->read_index, read_idx + frames_to_read, memory_order_release);
     atomic_fetch_add(&mem->total_frames_read, frames_to_read);
 
-    return num_frames;
+    if (out_zero_filled) *out_zero_filled = zero_filled;
+    return frames_to_read;
 }
 
 /**

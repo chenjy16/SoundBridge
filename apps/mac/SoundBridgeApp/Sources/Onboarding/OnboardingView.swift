@@ -87,30 +87,57 @@ private struct WelcomeStepView: View {
 
 // MARK: - Step 2: Driver Installation
 
-/// Driver installation page with progress and completion state
+/// Driver installation page: a guide to the official installer package.
 ///
-/// Phase 2.1.4 split two things that used to share one switch. A machine with no
-/// driver needs an **install** action, and onboarding is the one place the app is
-/// allowed to ask for it. A machine whose driver is present but unusable needs an
-/// **explanation**, not a button: no entry point may copy files or restart
-/// `coreaudiod` (§2.3). So the gate is read first, and its answer decides which of
-/// the two this page shows.
+/// P4 Batch 1A: this page no longer installs anything. It used to run a second,
+/// untransactional copy of the install — an administrator `osascript` that
+/// copied the bundle out of `Contents/Resources` and ended with `killall
+/// coreaudiod` — while the release's `.pkg` performed the same replace through
+/// `tools/sb_install_transaction.sh`, with a staging copy, a backup and a
+/// rollback. Onboarding now points at the package, and the page turns green only
+/// when the version gate says the installed driver matches this build — never
+/// because a button was clicked.
+///
+/// The gate is read first: a machine with no driver gets the install guide, a
+/// machine whose driver cannot be used gets an explanation and no action (§2.3),
+/// and a machine that already matches skips straight to completion.
 private struct DriverInstallStepView: View {
     let onBack: () -> Void
     let onComplete: () -> Void
 
-    @StateObject private var installer = DriverInstaller()
+    private let installer = DriverInstaller()
+
     /// What the version gate said about the bundle on disk.
     ///
     /// `nil` until `onAppear` reads it. Assumed nothing: defaulting to
-    /// `.notInstalled` would flash an Install button on a machine that already
+    /// `.notInstalled` would flash the install guide on a machine that already
     /// has a working driver, and defaulting to "incompatible" would flash an
     /// error at someone who simply has not installed yet.
     @State private var status: DriverVersionStatus?
 
-    /// Only a genuinely absent driver gets an install action.
+    /// Set once the user has been sent to Installer. Coming back from Installer
+    /// is what `didBecomeActive` reports, and re-reading is the only thing that
+    /// can turn this page green.
+    @State private var isWaitingForInstaller = false
+
+    /// The driver on disk is the one this build needs. Everything the page
+    /// shows after an install hangs off this answer, not off a return value.
+    private var isInstalledAndUsable: Bool {
+        status?.isCompatible == true
+    }
+
+    /// Only a genuinely absent driver gets the install guide.
     private var isFirstInstall: Bool {
         status == .notInstalled
+    }
+
+    /// Where the package is, or where to get it. Re-evaluated on every render so
+    /// a package downloaded while the window was open is picked up.
+    private var guideAction: DriverInstallGuide.Action {
+        DriverInstallGuide.action(
+            appVersion: VersionManager.appVersion(),
+            releasePageURL: DriverCompatibilityNotice.configuredReleasePageURL
+        )
     }
 
     /// The text shown instead of an install action when the installed bundle
@@ -137,20 +164,20 @@ private struct DriverInstallStepView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        VStack(spacing: 20) {
+            Spacer(minLength: 0)
 
-            if installer.state.isComplete {
+            if isInstalledAndUsable {
                 completionContent
             } else {
                 installContent
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
             // Bottom buttons
             HStack {
-                if !installer.state.isComplete {
+                if !isInstalledAndUsable {
                     Button("Back") {
                         onBack()
                     }
@@ -160,40 +187,64 @@ private struct DriverInstallStepView: View {
 
                 Spacer()
 
-                if installer.state.isComplete {
-                    Button(action: onComplete) {
-                        Text("Open SoundBridge")
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(width: 160)
-                    }
-                    .keyboardShortcut(.return)
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                } else if isFirstInstall {
-                    // One button for both the first attempt and a retry, because
-                    // both are the same intent: nothing is installed.
-                    Button(action: installDriver) {
-                        Text(installer.state.isFailed ? "Retry" : "Install Driver")
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(width: 120)
-                    }
-                    .keyboardShortcut(.return)
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                }
+                actionButtons
             }
-            .padding(.bottom, 40)
+            .padding(.bottom, 32)
         }
         .padding(.horizontal, 40)
-        .onAppear {
-            // Only skip ahead when the installed driver actually matches this
-            // build. Existence alone used to jump straight to the completion
-            // screen, hiding an outdated driver behind a green checkmark.
-            let current = installer.currentInstallStatus()
-            status = current
-            if current.isCompatible {
-                installer.state = .complete
-                installer.progress = 1.0
+        .onAppear(perform: readInstalledState)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Coming back from Installer is exactly this notification. The gate
+            // is re-read; nothing here trusts the click that opened the package.
+            guard isWaitingForInstaller else { return }
+            readInstalledState()
+        }
+    }
+
+    /// The one place this page decides what to offer.
+    @ViewBuilder
+    private var actionButtons: some View {
+        HStack(spacing: 10) {
+            if isInstalledAndUsable {
+                Button(action: onComplete) {
+                    Text("Open SoundBridge")
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 160)
+                }
+                .keyboardShortcut(.return)
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+            } else if isFirstInstall {
+                // Retry is a re-read, not a second install: the package owns the
+                // install, so the only thing left to do here is check again.
+                if case .openPackage = guideAction {
+                    Button("Check Again", action: readInstalledState)
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                }
+
+                switch guideAction {
+                case .openPackage(let url):
+                    Button { open(url) } label: {
+                        Text("Open Installer Package")
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 170)
+                    }
+                    .keyboardShortcut(.return)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                case .openReleasePage(let url):
+                    Button { open(url) } label: {
+                        Text("Open Release Page")
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 170)
+                    }
+                    .keyboardShortcut(.return)
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                case .namePackage:
+                    EmptyView()
+                }
             }
         }
     }
@@ -228,24 +279,78 @@ private struct DriverInstallStepView: View {
                     .font(.system(size: 14))
                     .foregroundColor(.secondary)
             } else {
-                Text("An audio driver is required to enable volume control. This requires an administrator password.")
-                    .font(.system(size: 14))
+                installGuide
+            }
+        }
+    }
+
+    // MARK: - Install Guide
+
+    /// What happens when the user opens the package, and how this page learns
+    /// that it worked. The step about "Check Again" is not filler: the package
+    /// runs in its own process and can be cancelled, so the filesystem is the
+    /// only report this page accepts.
+    @ViewBuilder
+    private var installGuide: some View {
+        VStack(spacing: 12) {
+            Text("SoundBridge's audio driver is installed by the official installer package, not by this app. The package stages the new driver, verifies it, and restores the previous one if anything fails — so a cancelled or failed install cannot leave a half-replaced bundle behind.")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+
+            guidanceLine
+
+            VStack(alignment: .leading, spacing: 7) {
+                step(1, "Open the installer package.")
+                step(2, "Approve the administrator prompt. The package writes \(DriverBundleLocation.driverPath) and keeps the previous bundle until the new one has been verified.")
+                step(3, "Return here and choose Check Again. This page reports success only when the installed driver matches this build.")
+            }
+            .frame(maxWidth: 450, alignment: .leading)
+
+            if isWaitingForInstaller {
+                Text("Waiting for Installer. This page checks again when you come back.")
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
             }
+        }
+    }
 
-            if installer.state != .notStarted {
-                VStack(spacing: 8) {
-                    ProgressView(value: installer.progress)
-                        .frame(width: 300)
+    /// Where the package is, or where to get it. Stated before the steps so the
+    /// button below is never a surprise.
+    @ViewBuilder
+    private var guidanceLine: some View {
+        switch guideAction {
+        case .openPackage(let url):
+            Text("Package found: \(url.lastPathComponent)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+                .textSelection(.enabled)
+        case .openReleasePage:
+            Text("The installer package is not next to the app. Download \(DriverInstallGuide.packageFileName(appVersion: VersionManager.appVersion() ?? "<version>")) from the release page, open it, then come back here.")
+                .font(.system(size: 12))
+                .foregroundColor(.orange)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+        case .namePackage(let name):
+            Text("The installer package is not next to the app. Open \(name) from wherever the release was downloaded.")
+                .font(.system(size: 12))
+                .foregroundColor(.orange)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+        }
+    }
 
-                    Text(installer.state.description)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 8)
-            }
+    private func step(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("\(number).")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 14, alignment: .trailing)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -291,32 +396,28 @@ private struct DriverInstallStepView: View {
 
     // MARK: - Actions
 
-    private func installDriver() {
-        // The intent is not inferred here. This page only ever performs a first
-        // install, and `DriverInstaller` refuses it if the bundle is no longer
-        // absent — for example when another process installed one while this
-        // window was open.
-        //
-        // The guard is the second of two: the install button only exists for
-        // `isFirstInstall`, but a page can be resized, re-run or, in a future
-        // change, reused for another state. Running the installer against
-        // `.newer` would replace a driver that is ahead of this build.
-        guard isFirstInstall else {
-            print("[Onboarding] install ignored for state \(status?.summary ?? "unknown")")
-            return
+    /// Ask LaunchServices to open the package (or the release page). Installing
+    /// is Installer's job from here; this page only records that it is waiting,
+    /// so the next `didBecomeActive` re-reads the gate instead of trusting a
+    /// click. No privilege is requested here and nothing is copied.
+    private func open(_ url: URL) {
+        isWaitingForInstaller = true
+        if !NSWorkspace.shared.open(url) {
+            print("[Onboarding] could not open \(url.path)")
         }
-        Task {
-            do {
-                try await installer.installDriver(intent: .firstInstall)
-            } catch {
-                await MainActor.run {
-                    installer.state = .failed(error.localizedDescription)
-                    // Re-read the gate: the failure may be `intentDoesNotMatchStatus`
-                    // because the driver appeared meanwhile, in which case the page
-                    // should switch to the explanation instead of offering Retry.
-                    status = installer.currentInstallStatus()
-                }
-            }
+    }
+
+    /// Read the gate and let it — not the user's last action — decide the page.
+    ///
+    /// This is the rule that keeps a failed, cancelled or partial install from
+    /// being reported as success: the only input is the installed bundle's own
+    /// `Info.plist` compared against what this build ships.
+    private func readInstalledState() {
+        let current = installer.currentInstallStatus()
+        status = current
+        if current.isCompatible {
+            isWaitingForInstaller = false
         }
+        print("[Onboarding] driver state: \(current.summary)")
     }
 }

@@ -14,12 +14,20 @@ final class DriverCompatibilityNoticeTests: XCTestCase {
 
     private let appVersion = "1.2.0"
 
+    /// One ABI generation behind whatever this build speaks. Written as a delta
+    /// rather than a literal so a protocol bump cannot leave a stale sample here.
+    private let incompatibleProtocol = DriverVersionGate.expectedProtocolVersion - 0x100
+
     // MARK: - Which statuses get a notice
 
     func testNoticeIsProducedForEveryUnusableStatus() {
         let statuses: [DriverVersionStatus] = [
             .outdated(installed: "1.1.3", expected: "1.2.0"),
-            .protocolIncompatible(installedVersion: "1.2.0", installedProtocol: 0x0001_0400, expectedProtocol: 0x0002_0100),
+            .protocolIncompatible(
+                installedVersion: "1.2.0",
+                installedProtocol: incompatibleProtocol,
+                expectedProtocol: DriverVersionGate.expectedProtocolVersion
+            ),
             .metadataUnreadable(reason: "Info.plist is missing"),
             .expectedVersionUnavailable
         ]
@@ -121,10 +129,12 @@ final class DriverCompatibilityNoticeTests: XCTestCase {
     // MARK: - Content
 
     func testProtocolMismatchNoticeCarriesBothProtocolVersions() {
+        let installedProtocol = incompatibleProtocol
+        let expectedProtocol = DriverVersionGate.expectedProtocolVersion
         let status = DriverVersionStatus.protocolIncompatible(
             installedVersion: "1.1.0",
-            installedProtocol: 0x0001_0400,
-            expectedProtocol: 0x0002_0100
+            installedProtocol: installedProtocol,
+            expectedProtocol: expectedProtocol
         )
         let notice = try? XCTUnwrap(
             DriverCompatibilityNotice.make(for: status, appVersion: appVersion, releasePageURL: nil)
@@ -133,8 +143,14 @@ final class DriverCompatibilityNoticeTests: XCTestCase {
         let body = notice?.message ?? ""
         XCTAssertTrue(body.contains("SoundBridge 1.2.0"), "app version missing:\n\(body)")
         XCTAssertTrue(body.contains("1.1.0"), "installed driver version missing:\n\(body)")
-        XCTAssertTrue(body.contains("0x00010400"), "installed protocol missing:\n\(body)")
-        XCTAssertTrue(body.contains("0x00020100"), "expected protocol missing:\n\(body)")
+        XCTAssertTrue(
+            body.contains(DriverVersionGate.hex(installedProtocol)),
+            "installed protocol missing:\n\(body)"
+        )
+        XCTAssertTrue(
+            body.contains(DriverVersionGate.hex(expectedProtocol)),
+            "expected protocol missing:\n\(body)"
+        )
         XCTAssertTrue(
             body.contains("will not replace the system driver in the background"),
             "the no-background-replacement promise is missing:\n\(body)"

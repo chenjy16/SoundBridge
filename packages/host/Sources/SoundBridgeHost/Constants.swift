@@ -24,6 +24,32 @@ struct SoundBridgeConfig {
     static let defaultFormat = RF_FORMAT_FLOAT32
     static let defaultDurationMs: UInt32 = 100
 
+    // MARK: - Render callback capacity (P2 Batch 4)
+
+    /// The highest sample rate `AudioEngine` will bind to.
+    ///
+    /// `AudioEngine.getDeviceNominalSampleRate` snaps the device to a rate from
+    /// a fixed list; 192 kHz is its top. Capacity is calculated at this rate so
+    /// a device switch never finds the pre-allocated render buffer too small.
+    static let maxSupportedSampleRate: UInt32 = 192_000
+
+    /// Largest block the real-time callback accepts, in frames.
+    ///
+    /// Derived from the frozen `rf_ring_capacity_frames_for` the Host already
+    /// uses to size the shared-memory ring, at the highest supported rate. That
+    /// makes it the same 100 ms of audio the producer can queue: a callback
+    /// cannot legitimately be asked for more than the ring can hold, and any
+    /// larger request is refused instead of overflowing the buffer.
+    static var maxCallbackFrames: Int {
+        Int(rf_ring_capacity_frames_for(maxSupportedSampleRate, defaultDurationMs))
+    }
+
+    /// Channel ceiling for the render path.
+    ///
+    /// The shared-memory header documents `channels` as 1-8, so 8 is the ABI's
+    /// limit rather than an estimate.
+    static let maxCallbackChannels = 8
+
     /// Total span of the software volume taper, in decibels below unity.
     ///
     /// Single source of truth is `VolumeTaper.rangeDB`; this is only an alias
@@ -66,6 +92,19 @@ struct SoundBridgeConfig {
     /// How often the connection monitor samples `driver_connected` and the
     /// heartbeats once the audio engine is running.
     static let connectionPollInterval: TimeInterval = 1.0
+
+    // MARK: - CoreAudio rebuild
+
+    /// Delay before the single confirmation probe that follows a suspect
+    /// rebuild sample.
+    ///
+    /// The detector confirms on two consecutive samples, and normally the
+    /// second one arrives as the next device notification. A HAL that rebuilds
+    /// without sending one would leave the Host stuck on a single suspect
+    /// sample — the 1.2.0 symptom — so one probe is scheduled. 1.5 s is long
+    /// enough for `coreaudiod` to finish re-enumerating and short enough that a
+    /// genuine rebuild is still recovered while the user is looking at it.
+    static let coreAudioRebuildRecheckDelay: TimeInterval = 1.5
 
     // MARK: - Exit policy
 

@@ -113,7 +113,7 @@ final class DriverHeartbeatCrossProcessTests: XCTestCase {
         deviceUID = "test-\(UUID().uuidString)"
         mappingPath = "\(sandbox.path)/soundbridge-\(deviceUID!)"
         let root = sandbox.path
-        manager = SharedMemoryManager { uid in "\(root)/soundbridge-\(uid)" }
+        manager = SharedMemoryManager(sessionID: UUID()) { uid in "\(root)/soundbridge-\(uid)" }
         XCTAssertEqual(manager.createMemory(for: deviceUID, persistence: NoPersistence()), .created)
         XCTAssertNotNil(manager.getMemory(for: deviceUID))
     }

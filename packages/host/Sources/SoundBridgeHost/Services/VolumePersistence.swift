@@ -96,17 +96,10 @@ class VolumePersistence: VolumeStatePersisting {
         do {
             let data = try JSONEncoder().encode(cache)
 
-            // Atomic write: write to .tmp first, then rename
-            let tmpURL = fileURL.appendingPathExtension("tmp")
-            try data.write(to: tmpURL, options: [.atomic])
-
-            // Rename .tmp → final path
-            let fm = FileManager.default
-            if fm.fileExists(atPath: fileURL.path) {
-                try fm.removeItem(at: fileURL)
+            guard AtomicFileWriter.replace(at: fileURL.path, with: data) else {
+                logger.error("Failed to atomically publish volume state")
+                return
             }
-            try fm.moveItem(at: tmpURL, to: fileURL)
-
             logger.info("Saved state for \(self.cache.count) device(s)")
         } catch {
             logger.error("Failed to save state: \(error.localizedDescription)")

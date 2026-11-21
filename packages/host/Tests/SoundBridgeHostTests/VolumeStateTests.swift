@@ -251,3 +251,53 @@ final class VolumeStateTests: XCTestCase {
         XCTAssertEqual(VolumeMode(protocolValue: 99), .software)
     }
 }
+
+// 验证真实 VolumePersistence 的文件格式及防抖写入；路径完全隔离。
+final class VolumePersistenceFileTests: XCTestCase {
+    private var sandbox: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        sandbox = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("SoundBridgeVolumeTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try FileManager.default.removeItem(at: sandbox)
+        sandbox = nil
+        try super.tearDownWithError()
+    }
+
+    private func waitForDebounce() {
+        let completed = expectation(description: "等待音量防抖写入")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { completed.fulfill() }
+        wait(for: [completed], timeout: 3)
+    }
+
+    func testExistingFormatLoadsAndLatestDebouncedValueIsPublished() throws {
+        let path = sandbox.appendingPathComponent("volume.json")
+        let original = ["device": DeviceVolumeState(volumeScalar: 0.3, isMuted: false)]
+        try JSONEncoder().encode(original).write(to: path)
+        let persistence = VolumePersistence(fileURL: path)
+        XCTAssertEqual(try XCTUnwrap(persistence.loadIfPresent(uid: "device")).volumeScalar, 0.3, accuracy: 0.0001)
+
+        persistence.save(uid: "device", volume: 0.4, muted: false)
+        persistence.save(uid: "device", volume: 0.8, muted: true)
+        waitForDebounce()
+        let stored = try JSONDecoder().decode([String: DeviceVolumeState].self, from: Data(contentsOf: path))
+        XCTAssertEqual(try XCTUnwrap(stored["device"]).volumeScalar, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(stored["device"]?.isMuted, true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: sandbox.path), ["volume.json"])
+    }
+
+    func testEncodingFailureLeavesPreviousFileUntouched() throws {
+        let path = sandbox.appendingPathComponent("volume.json")
+        let original = try JSONEncoder().encode(["device": DeviceVolumeState(volumeScalar: 0.3, isMuted: false)])
+        try original.write(to: path)
+        let persistence = VolumePersistence(fileURL: path)
+        persistence.save(uid: "device", volume: .nan, muted: false)
+        waitForDebounce()
+        XCTAssertEqual(try Data(contentsOf: path), original)
+    }
+}

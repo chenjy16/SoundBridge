@@ -76,6 +76,11 @@ enum AudioPipelineStatus: String, Codable {
 
 /// The single answer the App consumes. One value, so "started" and "working"
 /// can never be two different files saying two different things.
+///
+/// Phase 6A added `recovering`, `degraded`, `stopping` and `stopped`. They are
+/// new *values* of an existing field rather than a second status channel: an
+/// older App falls through to its `unknown` branch, which is a truthful "this
+/// build does not recognise that word" instead of a stale claim.
 enum HostStartupOutcome: String, Codable {
     /// Initialisation in progress; no claim yet.
     case starting
@@ -93,6 +98,18 @@ enum HostStartupOutcome: String, Codable {
     case noPhysicalDevices
     /// Running, but not in the audio path (recovered into idle/degraded).
     case inactive
+    /// CoreAudio rebuilt its object graph and the Host is rebuilding the path.
+    /// Transient: this is what the App shows instead of "not running" during
+    /// the seconds a recovery takes.
+    case recovering
+    /// Recovery was attempted and did not produce a usable audio path. The Host
+    /// stays alive and diagnosable; the App shows the reason.
+    case degraded
+    /// Shutdown started; resources are being released in order.
+    case stopping
+    /// Shutdown finished. Written before the instance lock is released, so the
+    /// App can tell "quitting" apart from "died".
+    case stopped
 }
 
 /// Everything the Host knows about its own lifecycle, published as one object.
@@ -249,6 +266,29 @@ struct DriverConnectionObservation: Equatable {
     var driverConnected: Bool
     var driverHeartbeat: UInt64
     var hostHeartbeat: UInt64
+
+    /// Identity of the mapping this sample was read from.
+    ///
+    /// Every new incarnation starts with `driver_connected == 0` — the driver
+    /// sets it from its first IO, not at map time. Without this field a tracker
+    /// that has watched an older incarnation reads that zero as "the driver that
+    /// was attached has left", which is how a freshly published mapping used to
+    /// be reported as a detach.
+    var mappingToken: UUID?
+
+    init(
+        headerValid: Bool,
+        driverConnected: Bool,
+        driverHeartbeat: UInt64,
+        hostHeartbeat: UInt64,
+        mappingToken: UUID? = nil
+    ) {
+        self.headerValid = headerValid
+        self.driverConnected = driverConnected
+        self.driverHeartbeat = driverHeartbeat
+        self.hostHeartbeat = hostHeartbeat
+        self.mappingToken = mappingToken
+    }
 }
 
 /// Turns a stream of observations into the level-6/7 status.
@@ -273,6 +313,15 @@ struct DriverConnectionTracker {
     private var heartbeatWatch = DriverHeartbeatWatch()
     private var hostHeartbeatWatch = DriverHeartbeatWatch(stallThreshold: 5)
 
+    /// The incarnation the state above belongs to.
+    private var mappingToken: UUID?
+    /// How many times a *different* incarnation replaced the one above. The
+    /// first mapping a tracker ever sees is not a switch. Diagnostics only.
+    private(set) var incarnationSwitches = 0
+
+    private let driverStallSamples: Int
+    private let hostStallSamples: Int
+
     /// Two thresholds, not one, because the two counters have different cadences.
     ///
     /// - `driverStallSamples` (3): the driver writes from its IO callback, which
@@ -284,6 +333,8 @@ struct DriverConnectionTracker {
     ///   margin the driver gives us (it tolerates 15s of silence before it
     ///   considers the Host gone).
     init(driverStallSamples: Int = 3, hostStallSamples: Int = 5) {
+        self.driverStallSamples = max(1, driverStallSamples)
+        self.hostStallSamples = max(1, hostStallSamples)
         self.heartbeatWatch = DriverHeartbeatWatch(stallThreshold: driverStallSamples)
         self.hostHeartbeatWatch = DriverHeartbeatWatch(stallThreshold: hostStallSamples)
     }
@@ -291,6 +342,17 @@ struct DriverConnectionTracker {
     mutating func observe(_ observation: DriverConnectionObservation) -> SharedMemoryConnectionStatus {
         guard observation.headerValid else {
             return .invalid
+        }
+
+        // A different mapping is a different question. `hasEverConnected` and the
+        // heartbeat watches describe the incarnation we were watching, and the
+        // new one has not had the chance to attach yet — its initial
+        // `driver_connected == 0` is "not yet", not "gone".
+        if observation.mappingToken != mappingToken {
+            let replacedAPreviousIncarnation = mappingToken != nil
+            mappingToken = observation.mappingToken
+            resetIncarnation()
+            if replacedAPreviousIncarnation { incarnationSwitches += 1 }
         }
 
         // Our own timer stopping is a Host fault, not a driver fault, and the
@@ -330,5 +392,45 @@ struct DriverConnectionTracker {
     /// not "advanced at some point since startup".
     var isAudioFlowing: Bool {
         return audioPipeline == .flowing
+    }
+
+    /// Forget everything that was true of the previous incarnation.
+    ///
+    /// The Host's own heartbeat watch is reset too: it reports on the mapping's
+    /// `host_heartbeat` field, and a new mapping starts that counter at zero.
+    private mutating func resetIncarnation() {
+        hasEverConnected = false
+        hasHeardDriverHeartbeat = false
+        heartbeatWatch = DriverHeartbeatWatch(stallThreshold: driverStallSamples)
+        hostHeartbeatWatch = DriverHeartbeatWatch(stallThreshold: hostStallSamples)
+    }
+}
+
+// MARK: - What the detail line may claim
+
+/// The one place the lifecycle `detail` text is derived from a connection status.
+///
+/// Kept pure and separate from `main.swift` so the wording can be pinned by
+/// tests: `driver detached` is only correct for `.disconnected`, which the
+/// tracker only reports after a driver actually attached to *this* incarnation.
+/// A new mapping, a retired file and a replaced inode never reach that case.
+enum SharedMemoryConnectionDetail {
+    static func detail(for status: SharedMemoryConnectionStatus) -> String? {
+        switch status {
+        case .driverNotResponding:
+            return "driver attached but never produced a frame"
+        case .disconnected:
+            return "driver detached from this mapping"
+        case .hostHeartbeatStalled:
+            return "Host heartbeat timer stopped advancing"
+        case .invalid:
+            return "shared memory header failed validation"
+        case .waitingForDriver:
+            return "waiting for the driver's first IO on this mapping"
+        case .connected:
+            return "driver attached to this mapping"
+        case .pending:
+            return nil
+        }
     }
 }

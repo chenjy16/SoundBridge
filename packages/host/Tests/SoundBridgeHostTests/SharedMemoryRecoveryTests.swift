@@ -55,7 +55,7 @@ final class SharedMemoryRecoveryTests: XCTestCase {
 
     private func makeManager() -> SharedMemoryManager {
         let root = sandbox.path
-        return SharedMemoryManager { uid in "\(root)/soundbridge-\(uid)" }
+        return SharedMemoryManager(sessionID: UUID()) { uid in "\(root)/soundbridge-\(uid)" }
     }
 
     private func path(for uid: String) -> String {
@@ -64,7 +64,9 @@ final class SharedMemoryRecoveryTests: XCTestCase {
 
     /// Size the Host would use for its mapping.
     private var expectedFileSize: Int {
-        let frames = rf_frames_for_duration(
+        // Batch 1: same single source of truth as the production SharedMemoryManager
+        // — the power-of-two rounding, not the raw frame count.
+        let frames = rf_ring_capacity_frames_for(
             SoundBridgeConfig.activeSampleRate,
             SoundBridgeConfig.defaultDurationMs
         )
@@ -364,7 +366,7 @@ final class SharedMemoryRecoveryTests: XCTestCase {
 
         let mem = raw!.assumingMemoryBound(to: RFSharedAudio.self)
         XCTAssertEqual(rf_validate_header(mem), RF_VALIDATE_OK)
-        XCTAssertEqual(headerSize, 256)
+        XCTAssertEqual(headerSize, 320)
         XCTAssertEqual(
             MemoryLayout<RFSharedAudio>.offset(of: \.eq_snapshot),
             156,

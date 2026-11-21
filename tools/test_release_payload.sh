@@ -3,15 +3,28 @@
 # Damage tests for the release-payload verifiers (Phase 2.2.2 - Batch B).
 #
 # A verifier that never fails proves nothing. Each section below takes a copy of
-# a real artifact, damages exactly one thing, and asserts that the matching
-# verifier notices, names the damage, and exits non-zero. dist/ is only ever
-# read: every fixture is built in a scratch directory and thrown away.
+# a fixture payload, damages exactly one thing, and asserts that the matching
+# verifier notices, names the damage, and exits non-zero. Every fixture is built
+# in a scratch directory and thrown away; nothing here reads or writes dist/.
 #
+# The fixture is synthetic (P4 Batch 1A). tools/test_support/make_payload_fixture.sh
+# compiles a universal stub into an app bundle, a driver bundle and a Sparkle
+# framework, then packages them with the real packagers (tools/build_installer_pkg.sh,
+# tools/create_dmg.sh). That is what removed the dependency on whatever release
+# happened to be sitting in dist/: the suite used to be pinned to one historical
+# artifact that had to keep existing for the tests to run at all.
+#
+# The version under test is named by the scenario, not by an artifact:
+# FIXTURE_VERSION defaults to the repository's VERSION file and can be
+# overridden with SB_FIXTURE_VERSION. OLD_VERSION is a second, deliberately
+# older version the "stale release" cases point at; it is a scenario constant,
+# never a real release.
+# ---
 # Sections
 #   B-1  package: a modified driver file, a missing executable, a changed
 #        Info.plist, a diverging symlink target, a removed subdirectory, an
 #        extra file, a permission change, a changed protocol -- inside the
-#        package and in the third copy in dist/
+#        package and in the third copy (the bundle the image is built from)
 #   B-2  package: a single-architecture driver
 #   B-3  packager: versioned naming, a failed run that must not destroy the
 #        previous image, the pre-check, and the bundle make and the packager
@@ -25,16 +38,23 @@
 #        three -- a modified executable, a deleted file, an extra file, a
 #        symlink, a permission change, an Info.plist, a protocol, a corrupt
 #        image, an image without the app and an image without the driver; plus
-#        a bundle in dist/ that differs while the image still matches
+#        a named bundle that differs while the image still matches
+#   B-7  the release is named by the VERSION file: which package and image a
+#        verifier picks by default, a missing current artifact (named and
+#        listed, never substituted), a stale bundle in a scratch dist/ (a
+#        version failure now, not a selector), the release-bundle default, and
+#        the VERSION each make target hands its verifier; every fixture is a
+#        scratch tree and the real dist/ is only read
 #
-# Needs hdiutil and the real artifacts in dist/. Prints "passed: N failed: N"
-# and exits non-zero if anything failed. The verifier paths can be overridden
-# (VERIFY_PKG, VERIFY_DMG, VERIFY_ALL, CREATE_DMG) so a deliberately broken copy
-# of a script can be run against the same suite.
+# Needs hdiutil and clang (the fixture stub is compiled, not copied). Prints
+# "passed: N failed: N" and exits non-zero if anything failed. The verifier
+# paths can be overridden (VERIFY_PKG, VERIFY_DMG, VERIFY_ALL, CREATE_DMG) so a
+# deliberately broken copy of a script can be run against the same suite.
 #
 # Usage
-#   tools/test_release_payload.sh              # run everything
-#   KEEP_SCRATCH=1 tools/test_release_payload.sh   # keep the fixtures for a look
+#   tools/test_release_payload.sh                          # run everything
+#   SB_FIXTURE_VERSION=9.9.9 tools/test_release_payload.sh # name the fixture explicitly
+#   KEEP_SCRATCH=1 tools/test_release_payload.sh            # keep the fixtures for a look
 #
 set -uo pipefail
 
@@ -65,9 +85,36 @@ VERIFY_DMG="${VERIFY_DMG:-$ROOT/tools/verify_dmg_contents.sh}"
 VERIFY_ALL="${VERIFY_ALL:-$ROOT/tools/verify_release_payload.sh}"
 CREATE_DMG="${CREATE_DMG:-$ROOT/tools/create_dmg.sh}"
 
-REAL_PKG="$ROOT/dist/SoundBridge-1.1.1.pkg"
-REAL_DMG="$ROOT/dist/SoundBridge-1.1.1.dmg"
-REAL_APP="$ROOT/dist/SoundBridge.app"
+# The version under test is named by the scenario. It defaults to the tree's own
+# VERSION because the image check compares the host's source plist
+# (packages/host/Info.plist) against it, and that file moves with the tree; an
+# experiment can name another version with SB_FIXTURE_VERSION. OLD_VERSION is a
+# second, deliberately older version used by the "stale release" cases. It is a
+# scenario constant, never a real release: nothing below reads dist/.
+FIXTURE_VERSION="${SB_FIXTURE_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || true)}"
+OLD_VERSION="${SB_FIXTURE_OLD_VERSION:-0.9.0}"
+if [[ -z "$FIXTURE_VERSION" ]]; then
+    echo "error: no fixture version: set SB_FIXTURE_VERSION or keep a VERSION file" >&2
+    exit 1
+fi
+
+FIXTURE_DIR="$T/payload"
+FIXTURE_LOG="$T/fixture-build.log"
+if ! "$ROOT/tools/test_support/make_payload_fixture.sh" "$FIXTURE_DIR" "$FIXTURE_VERSION" \
+        > "$FIXTURE_LOG" 2>&1; then
+    echo "error: could not build the synthetic payload fixture; its output follows" >&2
+    sed 's/^/      /' "$FIXTURE_LOG" >&2
+    exit 1
+fi
+FIX_PKG="$FIXTURE_DIR/SoundBridge-$FIXTURE_VERSION.pkg"
+FIX_DMG="$FIXTURE_DIR/SoundBridge-$FIXTURE_VERSION.dmg"
+FIX_APP="$FIXTURE_DIR/SoundBridge.app"
+FIXTURE_PROTOCOL="$(sed -n 's/^FIXTURE_PROTOCOL=//p' "$FIXTURE_LOG" | head -1)"
+if [[ -z "$FIXTURE_PROTOCOL" ]]; then
+    echo "error: the fixture did not report a protocol version" >&2
+    exit 1
+fi
+echo "fixture: version $FIXTURE_VERSION, protocol $FIXTURE_PROTOCOL, stale-version scenario $OLD_VERSION"
 
 PASSED=0
 FAILED=0
@@ -81,7 +128,7 @@ section() { echo ""; echo "== $1 =="; }
 PKG_OUT="$T/pkg.out"
 DMG_OUT="$T/dmg.out"
 
-run_pkg() { local rc=0; "$VERIFY_PKG" "$@" > "$PKG_OUT" 2>&1 || rc=$?; echo "$rc"; }
+run_pkg() { local rc=0; "$VERIFY_PKG" --app "$FIX_APP" "$@" > "$PKG_OUT" 2>&1 || rc=$?; echo "$rc"; }
 run_dmg() { local rc=0; "$VERIFY_DMG" "$@" > "$DMG_OUT" 2>&1 || rc=$?; echo "$rc"; }
 
 # ---------------------------------------------------------------- PKG fixtures
@@ -91,7 +138,7 @@ STAGED=""
 mutate_pkg() {   # <name> <mutator function>
     local name="$1" fn="$2" d="$T/expand-$1"
     rm -rf "$d"
-    /usr/sbin/pkgutil --expand-full "$REAL_PKG" "$d" >/dev/null 2>&1 || { bad "expand failed for $name"; return 1; }
+    /usr/sbin/pkgutil --expand-full "$FIX_PKG" "$d" >/dev/null 2>&1 || { bad "expand failed for $name"; return 1; }
     APP_DRIVER="$d/SoundBridge.pkg/Payload/Applications/SoundBridge.app/Contents/Resources/SoundBridgeDriver.driver"
     STAGED="$d/SoundBridge.pkg/Payload/Library/Application Support/SoundBridge/InstallerPayload/driver/SoundBridgeDriver.driver"
     "$fn" || bad "mutator $fn failed"
@@ -122,7 +169,7 @@ m_singlearch() {
     /bin/chmod 755 "$STAGED/Contents/MacOS/SoundBridgeDriver"
 }
 
-echo "Building fixtures from $REAL_PKG and $REAL_DMG"
+echo "Building damage fixtures from the synthetic payload at $FIX_PKG"
 for pair in "modfile:m_modfile" "modapp:m_modapp" "noexec:m_noexec" "plistbad:m_plist" "symlink:m_symlink" \
             "nosubdir:m_nosubdir" "extrafile:m_extrafile" "perm:m_perm" \
             "protocol:m_protocol" "singlearch:m_singlearch"; do
@@ -130,7 +177,7 @@ for pair in "modfile:m_modfile" "modapp:m_modapp" "noexec:m_noexec" "plistbad:m_
 done
 
 section "B-1: PKG driver consistency"
-rc="$(run_pkg "$REAL_PKG")"
+rc="$(run_pkg "$FIX_PKG")"
 is "normal package exits 0" "$rc" "0"
 is "normal package tree match"      "$(grep -m1 '^DRIVER_TREE_MATCH=' "$PKG_OUT")" "DRIVER_TREE_MATCH=true"
 is "normal package executable match" "$(grep -m1 '^DRIVER_EXECUTABLE_MATCH=' "$PKG_OUT")" "DRIVER_EXECUTABLE_MATCH=true"
@@ -196,8 +243,8 @@ mk_appfix() {   # <name> <mutator function>
     local name="$1" fn="$2" d="$APP_FIX/$1/SoundBridge.app"
     rm -rf "$APP_FIX/$1"
     mkdir -p "$d/Contents/Resources"
-    /bin/cp "$REAL_APP/Contents/Info.plist" "$d/Contents/Info.plist" || { bad "copy failed for $name"; return 1; }
-    /usr/bin/ditto "$REAL_APP/Contents/Resources/SoundBridgeDriver.driver" \
+    /bin/cp "$FIX_APP/Contents/Info.plist" "$d/Contents/Info.plist" || { bad "copy failed for $name"; return 1; }
+    /usr/bin/ditto "$FIX_APP/Contents/Resources/SoundBridgeDriver.driver" \
         "$d/Contents/Resources/SoundBridgeDriver.driver" || { bad "ditto failed for $name"; return 1; }
     EXT_DRIVER="$d/Contents/Resources/SoundBridgeDriver.driver"
     "$fn" || bad "mutator $fn failed"
@@ -218,51 +265,51 @@ for pair in "xmodfile:x_modfile" "xnodriver:x_nodriver" "xnoplist:x_noplist" "xe
 done
 
 section "B-1: the three copies (the third one in dist/)"
-rc="$(run_pkg "$REAL_PKG")"
+rc="$(run_pkg "$FIX_PKG")"
 is "all three copies agree" "$(grep -m1 '^DRIVER_THREE_WAY_MATCH=' "$PKG_OUT")" "DRIVER_THREE_WAY_MATCH=true"
 has "the three-way pass is stated" "all three driver trees are identical" "$PKG_OUT"
 has "the executable match covers every copy" "byte-identical in every copy compared" "$PKG_OUT"
 
-rc="$(run_pkg --app "$APP_FIX/xmodfile/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xmodfile/SoundBridge.app" "$FIX_PKG")"
 is "a changed driver in dist/ exits non-zero" "$rc" "1"
 is "a changed driver in dist/ breaks the three-way match" "$(grep -m1 '^DRIVER_THREE_WAY_MATCH=' "$PKG_OUT")" "DRIVER_THREE_WAY_MATCH=false"
 has "the differing copy is named" "bundle in dist/" "$PKG_OUT"
 
-rc="$(run_pkg --app "$APP_FIX/xnoplist/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xnoplist/SoundBridge.app" "$FIX_PKG")"
 is "a missing Info.plist in dist/ exits non-zero" "$rc" "1"
 has "the missing Info.plist copy is named" "the bundle in dist/ driver has no Contents/Info.plist" "$PKG_OUT"
 
-rc="$(run_pkg --app "$APP_FIX/xextrafile/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xextrafile/SoundBridge.app" "$FIX_PKG")"
 is "an extra file in dist/ exits non-zero" "$rc" "1"
 is "an extra file in dist/ breaks the tree" "$(grep -m1 '^DRIVER_TREE_MATCH=' "$PKG_OUT")" "DRIVER_TREE_MATCH=false"
 
-rc="$(run_pkg --app "$APP_FIX/xsymlink/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xsymlink/SoundBridge.app" "$FIX_PKG")"
 is "a symlink only in dist/ exits non-zero" "$rc" "1"
 is "a symlink only in dist/ breaks the tree" "$(grep -m1 '^DRIVER_TREE_MATCH=' "$PKG_OUT")" "DRIVER_TREE_MATCH=false"
 
-rc="$(run_pkg --app "$APP_FIX/xperm/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xperm/SoundBridge.app" "$FIX_PKG")"
 is "a permission change in dist/ exits non-zero" "$rc" "1"
 is "a permission change in dist/ breaks the tree" "$(grep -m1 '^DRIVER_TREE_MATCH=' "$PKG_OUT")" "DRIVER_TREE_MATCH=false"
 is "a permission change in dist/ leaves the executable matching" "$(grep -m1 '^DRIVER_EXECUTABLE_MATCH=' "$PKG_OUT")" "DRIVER_EXECUTABLE_MATCH=true"
 
-rc="$(run_pkg --app "$APP_FIX/xplist/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xplist/SoundBridge.app" "$FIX_PKG")"
 is "a changed Info.plist in dist/ exits non-zero" "$rc" "1"
 is "a changed Info.plist in dist/ breaks the plist check" "$(grep -m1 '^DRIVER_INFO_PLIST_MATCH=' "$PKG_OUT")" "DRIVER_INFO_PLIST_MATCH=false"
 
-rc="$(run_pkg --app "$APP_FIX/xprotocol/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xprotocol/SoundBridge.app" "$FIX_PKG")"
 is "a different protocol in dist/ exits non-zero" "$rc" "1"
 is "a different protocol in dist/ breaks the protocol check" "$(grep -m1 '^DRIVER_PROTOCOL_MATCH=' "$PKG_OUT")" "DRIVER_PROTOCOL_MATCH=false"
 
-rc="$(run_pkg --pkg-only "$REAL_PKG")"
+rc="$(run_pkg --pkg-only "$FIX_PKG")"
 is "--pkg-only still exits 0" "$rc" "0"
 is "--pkg-only reports the three-way result as skipped" "$(grep -m1 '^DRIVER_THREE_WAY_MATCH=' "$PKG_OUT")" "DRIVER_THREE_WAY_MATCH=SKIPPED"
 has "--pkg-only says the skip is not a pass" "the three-way result is SKIPPED, not PASS" "$PKG_OUT"
 
-rc="$(run_pkg --app "$T/no-such-app/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$T/no-such-app/SoundBridge.app" "$FIX_PKG")"
 is "a missing bundle in dist/ exits non-zero" "$rc" "1"
 has "the missing bundle is named" "the bundle the image is built from" "$PKG_OUT"
 
-rc="$(run_pkg --app "$APP_FIX/xnodriver/SoundBridge.app" "$REAL_PKG")"
+rc="$(run_pkg --app "$APP_FIX/xnodriver/SoundBridge.app" "$FIX_PKG")"
 is "a bundle in dist/ without a driver exits non-zero" "$rc" "1"
 has "the driver-less bundle in dist/ is named" "the bundle the image is built from" "$PKG_OUT"
 has "the driver-less bundle points at --pkg-only" "--pkg-only" "$PKG_OUT"
@@ -285,7 +332,7 @@ D_DRIVER=""
 mk_dmg() {   # <name> <mutator function>
     local name="$1" fn="$2" d="$T/app-$1"
     rm -rf "$d"; mkdir -p "$d"
-    /usr/bin/ditto "$REAL_APP" "$d/SoundBridge.app" || { bad "ditto failed for $name"; return 1; }
+    /usr/bin/ditto "$FIX_APP" "$d/SoundBridge.app" || { bad "ditto failed for $name"; return 1; }
     DMG_APP="$d/SoundBridge.app"
     D_DRIVER="$DMG_APP/Contents/Resources/SoundBridgeDriver.driver"
     "$fn" || bad "mutator $fn failed"
@@ -306,7 +353,7 @@ d_singlearch()  {
 for pair in "nosparkle:d_nosparkle" "nodriver:d_nodriver" "badversion:d_badversion" "singlearch:d_singlearch"; do
     mk_dmg "${pair%%:*}" "${pair##*:}"
 done
-cp "$REAL_DMG" "$T/fixtures/SoundBridge-1.2.0.dmg"
+cp "$FIX_DMG" "$T/fixtures/SoundBridge-$OLD_VERSION.dmg"
 
 # --- the driver inside the image, one defect per image (MV-4 to MV-10) -----
 # Each of these leaves the app otherwise whole, so the image check still passes
@@ -340,7 +387,7 @@ mk_dmg_noapp() {
 mk_dmg_noapp
 
 section "B-4: DMG contents"
-rc="$(run_dmg "$REAL_DMG")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$FIX_DMG")"
 is "normal image exits 0" "$rc" "0"
 is "normal image structure" "$(grep -m1 '^DMG_STRUCTURE=' "$DMG_OUT")" "DMG_STRUCTURE=PASS"
 is "normal image versions" "$(grep -m1 '^VERSION_CONSISTENCY=' "$DMG_OUT")" "VERSION_CONSISTENCY=PASS"
@@ -349,32 +396,32 @@ is "normal image mounted" "$(grep -m1 '^DMG_MOUNTED=' "$DMG_OUT")" "DMG_MOUNTED=
 is "normal image detached" "$(grep -m1 '^DMG_DETACHED=' "$DMG_OUT")" "DMG_DETACHED=true"
 # The host ships as a bare executable. What the run may report is the version it
 # was built from, labelled as such -- never a version read out of the binary.
-is "the host value comes from the source plist" "$(grep -m1 '^HOST_SOURCE_VERSION=' "$DMG_OUT")" "HOST_SOURCE_VERSION=1.1.1"
+is "the host value comes from the source plist" "$(grep -m1 '^HOST_SOURCE_VERSION=' "$DMG_OUT")" "HOST_SOURCE_VERSION=$FIXTURE_VERSION"
 has "the host evidence level is stated" "HOST_VERSION_EVIDENCE=Source Verified (packages/host/Info.plist" "$DMG_OUT"
 has "the report says the host binary carries no version" "no version metadata in the executable" "$DMG_OUT"
-is "the app version is read from the bundle" "$(grep -m1 '^APP_BUNDLE_VERSION=' "$DMG_OUT")" "APP_BUNDLE_VERSION=1.1.1"
-is "the protocol is read from the driver bundle" "$(grep -m1 '^PROTOCOL_VERSION=' "$DMG_OUT")" "PROTOCOL_VERSION=131328"
+is "the app version is read from the bundle" "$(grep -m1 '^APP_BUNDLE_VERSION=' "$DMG_OUT")" "APP_BUNDLE_VERSION=$FIXTURE_VERSION"
+is "the protocol is read from the driver bundle" "$(grep -m1 '^PROTOCOL_VERSION=' "$DMG_OUT")" "PROTOCOL_VERSION=$FIXTURE_PROTOCOL"
 
-rc="$(run_dmg "$T/fixtures/nosparkle.dmg")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$T/fixtures/nosparkle.dmg")"
 is "image without Sparkle exits non-zero" "$rc" "1"
 has "image without Sparkle names the framework" "Sparkle.framework is missing" "$DMG_OUT"
 is "a failing image is still detached" "$(grep -m1 '^DMG_DETACHED=' "$DMG_OUT")" "DMG_DETACHED=true"
 
-rc="$(run_dmg "$T/fixtures/nodriver.dmg")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$T/fixtures/nodriver.dmg")"
 is "image without the driver exits non-zero" "$rc" "1"
 has "image without the driver names it" "driver bundle is missing" "$DMG_OUT"
 is "the driver-less image is detached" "$(grep -m1 '^DMG_DETACHED=' "$DMG_OUT")" "DMG_DETACHED=true"
 
-rc="$(run_dmg --expect-version 1.1.1 "$T/fixtures/badversion.dmg")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$T/fixtures/badversion.dmg")"
 is "image with the wrong payload version exits non-zero" "$rc" "1"
 is "image with the wrong payload version fails versions" "$(grep -m1 '^VERSION_CONSISTENCY=' "$DMG_OUT")" "VERSION_CONSISTENCY=FAIL"
-has "the wrong app version is named" "app version is '1.0.0', expected 1.1.1" "$DMG_OUT"
+has "the wrong app version is named" "app version is '1.0.0', expected $FIXTURE_VERSION" "$DMG_OUT"
 
-rc="$(run_dmg --expect-version 1.1.1 "$T/fixtures/SoundBridge-1.2.0.dmg")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$T/fixtures/SoundBridge-$OLD_VERSION.dmg")"
 is "image with the wrong file name exits non-zero" "$rc" "1"
-has "the wrong file name is named" "file name declares '1.2.0' but the payload is 1.1.1" "$DMG_OUT"
+has "the wrong file name is named" "file name declares '$OLD_VERSION' but the payload is $FIXTURE_VERSION" "$DMG_OUT"
 
-rc="$(run_dmg --expect-version 1.1.1 "$T/fixtures/singlearch.dmg")"
+rc="$(run_dmg --expect-version "$FIXTURE_VERSION" "$T/fixtures/singlearch.dmg")"
 is "image with a single-architecture host exits non-zero" "$rc" "1"
 is "image with a single-architecture host fails ARCHITECTURE" "$(grep -m1 '^ARCHITECTURE=' "$DMG_OUT")" "ARCHITECTURE=FAIL"
 has "the failing image binary is named" "Host:" "$DMG_OUT"
@@ -387,7 +434,7 @@ has "missing image is named" "disk image not found" "$DMG_OUT"
 
 TERM_LOG="$T/term.log"
 : > "$TERM_LOG"
-SB_DMG_VERIFY_HOLD=4 "$VERIFY_DMG" "$REAL_DMG" > "$TERM_LOG" 2>&1 &
+SB_DMG_VERIFY_HOLD=4 "$VERIFY_DMG" --expect-version "$FIXTURE_VERSION" "$FIX_DMG" > "$TERM_LOG" 2>&1 &
 VERIFY_PID=$!
 mounted=0
 for _ in $(seq 1 100); do
@@ -400,7 +447,7 @@ rc=0
 wait "$VERIFY_PID" || rc=$?
 is "SIGTERM ends the run with 143" "$rc" "143"
 is "SIGTERM still detaches the volume" "$(grep -m1 '^DMG_DETACHED=' "$TERM_LOG")" "DMG_DETACHED=true"
-leftover="$(/usr/bin/hdiutil info | grep -c "dist/SoundBridge-1.1.1.dmg")"
+leftover="$(/usr/bin/hdiutil info | grep -cF "$FIX_DMG")"
 is "no image is left attached" "$leftover" "0"
 
 section "B-4: SIGINT, a failing detach, and a signal no trap can catch"
@@ -410,7 +457,7 @@ INT_LOG="$T/int.log"
 # signal ignored on entry cannot be trapped. Job control gives the job default
 # handlers, which is what a real Ctrl-C delivers.
 set -m
-SB_DMG_VERIFY_HOLD=4 "$VERIFY_DMG" "$REAL_DMG" > "$INT_LOG" 2>&1 &
+SB_DMG_VERIFY_HOLD=4 "$VERIFY_DMG" --expect-version "$FIXTURE_VERSION" "$FIX_DMG" > "$INT_LOG" 2>&1 &
 VERIFY_PID=$!
 set +m
 mounted=0
@@ -430,11 +477,11 @@ is "SIGINT still detaches the volume" "$(grep -m1 '^DMG_DETACHED=' "$INT_LOG")" 
 # and the exit code still has to be non-zero.
 DETACH_LOG="$T/detachfail.log"
 rc=0
-SB_DMG_DETACH_FAIL=1 "$VERIFY_DMG" "$REAL_DMG" > "$DETACH_LOG" 2>&1 || rc=$?
+SB_DMG_DETACH_FAIL=1 "$VERIFY_DMG" --expect-version "$FIXTURE_VERSION" "$FIX_DMG" > "$DETACH_LOG" 2>&1 || rc=$?
 is "an injected detach failure exits non-zero" "$rc" "1"
 is "an injected detach failure is not reported as detached" "$(grep -m1 '^DMG_DETACHED=' "$DETACH_LOG")" "DMG_DETACHED=false"
 has "the detach failure is named" "detach failure injected" "$DETACH_LOG"
-is "the injected failure leaves nothing attached" "$(/usr/bin/hdiutil info | grep -c "dist/SoundBridge-1.1.1.dmg")" "0"
+is "the injected failure leaves nothing attached" "$(/usr/bin/hdiutil info | grep -cF "$FIX_DMG")" "0"
 
 # SIGKILL is the boundary of what a shell trap can do. The run is killed with no
 # chance to clean up, the volume stays attached, and this script frees it. What
@@ -442,7 +489,7 @@ is "the injected failure leaves nothing attached" "$(/usr/bin/hdiutil info | gre
 # was survived.
 KILL_LOG="$T/kill.log"
 : > "$KILL_LOG"
-SB_DMG_VERIFY_HOLD=6 "$VERIFY_DMG" "$REAL_DMG" > "$KILL_LOG" 2>&1 &
+SB_DMG_VERIFY_HOLD=6 "$VERIFY_DMG" --expect-version "$FIXTURE_VERSION" "$FIX_DMG" > "$KILL_LOG" 2>&1 &
 VERIFY_PID=$!
 mounted=0
 for _ in $(seq 1 100); do
@@ -456,19 +503,19 @@ rc=0
 wait "$VERIFY_PID" || rc=$?
 is "SIGKILL ends the run with 137" "$rc" "137"
 is "no cleanup ran after SIGKILL" "$(grep -c '^DMG_DETACHED=' "$KILL_LOG")" "0"
-is "the volume is still attached after SIGKILL" "$(/usr/bin/hdiutil info | grep -F 'image-path' | grep -cF "$REAL_DMG")" "1"
+is "the volume is still attached after SIGKILL" "$(/usr/bin/hdiutil info | grep -F 'image-path' | grep -cF "$FIX_DMG")" "1"
 if [[ -n "$KILL_MNT" ]]; then
     /usr/bin/hdiutil detach "$KILL_MNT" -force >/dev/null 2>&1
     rmdir "$KILL_MNT" 2>/dev/null
     ok "the test freed the volume SIGKILL left behind"
 fi
-is "nothing is left attached after the test frees it" "$(/usr/bin/hdiutil info | grep -c "dist/SoundBridge-1.1.1.dmg")" "0"
+is "nothing is left attached after the test frees it" "$(/usr/bin/hdiutil info | grep -cF "$FIX_DMG")" "0"
 
 # ---------------------------------------------------------------- B-3 naming
 section "B-3: DMG naming and build path"
 APP100="$T/app-1.0.0"
 rm -rf "$APP100"
-/usr/bin/ditto "$REAL_APP" "$APP100"
+/usr/bin/ditto "$FIX_APP" "$APP100"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 1.0.0' "$APP100/Contents/Info.plist" >/dev/null 2>&1
 
 BUILD_LOG="$T/build.log"
@@ -489,7 +536,7 @@ is "a failed run leaves the previous image bytes intact" "$AFTER" "$BEFORE"
 
 BROKEN="$T/broken.app"
 rm -rf "$BROKEN"
-/usr/bin/ditto "$REAL_APP" "$BROKEN"
+/usr/bin/ditto "$FIX_APP" "$BROKEN"
 rm -f "$BROKEN/Contents/MacOS/SoundBridgeHost"
 rc=0
 make -s -C "$ROOT" dmg-precheck APP_BUNDLE="$BROKEN" > "$T/precheck.log" 2>&1 || rc=$?
@@ -568,20 +615,20 @@ run_four_way() {   # <dmg> -> exit code of the package check; writes $DMG_OUT, $
     report="$(image_report_path "$dmg")"
     rm -f "$report"
     "$VERIFY_DMG" --driver-report "$report" "$dmg" > "$DMG_OUT" 2>&1
-    "$VERIFY_PKG" --image-report "$report" "$REAL_PKG" > "$PKG_OUT" 2>&1 || rc=$?
+    "$VERIFY_PKG" --app "$FIX_APP" --image-report "$report" "$FIX_PKG" > "$PKG_OUT" 2>&1 || rc=$?
     echo "$rc"
 }
 
 section "B-6: the fourth copy, the driver inside the image"
-IMG_REPORT="$(image_report_path "$REAL_DMG")"
-rc="$(run_four_way "$REAL_DMG")"
+IMG_REPORT="$(image_report_path "$FIX_DMG")"
+rc="$(run_four_way "$FIX_DMG")"
 is "four copies on the real artifacts exit 0" "$rc" "0"
 is "all four copies agree" "$(grep -m1 '^DRIVER_FOUR_WAY_MATCH=' "$PKG_OUT")" "DRIVER_FOUR_WAY_MATCH=true"
 has "the four-way pass is stated" "all four driver trees are identical" "$PKG_OUT"
 has "the report names the copy inside the image" "D inside the image" "$PKG_OUT"
 # The claim rests on the manifest digest, so check it against the manifest the
 # package check prints for the bundle in dist/: same code, same bytes.
-DIST_MANIFEST_SHA="$("$VERIFY_PKG" --manifest-only "$REAL_APP/Contents/Resources/SoundBridgeDriver.driver" \
+DIST_MANIFEST_SHA="$("$VERIFY_PKG" --manifest-only "$FIX_APP/Contents/Resources/SoundBridgeDriver.driver" \
     | /usr/bin/shasum -a 256 | awk '{print $1}')"
 is "the image report describes the same tree as the bundle in dist/" \
     "$(grep -m1 '^DRIVER_TREE_SHA256=' "$IMG_REPORT" | cut -d= -f2)" "$DIST_MANIFEST_SHA"
@@ -590,13 +637,13 @@ is "the report counts every entry in the tree" \
 is "the report carries the executable hash" \
     "$(grep -m1 '^DRIVER_EXECUTABLE_SHA256=' "$IMG_REPORT" | cut -d= -f2 | wc -c | tr -d ' ')" "65"
 is "the report carries the protocol" \
-    "$(grep -m1 '^DRIVER_PROTOCOL=' "$IMG_REPORT" | cut -d= -f2)" "131328"
+    "$(grep -m1 '^DRIVER_PROTOCOL=' "$IMG_REPORT" | cut -d= -f2)" "$FIXTURE_PROTOCOL"
 
 # The bundle named with --app takes part even when the image is in play. A
 # driver that differs in dist/ must not be able to hide behind an image whose
 # copy still matches the package: the run fails, and the failing copy is named.
 rc=0
-"$VERIFY_PKG" --app "$APP_FIX/xmodfile/SoundBridge.app" --image-report "$IMG_REPORT" "$REAL_PKG" \
+"$VERIFY_PKG" --app "$APP_FIX/xmodfile/SoundBridge.app" --image-report "$IMG_REPORT" "$FIX_PKG" \
     > "$PKG_OUT" 2>&1 || rc=$?
 is "a different driver in dist/, with an image report, exits non-zero" "$rc" "1"
 is "the copy inside the image is not blamed for the difference in dist/" \
@@ -667,35 +714,40 @@ is "MV-13: it is NOT_VERIFIED rather than false" \
     "$(grep -m1 '^DRIVER_FOUR_WAY_MATCH=' "$PKG_OUT")" "DRIVER_FOUR_WAY_MATCH=NOT_VERIFIED"
 
 rc=0
-"$VERIFY_PKG" --image-report "$T/no-such-report.tsv" "$REAL_PKG" > "$PKG_OUT" 2>&1 || rc=$?
+"$VERIFY_PKG" --app "$FIX_APP" --image-report "$T/no-such-report.tsv" "$FIX_PKG" > "$PKG_OUT" 2>&1 || rc=$?
 is "a missing image report exits non-zero" "$rc" "1"
 is "a missing image report is NOT_VERIFIED" "$(grep -m1 '^DRIVER_FOUR_WAY_MATCH=' "$PKG_OUT")" "DRIVER_FOUR_WAY_MATCH=NOT_VERIFIED"
 has "a missing image report is named" "was never read" "$PKG_OUT"
 
 # Not asking is not the same as passing: a package-only run says SKIPPED.
-rc="$(run_pkg "$REAL_PKG")"
+rc="$(run_pkg "$FIX_PKG")"
 is "a package-only run reports the four-way as skipped" "$(grep -m1 '^DRIVER_FOUR_WAY_MATCH=' "$PKG_OUT")" "DRIVER_FOUR_WAY_MATCH=SKIPPED"
 has "the skip is stated as not a pass" "SKIPPED, not PASS" "$PKG_OUT"
-rc="$(run_pkg --pkg-only --image-report "$IMG_REPORT" "$REAL_PKG")"
+rc="$(run_pkg --pkg-only --image-report "$IMG_REPORT" "$FIX_PKG")"
 is "--pkg-only ignores an image report" "$(grep -m1 '^DRIVER_FOUR_WAY_MATCH=' "$PKG_OUT")" "DRIVER_FOUR_WAY_MATCH=SKIPPED"
 
 # The bundle the image check compares against is the one it was given.
 section "B-6: the bundle the image is checked against"
-rc="$(run_dmg --app "$APP100" "$REAL_DMG")"
+rc="$(run_dmg --app "$APP100" "$FIX_DMG")"
 is "a named bundle sets the expected version" "$rc" "1"
-has "the named bundle's version is the one compared" "app version is '1.1.1', expected 1.0.0" "$DMG_OUT"
+has "the named bundle's version is the one compared" \
+    "app version is '$FIXTURE_VERSION', expected 1.0.0" "$DMG_OUT"
 
-rc="$(run_dmg --app "$T/no-such-app/SoundBridge.app" "$REAL_DMG")"
+rc="$(run_dmg --app "$T/no-such-app/SoundBridge.app" "$FIX_DMG")"
 is "a named bundle that does not exist exits non-zero" "$rc" "1"
 has "there is no silent fallback for a named bundle" "there is no fallback to dist/" "$DMG_OUT"
 
-rc="$(run_dmg --app "$REAL_APP" "$REAL_DMG")"
+rc="$(run_dmg --app "$FIX_APP" "$FIX_DMG")"
 is "the real bundle still passes when named explicitly" "$rc" "0"
 
 # ---------------------------------------------------------------- B-5 entry
 section "B-5: unified entry point"
 ALL_OUT="$T/all.out"
-rc=0; "$VERIFY_ALL" > "$ALL_OUT" 2>&1 || rc=$?
+# Every run below names the fixture explicitly. Left to itself the entry point
+# would read dist/SoundBridge.app and dist/SoundBridge-<VERSION>.{pkg,dmg},
+# which is the coupling this section is meant to have moved away from.
+ALL_TARGETS=(--pkg "$FIX_PKG" --dmg "$FIX_DMG" --app "$FIX_APP" --version "$FIXTURE_VERSION")
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" > "$ALL_OUT" 2>&1 || rc=$?
 is "the unified entry exits 0 on the real artifacts" "$rc" "0"
 is "PKG_STRUCTURE" "$(grep -m1 '^  PKG_STRUCTURE=' "$ALL_OUT")" "  PKG_STRUCTURE=PASS"
 is "DRIVER_CONSISTENCY" "$(grep -m1 '^  DRIVER_CONSISTENCY=' "$ALL_OUT")" "  DRIVER_CONSISTENCY=PASS"
@@ -706,18 +758,18 @@ is "ARTIFACT_INTEGRITY" "$(grep -m1 '^  ARTIFACT_INTEGRITY=' "$ALL_OUT")" "  ART
 is "OVERALL_RESULT" "$(grep -m1 '^OVERALL_RESULT=' "$ALL_OUT")" "OVERALL_RESULT=PASS"
 is "the summary reports the four-way match" "$(grep -m1 '^  DRIVER_FOUR_WAY=' "$ALL_OUT")" "  DRIVER_FOUR_WAY=true"
 
-rc=0; "$VERIFY_ALL" --skip-dmg > "$T/all-skipdmg.out" 2>&1 || rc=$?
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" --skip-dmg > "$T/all-skipdmg.out" 2>&1 || rc=$?
 is "skipping the image exits non-zero" "$rc" "1"
 is "a skipped stage is NOT_VERIFIED" "$(grep -m1 '^  DMG_STRUCTURE=' "$T/all-skipdmg.out")" "  DMG_STRUCTURE=NOT_VERIFIED"
 has "the overall result is not PASS" "OVERALL_RESULT=NOT_VERIFIED" "$T/all-skipdmg.out"
 is "a skipped image leaves the four-way comparison skipped" \
     "$(grep -m1 '^  DRIVER_FOUR_WAY=' "$T/all-skipdmg.out")" "  DRIVER_FOUR_WAY=SKIPPED"
 
-rc=0; "$VERIFY_ALL" --pkg "$T/fixtures/does-not-exist.pkg" > "$T/all-nopkg.out" 2>&1 || rc=$?
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" --pkg "$T/fixtures/does-not-exist.pkg" > "$T/all-nopkg.out" 2>&1 || rc=$?
 is "a missing package exits non-zero" "$rc" "1"
 is "a missing package is NOT_VERIFIED" "$(grep -m1 '^  PKG_STRUCTURE=' "$T/all-nopkg.out")" "  PKG_STRUCTURE=NOT_VERIFIED"
 
-rc=0; "$VERIFY_ALL" --pkg "$T/fixtures/modfile.pkg" > "$T/all-badpkg.out" 2>&1 || rc=$?
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" --pkg "$T/fixtures/modfile.pkg" > "$T/all-badpkg.out" 2>&1 || rc=$?
 is "a damaged package exits non-zero" "$rc" "1"
 is "a damaged package fails DRIVER_CONSISTENCY" "$(grep -m1 '^  DRIVER_CONSISTENCY=' "$T/all-badpkg.out")" "  DRIVER_CONSISTENCY=FAIL"
 has "the overall result is FAIL" "OVERALL_RESULT=FAIL" "$T/all-badpkg.out"
@@ -726,24 +778,24 @@ has "the overall result is FAIL" "OVERALL_RESULT=FAIL" "$T/all-badpkg.out"
 # The name has to match so the run fails for the driver reason, not because of a
 # rename; only the image stage sees a different file.
 mkdir -p "$T/mvdmg" "$T/corruptdir"
-cp "$T/fixtures/mv4driver.dmg" "$T/mvdmg/SoundBridge-1.1.1.dmg"
-cp "$T/fixtures/mv11corrupt.dmg" "$T/corruptdir/SoundBridge-1.1.1.dmg"
+cp "$T/fixtures/mv4driver.dmg" "$T/mvdmg/SoundBridge-$FIXTURE_VERSION.dmg"
+cp "$T/fixtures/mv11corrupt.dmg" "$T/corruptdir/SoundBridge-$FIXTURE_VERSION.dmg"
 
-rc=0; "$VERIFY_ALL" --dmg "$T/mvdmg/SoundBridge-1.1.1.dmg" > "$T/all-baddmg.out" 2>&1 || rc=$?
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" --dmg "$T/mvdmg/SoundBridge-$FIXTURE_VERSION.dmg" > "$T/all-baddmg.out" 2>&1 || rc=$?
 is "an image with a different driver exits non-zero" "$rc" "1"
 is "it fails DRIVER_CONSISTENCY" "$(grep -m1 '^  DRIVER_CONSISTENCY=' "$T/all-baddmg.out")" "  DRIVER_CONSISTENCY=FAIL"
 is "the summary reports the failed four-way" "$(grep -m1 '^  DRIVER_FOUR_WAY=' "$T/all-baddmg.out")" "  DRIVER_FOUR_WAY=false"
 has "the overall result is FAIL" "OVERALL_RESULT=FAIL" "$T/all-baddmg.out"
 
 # MV-14: the detach fails though every check passed, and that is still a failure.
-rc=0; SB_DMG_DETACH_FAIL=1 "$VERIFY_ALL" > "$T/all-detach.out" 2>&1 || rc=$?
+rc=0; SB_DMG_DETACH_FAIL=1 "$VERIFY_ALL" "${ALL_TARGETS[@]}" > "$T/all-detach.out" 2>&1 || rc=$?
 is "MV-14: a failing detach exits non-zero" "$rc" "1"
 is "MV-14: the image stage is FAIL" "$(grep -m1 '^  DMG_STRUCTURE=' "$T/all-detach.out")" "  DMG_STRUCTURE=FAIL"
 has "MV-14: the overall result is FAIL" "OVERALL_RESULT=FAIL" "$T/all-detach.out"
 
 # An image that cannot be read at all: the image stage fails, and the driver
 # stage says NOT_VERIFIED rather than claiming a difference nobody saw.
-rc=0; "$VERIFY_ALL" --dmg "$T/corruptdir/SoundBridge-1.1.1.dmg" > "$T/all-corrupt.out" 2>&1 || rc=$?
+rc=0; "$VERIFY_ALL" "${ALL_TARGETS[@]}" --dmg "$T/corruptdir/SoundBridge-$FIXTURE_VERSION.dmg" > "$T/all-corrupt.out" 2>&1 || rc=$?
 is "an unreadable image exits non-zero" "$rc" "1"
 is "an unreadable image fails the image stage" "$(grep -m1 '^  DMG_STRUCTURE=' "$T/all-corrupt.out")" "  DMG_STRUCTURE=FAIL"
 is "an unreadable image leaves the driver stage NOT_VERIFIED" \
@@ -758,6 +810,116 @@ has "verify-dmg receives APP_BUNDLE" 'verify_dmg_contents.sh --app "dist/scratch
 make -n -C "$ROOT" verify-payload APP_BUNDLE=dist/scratch.app > "$T/n5.log" 2>&1
 has "verify-payload receives APP_BUNDLE" 'verify_release_payload.sh --app "dist/scratch.app"' "$T/n5.log"
 
+# ------------------------------------------------------------------ B-7 VERSION
+#
+# The defect these cases pin down: the three verifiers used to take their
+# default target from dist/SoundBridge.app. A stale bundle left in dist/
+# therefore selected the matching old {pkg,dmg} beside it, and that old pair
+# agreed with itself while the tree said something else -- a release nobody
+# built passed every check. The fix is that the repository's VERSION file names
+# the release and the bundle is compared, not consulted.
+#
+# Everything below runs in a scratch tree ($FAKE) that mirrors the repository
+# layout: its own VERSION, its own tools/, a symlink to the real packages/ (for
+# the protocol header and the host plist), and a dist/ that holds an older
+# release's artifacts and bundle. That older release is the fixture renamed to
+# OLD_VERSION; nothing here reads the real dist/.
+section "B-7: the release target comes from VERSION, not from dist/"
+
+FAKE="$T/fakeroot"
+rm -rf "$FAKE"
+mkdir -p "$FAKE/tools" "$FAKE/dist"
+/bin/cp "$ROOT"/tools/*.sh "$FAKE/tools/" || bad "could not copy the tools into the scratch tree"
+ln -s "$ROOT/packages" "$FAKE/packages"
+printf '2.0.0\n' > "$FAKE/VERSION"
+# An older release: two names for the listing case, and a real bundle whose
+# versions say so, so the stale-version guard has something to compare. The
+# bundle is a copy (not a link) because those plists are edited -- both of them,
+# since the guard reads the driver's and a half-edited pair would fail as an
+# inconsistent bundle instead of as the stale release this case is about.
+ln -s "$FIX_PKG" "$FAKE/dist/SoundBridge-$OLD_VERSION.pkg"
+ln -s "$FIX_DMG" "$FAKE/dist/SoundBridge-$OLD_VERSION.dmg"
+STALE_APP="$FAKE/dist/SoundBridge.app"
+/bin/cp -R "$FIX_APP" "$STALE_APP"
+for plist in "$STALE_APP/Contents/Info.plist" \
+             "$STALE_APP/Contents/Resources/SoundBridgeDriver.driver/Contents/Info.plist"; do
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $OLD_VERSION" "$plist" >/dev/null
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $OLD_VERSION" "$plist" >/dev/null
+done
+
+DIST_BEFORE="$(/usr/bin/shasum -a 256 "$FIX_PKG" "$FIX_DMG" | awk '{print $1}' | tr '\n' ' ')"
+
+# 1-2: the package check picks the file the VERSION file names.
+rc=0; "$FAKE/tools/verify_pkg_contents.sh" --print-target > "$T/b7-pkg.out" 2>&1 || rc=$?
+is "B-7.1 the package target is named by VERSION" \
+    "$(sed -n 's|^PKG=.*/\(SoundBridge-[^/]*\.pkg\)$|\1|p' "$T/b7-pkg.out" | head -1)" "SoundBridge-2.0.0.pkg"
+hasnt "B-7.2 --print-target reads nothing" "Verifying" "$T/b7-pkg.out"
+
+# 3-5: the image check resolves the same version and names where it came from.
+rc=0; "$FAKE/tools/verify_dmg_contents.sh" --print-target > "$T/b7-dmg.out" 2>&1 || rc=$?
+is "B-7.3 the image version comes from the VERSION file" \
+    "$(grep -m1 '^VERSION=' "$T/b7-dmg.out")" "VERSION=2.0.0"
+is "B-7.4 the image target is named by VERSION" \
+    "$(sed -n 's|^DMG=.*/\(SoundBridge-[^/]*\.dmg\)$|\1|p' "$T/b7-dmg.out" | head -1)" "SoundBridge-2.0.0.dmg"
+is "B-7.5 the source of the expectation is stated" \
+    "$(grep -m1 '^VERSION_SOURCE=' "$T/b7-dmg.out")" "VERSION_SOURCE=VERSION file"
+hasnt "B-7.6 --print-target mounts nothing" "mounted read-only" "$T/b7-dmg.out"
+
+# 7-8: the unified entry point resolves both artifacts from the same version.
+rc=0; "$FAKE/tools/verify_release_payload.sh" --print-target > "$T/b7-all.out" 2>&1 || rc=$?
+is "B-7.7 the payload version comes from the VERSION file" \
+    "$(grep -m1 '^VERSION=' "$T/b7-all.out")" "VERSION=2.0.0"
+is "B-7.8 both artifacts follow that version" \
+    "$(grep -cE '^(PKG|DMG)=.*SoundBridge-2\.0\.0\.(pkg|dmg)$' "$T/b7-all.out")" "2"
+
+# 9: an explicit --version still wins over the file.
+rc=0; "$FAKE/tools/verify_release_payload.sh" --version 1.9.9 --print-target > "$T/b7-override.out" 2>&1 || rc=$?
+is "B-7.9 --version overrides the VERSION file" \
+    "$(grep -m1 '^VERSION=' "$T/b7-override.out")" "VERSION=1.9.9"
+is "B-7.10 the override is named as the source" \
+    "$(grep -m1 '^VERSION_SOURCE=' "$T/b7-override.out")" "VERSION_SOURCE=--version"
+
+# 11-13: the file the tree names does not exist. That is a failure that lists
+# what is in dist/, not a redirect to whichever package is there.
+rc=0; "$FAKE/tools/verify_pkg_contents.sh" > "$T/b7-missing.out" 2>&1 || rc=$?
+is "B-7.11 a missing current package exits non-zero" "$rc" "1"
+has "B-7.12 the missing target is named" "package not found" "$T/b7-missing.out"
+has "B-7.13 the packages that are there are listed" "SoundBridge-$OLD_VERSION.pkg" "$T/b7-missing.out"
+hasnt "B-7.14 another package is not substituted for it" "Verifying package contents" "$T/b7-missing.out"
+
+# 15-17: a stale bundle next to current artifacts is a version failure. It is
+# also the selector that hid this: the run must not fall back to OLD_VERSION.
+rc=0; "$FAKE/tools/verify_release_payload.sh" --skip-dmg > "$T/b7-stale.out" 2>&1 || rc=$?
+is "B-7.15 a stale bundle in dist/ exits non-zero" "$rc" "1"
+is "B-7.16 it fails VERSION_CONSISTENCY" \
+    "$(grep -m1 '^  VERSION_CONSISTENCY=' "$T/b7-stale.out")" "  VERSION_CONSISTENCY=FAIL"
+has "B-7.17 the stale bundle is named" "stale bundle in dist/" "$T/b7-stale.out"
+
+# 18-19: the release guard's expectation is the tree's version too, so
+# `make release-verify` no longer passes when the expectation is unset.
+rc=0; "$FAKE/tools/verify_release_bundle.sh" > "$T/b7-bundle.out" 2>&1 || rc=$?
+is "B-7.18 the release guard now fails on a stale bundle" "$rc" "1"
+has "B-7.19 it names both versions" "bundle version '$OLD_VERSION' != expected '2.0.0'" "$T/b7-bundle.out"
+has "B-7.20 it says where the expectation came from" "(from VERSION file)" "$T/b7-bundle.out"
+
+# 21-23: the make targets hand their version to each verifier, so the shell
+# default is not the only place the release is named.
+ROOT_VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || true)"
+make -n -C "$ROOT" verify-pkg > "$T/b7-mk-pkg.log" 2>&1
+has "B-7.21 verify-pkg hands VERSION to the package check" \
+    "verify_pkg_contents.sh --app \"dist/SoundBridge.app\" --version \"$ROOT_VERSION\"" "$T/b7-mk-pkg.log"
+make -n -C "$ROOT" verify-dmg > "$T/b7-mk-dmg.log" 2>&1
+has "B-7.22 verify-dmg hands VERSION to the image check" \
+    "verify_dmg_contents.sh --app \"dist/SoundBridge.app\" --expect-version \"$ROOT_VERSION\"" "$T/b7-mk-dmg.log"
+make -n -C "$ROOT" verify-payload > "$T/b7-mk-all.log" 2>&1
+has "B-7.23 verify-payload hands VERSION to the unified check" \
+    "verify_release_payload.sh --app \"dist/SoundBridge.app\" --version \"$ROOT_VERSION\"" "$T/b7-mk-all.log"
+
+# The fixture artifacts are read, never rewritten: the whole point is to stop
+# verifying the wrong file, not to delete the old ones.
+DIST_AFTER="$(/usr/bin/shasum -a 256 "$FIX_PKG" "$FIX_DMG" | awk '{print $1}' | tr '\n' ' ')"
+is "B-7.24 the fixture artifacts were not written" "$DIST_AFTER" "$DIST_BEFORE"
+
 section "mount hygiene"
 leftover_mounts=0
 for m in "$T"/soundbridge-dmg.*; do
@@ -768,7 +930,7 @@ for m in "$T"/soundbridge-dmg.*; do
     bad "a verify run left a mount point behind: $m"
 done
 if [[ "$leftover_mounts" -eq 0 ]]; then ok "no verify run left a mount point behind"; fi
-images="$(/usr/bin/hdiutil info | grep -c 'SoundBridge-1.1.1.dmg')"
+images="$(/usr/bin/hdiutil info | grep -cF "$FIX_DMG")"
 is "no SoundBridge image is still attached" "$images" "0"
 
 echo ""

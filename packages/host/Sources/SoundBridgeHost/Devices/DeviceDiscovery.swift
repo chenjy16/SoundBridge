@@ -16,8 +16,34 @@ struct PhysicalDevice {
     let isFixedVolume: Bool  // true = no hardware volume control
 }
 
+/// Result of one enumeration pass.
+///
+/// `enumeratePhysicalDevices()` returns `[]` both when the machine has no output
+/// device and when the HAL query itself failed. A caller deciding whether to
+/// rewrite the control file — and thereby remove every proxy the driver
+/// published — has to tell those apart, so the status is reported explicitly
+/// instead of being inferred from an empty array.
+struct PhysicalDeviceEnumeration {
+    var devices: [PhysicalDevice]
+    /// The HAL query failed. `devices` carries no information about the machine.
+    var queryFailed: Bool
+    /// Devices the HAL listed before filtering, for diagnostics.
+    var totalAudioDeviceCount: Int
+    /// 原始设备列表查询错误；失败时不能把空数组当作有效快照。
+    var queryStatus: OSStatus? = nil
+
+    static func failedQuery(_ status: OSStatus) -> PhysicalDeviceEnumeration {
+        PhysicalDeviceEnumeration(devices: [], queryFailed: true, totalAudioDeviceCount: 0, queryStatus: status)
+    }
+}
+
 class DeviceDiscovery {
     func enumeratePhysicalDevices() -> [PhysicalDevice] {
+        return enumeratePhysicalDevicesWithStatus().devices
+    }
+
+    /// Enumerate, keeping the difference between "nothing there" and "could not ask".
+    func enumeratePhysicalDevicesWithStatus() -> PhysicalDeviceEnumeration {
         var devices: [PhysicalDevice] = []
 
         print("[DeviceEnum] ===== ENUMERATING AUDIO DEVICES =====")
@@ -29,15 +55,16 @@ class DeviceDiscovery {
         )
 
         var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
+        let sizeStatus = AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject),
             &propertyAddress,
             0,
             nil,
             &dataSize
-        ) == noErr else {
-            logger.error("Failed to get device list size")
-            return devices
+        )
+        guard sizeStatus == noErr else {
+            logger.error("Failed to get device list size (OSStatus: \(sizeStatus))")
+            return .failedQuery(sizeStatus)
         }
 
         let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
@@ -45,19 +72,22 @@ class DeviceDiscovery {
 
         var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
 
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &dataSize,
-            &deviceIDs
-        ) == noErr else {
-            logger.error("Failed to get device list")
-            return devices
+        if deviceCount > 0 {
+            let listStatus = AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &propertyAddress,
+                0,
+                nil,
+                &dataSize,
+                &deviceIDs
+            )
+            guard listStatus == noErr else {
+                logger.error("Failed to get device list (OSStatus: \(listStatus))")
+                return .failedQuery(listStatus)
+            }
         }
 
-        for (index, deviceID) in deviceIDs.enumerated() {
+        for (index, deviceID) in deviceIDs.prefix(Int(dataSize) / MemoryLayout<AudioDeviceID>.size).enumerated() {
             print("[DeviceEnum] --- Checking device \(index + 1)/\(deviceCount) (ID: \(deviceID)) ---")
 
             guard let name = getDeviceName(deviceID) else {
@@ -142,7 +172,11 @@ class DeviceDiscovery {
         let validatedCount = devices.filter { $0.validationPassed }.count
         let fixedVolumeCount = devices.filter { $0.isFixedVolume }.count
         print("[DeviceEnum] ===== ENUMERATION COMPLETE: \(devices.count) devices accepted (\(validatedCount) validated, \(fixedVolumeCount) fixed-volume) =====")
-        return devices
+        return PhysicalDeviceEnumeration(
+            devices: devices,
+            queryFailed: false,
+            totalAudioDeviceCount: deviceCount
+        )
     }
 
     func transportTypeName(_ type: UInt32) -> String {

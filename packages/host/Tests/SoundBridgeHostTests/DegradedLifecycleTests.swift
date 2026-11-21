@@ -255,7 +255,7 @@ final class DegradedLifecycleTests: XCTestCase {
         let path = "\(sandbox.path)/soundbridge-\(uid)"
         let persistence = SandboxPersistence()
 
-        let firstRun = SharedMemoryManager(pathForUID: { _ in path })
+        let firstRun = SharedMemoryManager(sessionID: UUID(), pathForUID: { _ in path })
         XCTAssertEqual(firstRun.createMemory(for: uid, persistence: persistence), .created)
         XCTAssertNotNil(firstRun.getMemory(for: uid))
 
@@ -282,7 +282,7 @@ final class DegradedLifecycleTests: XCTestCase {
 
         // Relaunch: a fresh manager over the same path must rebuild rather than
         // adopt a half-torn-down file.
-        let secondRun = SharedMemoryManager(pathForUID: { _ in path })
+        let secondRun = SharedMemoryManager(sessionID: UUID(), pathForUID: { _ in path })
         XCTAssertEqual(secondRun.createMemory(for: uid, persistence: persistence), .created,
                        "a clean teardown leaves nothing to recover, so this is a fresh mapping")
         let mem = try XCTUnwrap(secondRun.getMemory(for: uid))
@@ -302,7 +302,7 @@ final class DegradedLifecycleTests: XCTestCase {
         // Host that still looked alive to the driver.
         let uid = "degraded-heartbeat-\(UUID().uuidString)"
         let path = "\(sandbox.path)/soundbridge-\(uid)"
-        let manager = SharedMemoryManager(pathForUID: { _ in path })
+        let manager = SharedMemoryManager(sessionID: UUID(), pathForUID: { _ in path })
 
         XCTAssertEqual(manager.createMemory(for: uid, persistence: SandboxPersistence()), .created)
         let mem = try XCTUnwrap(manager.getMemory(for: uid))

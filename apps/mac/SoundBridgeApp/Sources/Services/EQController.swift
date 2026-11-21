@@ -75,9 +75,16 @@ class EQController: ObservableObject {
 
     let deviceUID: String
 
-    /// Shared memory pointer — nil when device not connected.
-    private var sharedMemory: UnsafeMutablePointer<RFSharedAudio>?
-    private var shmSize: Int = 0
+    /// The App's single shared-memory mapping, owned by
+    /// `SharedMemoryMappingManager` rather than by this controller.
+    ///
+    /// P2 Batch 3: the controller used to hold a raw pointer and a size and to
+    /// `munmap` them itself. That is exactly what let it keep writing into an
+    /// inode the Host had already replaced. `nil` in the lightweight test
+    /// initialiser, where property tests exercise band mapping and persistence,
+    /// not I/O.
+    private let mapping: SharedMemoryMappingManager?
+    private var mappingCancellables = Set<AnyCancellable>()
 
     // MARK: - Published State (UI 60Hz responsive)
 
@@ -108,24 +115,43 @@ class EQController: ObservableObject {
     private var lastTreble: Float = 0.0
     private var lastBypass: Bool = false
 
+    // MARK: - Recovery State
+
+    /// The incarnation these slider values were last written into.
+    ///
+    /// `SharedMemoryMappingManager` numbers publications monotonically, so this
+    /// is also the de-duplication key: a repeated notification for a mapping
+    /// that already holds these values is a no-op instead of another write.
+    private var appliedGeneration: UInt64 = 0
+
+    /// The generation the last successful write reached, or `nil` after the
+    /// mapping was retired. Exposed for tests and diagnostics.
+    private(set) var lastAppliedGeneration: UInt64?
+
+    /// Whether the values on screen are known to be inside the live mapping.
+    /// `false` means "persisted but not applied" — the UI must not claim more.
+    @Published private(set) var isAppliedToCurrentMapping = false
+
     // MARK: - Combine Pipeline
 
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
-    init(deviceUID: String, sharedMemory: UnsafeMutablePointer<RFSharedAudio>? = nil) {
+    init(deviceUID: String, mapping: SharedMemoryMappingManager? = .shared) {
         self.deviceUID = deviceUID
-        self.sharedMemory = sharedMemory
+        self.mapping = mapping
         setupThrottledPipeline()
         loadFromUserDefaults()
+        observeMapping()
     }
 
-    /// Lightweight initializer for testing — skips Combine pipeline and UserDefaults loading.
-    /// Use only in unit/property tests where Combine infrastructure is not needed.
+    /// Lightweight initializer for testing — skips the Combine pipeline, the
+    /// UserDefaults load and the mapping subscription.
+    /// Use only in unit/property tests where none of that infrastructure is needed.
     init(testDeviceUID: String) {
         self.deviceUID = testDeviceUID
-        self.sharedMemory = nil
+        self.mapping = nil
     }
 
     // MARK: - Gain Clamping (Sub-task 1.4)
@@ -275,15 +301,25 @@ class EQController: ObservableObject {
                 logger.debug("EQ update: bass=\(bass, privacy: .public) mids=\(mids, privacy: .public) treble=\(treble, privacy: .public) preamp=\(preamp, privacy: .public) bypass=\(bypass, privacy: .public)")
 
                 // Write EQ state to shared memory
-                self.writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
+                let result = self.writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
 
-                // Update cache after successful processing
-                self.lastBass = bass
-                self.lastMids = mids
-                self.lastTreble = treble
-                self.lastBypass = bypass
+                // Only a landed write makes the cache current. A skipped write
+                // leaves the difference visible, so the values are re-sent when
+                // a mapping appears instead of being treated as delivered.
+                if case .written(let generation) = result {
+                    self.lastBass = bass
+                    self.lastMids = mids
+                    self.lastTreble = treble
+                    self.lastBypass = bypass
+                    self.appliedGeneration = generation
+                    self.lastAppliedGeneration = generation
+                    self.isAppliedToCurrentMapping = true
+                } else {
+                    self.isAppliedToCurrentMapping = false
+                }
 
-                // Persist EQ state to UserDefaults
+                // The user's values are persisted either way: they are the
+                // source of truth the next incarnation is restored from.
                 self.saveToUserDefaults()
             }
             .store(in: &cancellables)
@@ -336,76 +372,85 @@ class EQController: ObservableObject {
 
     // MARK: - Shared Memory Attachment
 
-    /// Attach to the Host's shared memory file for a given device UID.
-    /// The Host creates `/tmp/soundbridge-{sanitized_uid}` via mmap.
-    /// The App opens the same file read-write to write EQ snapshots.
+    /// Point the App's mapping at the Host's file for `deviceUID`.
+    ///
+    /// P2 Batch 3: this no longer opens, maps or unmaps anything here. It asks
+    /// `SharedMemoryMappingManager` for the current incarnation, which validates
+    /// the identity before publishing and only re-attaches when the inode
+    /// actually changed. Repeating it for the same incarnation is a cheap no-op,
+    /// which is why the existing call site in the menu bar is harmless.
     func attachSharedMemory(for deviceUID: String) {
-        // Detach previous mapping if any
-        detachSharedMemory()
-
-        let safeUID = deviceUID
-            .replacingOccurrences(of: ":", with: "_")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: " ", with: "_")
-        let shmPath = "/tmp/soundbridge-\(safeUID)"
-
-        guard FileManager.default.fileExists(atPath: shmPath) else {
-            logger.warning("Shared memory file not found: \(shmPath, privacy: .public)")
-            return
-        }
-
-        let fd = open(shmPath, O_RDWR)
-        guard fd >= 0 else {
-            logger.error("Failed to open shared memory: \(String(cString: strerror(errno)), privacy: .public)")
-            return
-        }
-
-        // Get file size to determine mmap length
-        var stat = stat()
-        guard fstat(fd, &stat) == 0 else {
-            logger.error("fstat failed: \(String(cString: strerror(errno)), privacy: .public)")
-            close(fd)
-            return
-        }
-
-        let fileSize = Int(stat.st_size)
-        guard fileSize >= MemoryLayout<RFSharedAudio>.size else {
-            logger.error("Shared memory file too small: \(fileSize) bytes")
-            close(fd)
-            return
-        }
-
-        let mem = mmap(nil, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
-        close(fd)
-
-        guard mem != MAP_FAILED, let validMem = mem else {
-            logger.error("mmap failed: \(String(cString: strerror(errno)), privacy: .public)")
-            return
-        }
-
-        sharedMemory = validMem.assumingMemoryBound(to: RFSharedAudio.self)
-        shmSize = fileSize
-        logger.info("EQ attached to shared memory: \(shmPath, privacy: .public) (\(fileSize) bytes)")
-
-        // Immediately flush current EQ state to shared memory
-        flushToSharedMemory()
+        mapping?.requestAttach(for: deviceUID)
     }
 
-    /// Detach from shared memory (unmap).
-    func detachSharedMemory() {
-        guard let mem = sharedMemory else { return }
-        if shmSize > 0 {
-            munmap(mem, shmSize)
+    /// Re-apply the user's EQ state whenever a new incarnation becomes current.
+    ///
+    /// The EQ block belongs to the App — `rf_store_eq_snapshot` has no other
+    /// caller, and the Host only reads it — so a mapping the Host just created
+    /// starts flat and the current slider values have to be written back. This is
+    /// also the pending-state mechanism: values set while no mapping existed live
+    /// in the published properties and in UserDefaults, and they land here.
+    private func observeMapping() {
+        guard let mapping else { return }
+        mapping.mappingPublished
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, generation in
+                self?.applyIfNeeded(generation: generation)
+            }
+            .store(in: &mappingCancellables)
+
+        mapping.mappingUnavailable
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                guard let self else { return }
+                // The Host retired the file or went away. Nothing holds these
+                // values any more, and the UI must stop claiming that it does.
+                self.lastAppliedGeneration = nil
+                self.isAppliedToCurrentMapping = false
+            }
+            .store(in: &mappingCancellables)
+
+        // `mappingPublished` is a PassthroughSubject: a publication that happened
+        // before this subscription is not replayed, and that is the normal case at
+        // launch — `SharedMemoryMappingManager.start()` attaches from the App
+        // delegate before the menu bar view creates this controller. Ask the
+        // manager for the incarnation it holds right now instead of assuming the
+        // notification will arrive. `applyIfNeeded` de-duplicates, so this costs a
+        // write only when the mapping genuinely does not have these values yet.
+        if mapping.isAvailable {
+            applyIfNeeded(generation: mapping.currentGeneration)
         }
-        sharedMemory = nil
-        shmSize = 0
     }
+
+    /// Publish the current slider values into `generation` unless they are already there.
+    ///
+    /// Runs for the incarnation present at construction and for every later
+    /// incarnation change, so a Host restart (new inode, new epoch, new
+    /// generation) re-applies the persisted EQ without restarting the App.
+    private func applyIfNeeded(generation: UInt64) {
+        guard generation > 0, generation != appliedGeneration else { return }
+
+        switch flushToSharedMemory() {
+        case .written(let written):
+            appliedGeneration = written
+            lastAppliedGeneration = written
+            isAppliedToCurrentMapping = true
+        case .unavailable:
+            // Retired between the notification and the write. The next
+            // publication retries; nothing is reported as applied.
+            isAppliedToCurrentMapping = false
+        }
+    }
+
+    /// Whether EQ writes actually reach a live mapping right now.
+    var isMappingAvailable: Bool { mapping?.isAvailable ?? false }
 
     // MARK: - Shared Memory Write (Phase 2)
 
-    /// Write current EQ state to shared memory via RFEQSnapshot.
-    private func writeToSharedMemory(bandGains: [Float], preamp: Float, bypass: Bool) {
-        guard let mem = sharedMemory else { return }
+    /// Build a snapshot from the three-band state and hand it to the manager.
+    @discardableResult
+    private func writeToSharedMemory(bandGains: [Float], preamp: Float, bypass: Bool) -> SharedMemoryWriteResult {
+        guard let mapping else { return .unavailable }
 
         var snapshot = RFEQSnapshot()
         withUnsafeMutablePointer(to: &snapshot.bands) { ptr in
@@ -418,14 +463,25 @@ class EQController: ObservableObject {
         snapshot.preamp = preamp
         snapshot.bypass = bypass
 
-        rf_store_eq_snapshot(mem, &snapshot)
+        let result = mapping.writeEQSnapshot(snapshot)
+        if case .unavailable = result {
+            // Not something the user can act on: the Host is not running. The
+            // values stay in `bass` / `mids` / `treble` and in UserDefaults, and
+            // `observeMapping()` writes them once a mapping exists.
+            logger.notice("EQ write skipped: no active mapping")
+        }
+        return result
     }
 
     // MARK: - Flush to Shared Memory (Sub-task 1.9)
 
     /// Immediately sync current state to shared memory, bypassing throttle and change detection.
-    /// Phase 1: no-op. Phase 2: will compute and write via SeqLock.
-    func flushToSharedMemory() {
+    ///
+    /// Returns the write result so callers can tell "applied to this incarnation"
+    /// from "no mapping yet". The cache is only advanced on a landed write, which
+    /// keeps a skipped attempt visible as a difference to be re-sent later.
+    @discardableResult
+    func flushToSharedMemory() -> SharedMemoryWriteResult {
         let bandGains = EQController.computeBandGains(bass: bass, mids: mids, treble: treble)
         let preamp = EQController.computeAutoGainCompensation(bass: bass, mids: mids, treble: treble)
         let bypass = !isEnabled
@@ -433,9 +489,14 @@ class EQController: ObservableObject {
         logger.debug("EQ flush: bass=\(self.bass, privacy: .public) mids=\(self.mids, privacy: .public) treble=\(self.treble, privacy: .public) preamp=\(preamp, privacy: .public) bypass=\(bypass, privacy: .public)")
 
         // Write immediately to shared memory, bypassing throttle
-        writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
+        let result = writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
 
-        // Force-update cache so the throttled pipeline doesn't re-send
-        updateCache()
+        // Force-update cache only when the write really landed, so the throttled
+        // pipeline does not re-send values that are already inside the mapping
+        // and does not mark a skipped attempt as delivered.
+        if case .written = result {
+            updateCache()
+        }
+        return result
     }
 }

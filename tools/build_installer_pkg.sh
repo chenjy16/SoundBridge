@@ -403,6 +403,83 @@ for script in preinstall postinstall; do
     /bin/bash -n "$SCRIPTS/$script" || fail "generated $script has a syntax error"
 done
 
+# --- component plist ---------------------------------------------------------
+# pkgbuild infers which bundles the payload carries and defaults them to
+# BundleIsRelocatable=true on build hosts older than macOS 27. That flag lets
+# Installer ignore the payload path: it searches the target volume for a bundle
+# with the same identifier and upgrades that copy instead. 1.2.0 shipped that
+# way. On a machine with a checkout of this repository under $HOME, Installer
+# found dist/SoundBridge.app there and installed over it -- /Applications was
+# never created, and the user had no way to know where the app went.
+#
+# It also matters for the driver: relocation matches by identifier, and the live
+# driver at /Library/Audio/Plug-Ins/HAL carries the same one. A relocatable
+# staged driver could be written straight to the HAL directory by Installer,
+# which is the layout the whole transaction exists to avoid.
+#
+# BundleIsVersionChecked=false moves every version decision to preinstall. That
+# gate already refuses downgrades and protocol changes, and it is the only place
+# that knows the protocol rule outranks the version comparison. Installer's own
+# check runs before it, on whichever bundle relocation found, so leaving it on
+# would mean two independent judges -- and the right one is not the first.
+#
+# Neither flag is set by deleting <relocate> or <upgrade-bundle> from a finished
+# PackageInfo: those are outputs of this analysis, and editing them afterwards
+# would leave the Bom and the PackageInfo describing different packages.
+COMPONENT_PLIST="$WORK/component.plist"
+/usr/bin/pkgbuild --analyze --root "$PAYLOAD" "$COMPONENT_PLIST" >/dev/null \
+    || fail "pkgbuild --analyze failed"
+
+# Walks the inferred plist -- top-level bundles and their ChildBundles -- and
+# pins both flags. The plist is nested, so this recurses rather than assuming a
+# shape: Sparkle brings its own Updater.app and XPC services, and a payload
+# change must not silently leave one of them relocatable.
+set_bundle_flags() {
+    local path="$1" child=0
+    /usr/libexec/PlistBuddy -c "Set $path:BundleIsRelocatable false" "$COMPONENT_PLIST" >/dev/null 2>&1 \
+        || /usr/libexec/PlistBuddy -c "Add $path:BundleIsRelocatable bool false" "$COMPONENT_PLIST" >/dev/null
+    /usr/libexec/PlistBuddy -c "Set $path:BundleIsVersionChecked false" "$COMPONENT_PLIST" >/dev/null 2>&1 \
+        || /usr/libexec/PlistBuddy -c "Add $path:BundleIsVersionChecked bool false" "$COMPONENT_PLIST" >/dev/null
+    while /usr/libexec/PlistBuddy -c "Print $path:ChildBundles:$child:RootRelativeBundlePath" "$COMPONENT_PLIST" >/dev/null 2>&1; do
+        set_bundle_flags "$path:ChildBundles:$child"
+        child=$((child + 1))
+    done
+}
+
+bundle_index=0
+while /usr/libexec/PlistBuddy -c "Print :$bundle_index:RootRelativeBundlePath" "$COMPONENT_PLIST" >/dev/null 2>&1; do
+    set_bundle_flags ":$bundle_index"
+    bundle_index=$((bundle_index + 1))
+done
+
+# An empty plist would make pkgbuild fall back to its own inference, silently
+# undoing everything above, so an app bundle with no entry is a build failure.
+[[ "$bundle_index" -gt 0 ]] || fail "pkgbuild --analyze found no bundles in the payload"
+
+# Read the flags back instead of trusting the writes above: PlistBuddy reports a
+# missing key and a missing parent differently, and a key that silently did not
+# land would ship exactly the bug this block exists to remove.
+assert_bundle_flags() {
+    local path="$1" child=0 value relative
+    relative="$(/usr/libexec/PlistBuddy -c "Print $path:RootRelativeBundlePath" "$COMPONENT_PLIST" 2>/dev/null || true)"
+    value="$(/usr/libexec/PlistBuddy -c "Print $path:BundleIsRelocatable" "$COMPONENT_PLIST" 2>/dev/null || true)"
+    [[ "$value" == "false" ]] || fail "component plist leaves '$relative' relocatable (got '$value')"
+    value="$(/usr/libexec/PlistBuddy -c "Print $path:BundleIsVersionChecked" "$COMPONENT_PLIST" 2>/dev/null || true)"
+    [[ "$value" == "false" ]] || fail "component plist leaves '$relative' under Installer's version check (got '$value')"
+    while /usr/libexec/PlistBuddy -c "Print $path:ChildBundles:$child:RootRelativeBundlePath" "$COMPONENT_PLIST" >/dev/null 2>&1; do
+        assert_bundle_flags "$path:ChildBundles:$child"
+        child=$((child + 1))
+    done
+}
+
+checked_index=0
+while /usr/libexec/PlistBuddy -c "Print :$checked_index:RootRelativeBundlePath" "$COMPONENT_PLIST" >/dev/null 2>&1; do
+    assert_bundle_flags ":$checked_index"
+    checked_index=$((checked_index + 1))
+done
+
+note "component plist: $bundle_index top-level bundle(s), relocation disabled"
+
 # --- distribution -----------------------------------------------------------
 cat > "$WORK/distribution.xml" <<DIST
 <?xml version="1.0" encoding="utf-8"?>
@@ -434,6 +511,7 @@ COMPONENT="$WORK/SoundBridge.pkg"
 /usr/bin/pkgbuild \
     --root "$PAYLOAD" \
     --scripts "$SCRIPTS" \
+    --component-plist "$COMPONENT_PLIST" \
     --identifier "$APP_ID" \
     --version "$VERSION" \
     --install-location "/" \
@@ -446,9 +524,16 @@ OUTPUT="$OUT_DIR/SoundBridge-$VERSION.pkg"
     --package-path "$WORK" \
     "$OUTPUT"
 
+# The component plist is kept next to the package as evidence: it is the input
+# that decides relocation, and the finished archive does not carry the flags back
+# (an expanded PackageInfo only shows the resulting <relocate> list). Tools can
+# then assert on it without rebuilding.
+/bin/cp "$COMPONENT_PLIST" "$OUT_DIR/SoundBridge-$VERSION.component.plist"
+
 echo ""
 echo "Built (UNSIGNED, NOT NOTARIZED):"
 note "$OUTPUT"
+note "bundle relocation: disabled (component plist: $OUT_DIR/SoundBridge-$VERSION.component.plist)"
 note "sha256: $(/usr/bin/shasum -a 256 "$OUTPUT" | awk '{print $1}')"
 note "size:   $(/usr/bin/stat -f%z "$OUTPUT") bytes"
 note "driver: $DRIVER_NAME $DRIVER_VERSION, protocol $DRIVER_PROTOCOL, $DRIVER_ARCHS"

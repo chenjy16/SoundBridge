@@ -36,7 +36,10 @@ final class DriverRecoveryMatrixTests: XCTestCase {
     }
 
     private let protocolVersion = DriverVersionGate.expectedProtocolVersion
-    private let olderProtocol: UInt32 = 0x0001_0100
+    /// One ABI generation behind whatever this build speaks, expressed as a
+    /// delta rather than a literal so a header bump cannot strand it. Every
+    /// "incompatible" row in the matrix is built from this sample.
+    private let olderProtocol = DriverVersionGate.expectedProtocolVersion - 0x100
 
     /// Seven states, in the order a support conversation would meet them.
     private func rows() -> [Row] {
@@ -74,7 +77,7 @@ final class DriverRecoveryMatrixTests: XCTestCase {
                 status: .protocolIncompatible(
                     installedVersion: "1.2.0",
                     installedProtocol: olderProtocol,
-                    expectedProtocol: 0x0002_0100
+                    expectedProtocol: protocolVersion
                 ),
                 intent: .explicitUpgrade(from: "1.2.0", to: "this build"),
                 replaceOnDisk: true,
@@ -96,7 +99,7 @@ final class DriverRecoveryMatrixTests: XCTestCase {
                 name: "installed driver is newer",
                 plist: ["CFBundleIdentifier": "com.soundbridge.driver",
                         "CFBundleShortVersionString": "1.3.0",
-                        DriverVersionGate.protocolVersionKey: 0x0002_0100],
+                        DriverVersionGate.protocolVersionKey: Int(protocolVersion)],
                 bundleExists: true,
                 expectedVersion: "1.2.0",
                 status: .newer(installed: "1.3.0", expected: "1.2.0"),
@@ -108,7 +111,7 @@ final class DriverRecoveryMatrixTests: XCTestCase {
                 name: "compatible",
                 plist: ["CFBundleIdentifier": "com.soundbridge.driver",
                         "CFBundleShortVersionString": "1.2.0",
-                        DriverVersionGate.protocolVersionKey: 0x0002_0100],
+                        DriverVersionGate.protocolVersionKey: Int(protocolVersion)],
                 bundleExists: true,
                 expectedVersion: "1.2.0",
                 status: .compatible(version: "1.2.0"),
@@ -247,10 +250,10 @@ final class DriverRecoveryMatrixTests: XCTestCase {
         // misreported as a corrupt bundle.
         let status = DriverVersionGate.evaluate(
             plist: ["CFBundleShortVersionString": "1.2.0",
-                    DriverVersionGate.protocolVersionKey: "0x00020100"],
+                    DriverVersionGate.protocolVersionKey: DriverVersionGate.hex(protocolVersion)],
             bundleExists: true,
             expectedVersion: "1.2.0",
-            expectedProtocol: 0x0002_0100
+            expectedProtocol: protocolVersion
         )
 
         XCTAssertEqual(status, .compatible(version: "1.2.0"))

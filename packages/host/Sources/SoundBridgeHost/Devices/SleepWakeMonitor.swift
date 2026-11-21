@@ -10,11 +10,18 @@ class SleepWakeMonitor {
     var onSleep: (() -> Void)?
     var onWake: (() -> Void)?
 
+    private let lifecycleGate: HostLifecycleGate
+    private var isRunning = false
     private var rootPort: io_connect_t = 0
     private var notifyPort: IONotificationPortRef?
     private var notifyIterator: io_object_t = 0
 
+    init(lifecycleGate: HostLifecycleGate = HostLifecycleGate()) {
+        self.lifecycleGate = lifecycleGate
+    }
+
     func start() {
+        guard !isRunning else { return }
         rootPort = IORegisterForSystemPower(
             Unmanaged.passUnretained(self).toOpaque(),
             &notifyPort,
@@ -29,10 +36,12 @@ class SleepWakeMonitor {
         if let source = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() {
             CFRunLoopAddSource(RunLoop.current.getCFRunLoop(), source, CFRunLoopMode.commonModes)
         }
+        isRunning = true
         print("[SleepWake] Registered for sleep/wake notifications")
     }
 
     func stop() {
+        isRunning = false
         if let port = notifyPort {
             if let source = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() {
                 CFRunLoopRemoveSource(RunLoop.current.getCFRunLoop(), source, CFRunLoopMode.commonModes)
@@ -60,9 +69,11 @@ class SleepWakeMonitor {
             }
 
         case kIOMessageSystemHasPoweredOnValue:
+            guard isRunning, let token = lifecycleGate.normalToken() else { return }
             print("[SleepWake] System did wake — scheduling recovery in \(SoundBridgeConfig.wakeRecoveryDelay)s")
             DispatchQueue.main.asyncAfter(deadline: .now() + SoundBridgeConfig.wakeRecoveryDelay) { [weak self] in
-                self?.onWake?()
+                guard let self, self.isRunning, self.lifecycleGate.permitsNormal(token) else { return }
+                self.onWake?()
             }
 
         default:

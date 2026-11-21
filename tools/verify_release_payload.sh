@@ -28,10 +28,20 @@
 # real installation (L4) are out of scope by design.
 #
 # Usage
-#   tools/verify_release_payload.sh                     # everything in dist/ for the current version
+#   tools/verify_release_payload.sh                     # everything in dist/ for the repository's VERSION
 #   tools/verify_release_payload.sh --skip-dmg          # package only
 #   tools/verify_release_payload.sh --pkg dist/x.pkg --dmg dist/x.dmg --app dist/SoundBridge.app
+#   tools/verify_release_payload.sh --print-target      # say which files would be checked, then stop
 #   tools/verify_release_payload.sh --verbose           # full stage output instead of the tail
+#
+# Which version the default target is
+# -----------------------------------
+# `VERSION` (the file at the repository root) names the release. It is read from
+# there and *not* from `dist/SoundBridge.app`, because the bundle in dist/ is
+# exactly the thing that can be stale: a 1.1.1 bundle left behind selected
+# `dist/SoundBridge-1.1.1.{pkg,dmg}`, and the two old artifacts agreed with each
+# other while the tree said 1.2.0. `--version` still overrides, and the bundle is
+# still compared -- a mismatch is now a FAIL instead of the selector.
 #
 set -uo pipefail
 
@@ -41,18 +51,21 @@ APP="$ROOT_DIR/dist/SoundBridge.app"
 PKG=""
 DMG=""
 VERSION=""
+VERSION_SOURCE=""
 VERBOSE=0
 SKIP_PKG=0
 SKIP_DMG=0
+PRINT_TARGETS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app)      APP="$2"; shift 2 ;;
         --pkg)      PKG="$2"; shift 2 ;;
         --dmg)      DMG="$2"; shift 2 ;;
-        --version)  VERSION="$2"; shift 2 ;;
+        --version)  VERSION="$2"; VERSION_SOURCE="--version"; shift 2 ;;
         --skip-pkg) SKIP_PKG=1; shift ;;
         --skip-dmg) SKIP_DMG=1; shift ;;
+        --print-target|--print-targets) PRINT_TARGETS=1; shift ;;
         --verbose)  VERBOSE=1; shift ;;
         -h|--help)  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
@@ -60,24 +73,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$VERSION" ]]; then
-    # Only read when the file is there: PlistBuddy answers a missing plist on
-    # stdout ("File Doesn't Exist, Will Create: ..."), and that text is not a
-    # version -- it would end up inside both artifact names below.
-    if [[ -f "$APP/Contents/Info.plist" ]]; then
+    # The repository's VERSION file decides which release is being verified.
+    if [[ -f "$ROOT_DIR/VERSION" ]]; then
+        VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
+        VERSION_SOURCE="VERSION file"
+    elif [[ -f "$APP/Contents/Info.plist" ]]; then
+        # No VERSION file (an unpacked payload, say): fall back to the bundle and
+        # say so, rather than pretending the tree named a version.
         VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
             "$APP/Contents/Info.plist" 2>/dev/null || true)"
+        VERSION_SOURCE="app bundle (no VERSION file)"
     fi
 fi
 
 [[ -n "$PKG" ]] || PKG="$ROOT_DIR/dist/SoundBridge-${VERSION:-unknown}.pkg"
 [[ -n "$DMG" ]] || DMG="$ROOT_DIR/dist/SoundBridge-${VERSION:-unknown}.dmg"
 
+if [[ "$PRINT_TARGETS" -eq 1 ]]; then
+    echo "VERSION=$VERSION"
+    echo "VERSION_SOURCE=$VERSION_SOURCE"
+    echo "APP=$APP"
+    echo "PKG=$PKG"
+    echo "DMG=$DMG"
+    exit 0
+fi
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/soundbridge-payload.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
+# The version the app bundle itself declares. Kept separate from $VERSION so the
+# VERSION_CONSISTENCY stage can report a stale bundle instead of inheriting it.
+APP_BUNDLE_VERSION=""
+if [[ -f "$APP/Contents/Info.plist" ]]; then
+    APP_BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$APP/Contents/Info.plist" 2>/dev/null || true)"
+fi
+
 echo "SoundBridge release payload verification"
 echo "  app:     $APP"
-echo "  version: ${VERSION:-<unknown>}"
+echo "  version: ${VERSION:-<unknown>} (from ${VERSION_SOURCE:-nowhere})"
 echo "  pkg:     $PKG"
 echo "  dmg:     $DMG"
 echo ""
@@ -252,6 +286,13 @@ if [[ -z "$VERSION" ]]; then
     echo "    the app bundle declares no version"
     VERSION_UNKNOWN=1
 else
+    # The bundle in dist/ is no longer the selector, so it is checked like any
+    # other copy: a 1.1.1 bundle sitting next to 1.2.0 artifacts is a FAIL here
+    # instead of quietly naming the release.
+    if [[ -n "$APP_BUNDLE_VERSION" && "$APP_BUNDLE_VERSION" != "$VERSION" ]]; then
+        echo "    app bundle version '$APP_BUNDLE_VERSION' != $VERSION (stale bundle in dist/)"
+        VERSION_FAILURES=$((VERSION_FAILURES + 1))
+    fi
     if [[ "$PKG_APP_VERSION" != "$VERSION" ]]; then
         echo "    package app version '${PKG_APP_VERSION:-<unknown>}' != $VERSION"
         VERSION_FAILURES=$((VERSION_FAILURES + 1))

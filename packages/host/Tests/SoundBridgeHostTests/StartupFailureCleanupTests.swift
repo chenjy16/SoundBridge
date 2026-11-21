@@ -12,14 +12,17 @@ import XCTest
 // The first one is the odd one out. At that point the process owns nothing —
 // the shared memory it would unlink belongs to the Host that is already running,
 // and unlinking it would sabotage a healthy instance. Every other exit owns
-// resources: a mapping (possibly partial), a heartbeat timer, a claimed instance
-// lock, and — after `autoSelectProxy()` — the **system default output device**.
+// resources: a mapping (possibly partial), a heartbeat timer and a claimed
+// instance lock.
 //
-// That last one is not theoretical. `autoSelectProxy()` switches the default
-// output to the proxy device before the audio engine is set up, so an
-// `exit(1)` that skips teardown leaves the Mac pointing at a virtual device whose
-// Host has just died: the user loses all audio and nothing in the app explains
-// why. This test is the reason that cannot be reintroduced silently.
+// P2 Batch 2 removed the fourth one. The old `autoSelectProxy()` made the proxy
+// device the system default output *before* the audio engine was set up, so an
+// `exit(1)` that skipped teardown left the Mac pointing at a virtual device
+// whose Host had just died — the user lost all audio and nothing in the app
+// explained why. Routing no longer writes the default output at all, so there is
+// nothing to restore and no state to leak on a failed start. These tests keep
+// both facts: the teardown is still mandatory, and startup no longer changes a
+// system-wide setting it would have to put back.
 //
 // Source-level by necessity: these are process-exit paths, and running them
 // would mean actually killing a Host. Evidence level: L1 (structural).
@@ -83,17 +86,33 @@ final class StartupFailureCleanupTests: XCTestCase {
         XCTAssertEqual(checked, 2, "both single-instance refusals are expected to be present")
     }
 
-    /// The failure branch that used to silence the machine: routing has already
-    /// happened when the engine fails, so the restore step is mandatory.
+    /// Routing still precedes the engine setup, and — since P2 Batch 2 — it no
+    /// longer changes the default output, so the engine-failure exit has nothing
+    /// to restore.
     func testEngineFailureExitIsReachableOnlyAfterRouting() throws {
         let lines = try mainSourceLines()
         let source = lines.joined(separator: "\n")
 
-        let route = try XCTUnwrap(source.range(of: "let selection = proxyManager.autoSelectProxy()"))
+        let route = try XCTUnwrap(source.range(of: "proxyManager.resolveProxyRouting(forPhysicalUID:"))
         let engine = try XCTUnwrap(source.range(of: "try audioEngine.setup(devices: devices, preferredDeviceID:"))
         XCTAssertLessThan(
             source.distance(from: route.lowerBound, to: engine.lowerBound), 2_000,
-            "the engine setup is expected to follow routing in main(); if this moved, re-check that teardown still restores the device"
+            "the engine setup is expected to follow routing in main(); if this moved, re-check the degraded path"
         )
+    }
+
+    /// The failure branch that used to put the default output back.
+    ///
+    /// It cannot come back by accident: `autoSelectProxy` is gone, and the only
+    /// default-output write in the Host is the unreferenced HAL member.
+    func testFailedStartupHasNoDefaultOutputToRestore() throws {
+        let source = try mainSourceLines().joined(separator: "\n")
+
+        XCTAssertFalse(source.contains("autoSelectProxy("),
+                       "startup must not select the proxy as the default output")
+        XCTAssertFalse(source.contains("setDefaultOutput("),
+                       "main.swift must not write the default output, on a failure path or any other")
+        XCTAssertTrue(source.contains("Host never made the proxy the default output"),
+                      "the failure branches are expected to say why there is nothing to restore")
     }
 }

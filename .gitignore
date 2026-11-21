@@ -97,6 +97,8 @@ logs/
 .vscode/
 .idea/
 .kiro/
+# Qoder's local repowiki cache; generated, never part of the release.
+.qoder/
 *.swp
 *.swo
 *~
@@ -117,7 +119,9 @@ temp/
 
 # Build artifacts
 dist/
-release/
+# Root-level release output only. The unanchored `release/` also matched
+# docs/release/, which silently hid the 1.2.0 release checklist.
+/release/
 *.dmg
 *.pkg
 *.app
