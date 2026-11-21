@@ -1,7 +1,7 @@
 # SoundBridge 1.2.0 — Release Notes
 
-发布日期：待定（Pre-release 准备阶段）
-发布类型：**Pre-release（候选版本，未完成真实环境验证）**
+发布日期：2026-11-21（GitHub Releases）
+发布类型：**正式发布（ad-hoc 签名，未公证；首次启动需按安装指南放行）**
 协议版本：`0x00020200`（131584）
 
 ---
@@ -17,9 +17,11 @@
 | **SOURCE_VERIFIED** | 只读源码、脚本、产物结构确认，未运行 |
 | **NOT_VERIFIED** | 没有任何证据；本文不暗示它可用 |
 
-**本版本处于 Pre-release 验证阶段。** 已完成的验证集中在源码级与自动化测试级；
-真实设备上的播放质量、卸载重装闭环、播放窗口 underrun 均**未**验证。**不得**把本
-版本描述为「音频质量已通过」。
+**本版本已完成首次真机验证。** P4 Batch 3A 在真实 macOS 27.2.1 上按用户路径完成了
+PKG 安装 → 启动 → 播放 → 音量 / Mute / EQ → 30 分钟基线共 8 项验证（见 §4.1）。
+仍未验证的事项（卸载/重装闭环、热插拔、低 buffer、8 小时、多设备、14.4、x86_64）
+在 §5 逐条列出。**不得**把本版本描述为「音频质量已通过测量」——EQ 只有用户主观听感
+确认，没有频响/相位数据。
 
 ---
 
@@ -200,24 +202,45 @@ Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 
 
 证据索引：[verification/](verification/)、[docs/1.2.0/](1.2.0/)。
 
+上表数字于 2026-11-21 在提交 `710101c` 上重新实测：Host `swift test` 379 tests / 0 failures
+（rc=0），App `swift test` 253 tests / 0 failures（rc=0）。
+
+### 4.1 真实环境验证（P4 Batch 3A，2026-11-21，macOS 27.2.1）
+
+| # | 项目 | 结果 | 关键证据 |
+|---|---|---|---|
+| 1 | RC 产物完整性 | PASS | PKG `42ae57b1…` / DMG `4d5da867…`；装后逐文件 diff 0 |
+| 2 | PKG 首次安装事务 | PASS | 首次安装分支命中；receipt 1.2.0 @19:24:02；`protocol 131584` |
+| 3 | 首次启动 / Gatekeeper | PASS（首启未被拦截） | 无 quarantine 属性；`spctl` rejected 为 ad-hoc 预期，**不宣称通过 Gatekeeper** |
+| 4 | App / Host / HAL 启动 | PASS | App 7693 → Host 7695（PPID 正确）；驱动由 `coreaudiod` 加载 |
+| 5 | 安装后签名完整性 | PASS | deep-strict 校验 exit 0；`TeamIdentifier=not set` 为预期 |
+| 6 | 真实设备识别 | PASS | 两个代理设备，48 kHz / virtual |
+| 7 | 音量 / Mute / EQ | PASS | 音量 13 档轨迹；Mute 双向跳变 + 人耳确认；`eq_sequence` 2→14 |
+| 8 | 30 分钟播放基线 | PASS | **播放区间** underrun 增量 0、overrun 0、overBudget 0、max 120 µs、RSS 不增长 |
+
+边界：本表不等于卸载/重装、热插拔、`coreaudiod` 重启、低 buffer、8 小时、14.4、
+x86_64 通过；这些仍在 §5 列为未验证。计数器本身不区分空闲与播放期（Batch 3B O-3），
+因此本表只引用播放区间内的增量。
+
 ---
 
 ## 5. 明确未验证的事项
 
-下列事项**没有任何**真实环境证据。它们不是「大概没问题」，而是「还不知道」。
+下列事项仍缺真实环境证据。已取得部分证据的条目在「说明」中注明来源；未注明者即
+「还没有数据」。
 
 | 编号 | 未验证事项 | 说明 |
 |---|---|---|
-| **N-1** | **实际 EQ 听感** | 10 段参数均衡器的频响、相位与削波行为只经过数值与状态测试，没有人耳/测量验证。**不得**声称音质已通过。 |
-| **N-2** | **播放窗口 underrun** | 低 buffer、高负载下的丢帧率与可听缺口未测量。`out_dropped` 可观测，但没有真实负载基线。 |
-| **N-3** | **真实卸载/重装闭环** | 卸载策略由测试锁定，但「安装 → 播放 → 卸载 → 重装 → 恢复 EQ/音量」整条路径未在真实 macOS 上执行。 |
+| **N-1** | **实际 EQ 听感** | 已有用户主观听感确认（Batch 3A §10：各频段调整与 Reset 可听辨、符合预期，30 分钟播放无爆音/断续）；**没有频响 / 相位 / 削波测量**，旁通/启用切换未单独取证。**不得**声称音质已通过测量。 |
+| **N-2** | **播放窗口 underrun** | 默认 buffer 下已有 30 分钟基线：underrun 增量 0、overrun 0、overBudget 0、max 120 µs（Batch 3A §11）。低 buffer / 高负载未测；计数器无法区分空闲与播放期（Batch 3B O-3）。 |
+| **N-3** | **真实卸载/重装闭环** | PKG **安装**已在真机验证（Batch 3A §R2.9#2）；「卸载 → 重装 → 恢复 EQ/音量」整条路径仍未在真实 macOS 上执行。 |
 | N-4 | 真实 HAL 设备移除（播放中拔 HDMI/DP） | 未执行；`quarantine` 计数无实测值。 |
 | N-5 | macOS 14.4 认证 | 当前只在 macOS 27.2.1 上运行过；14.4 未验证。 |
 | N-6 | x86_64 真机运行 | 只有 universal 构建产物，未在 Intel 机器上运行。 |
 | N-7 | 长时间稳定性（≥ 8 小时） | 未执行。 |
 | N-8 | 多设备并发 / 热插拔矩阵 | 未执行。 |
 
-完整登记见 [Known-Limitations](risks/Known-Limitations.md) 的 B 类（U-1 – U-13）与
+完整登记见 [Known-Limitations](risks/Known-Limitations.md) 的 B 类（U-1 – U-16，U-4 已关闭）与
 D 类（P-1 – P-8）。
 
 ---
@@ -243,14 +266,18 @@ D 类（P-1 – P-8）。
 
 ## 8. 发布结论
 
-**当前结论：Pre-release，不具备「正式可用」声明条件。**
+**当前结论：产品层无发布阻断项；以下未验证事项作为已披露限制随本版本发布。**
 
-阻断项（见 [发布检查单](release/SoundBridge-1.2.0-Release-Checklist.md) §8）：
+已披露限制（与 [发布检查单](release/SoundBridge-1.2.0-Release-Checklist.md) §8.2 一致）：
 
-- 真实安装 / 卸载 / 播放未验证（N-3）
-- 真实设备移除未验证（N-4）
-- macOS 14.4 未认证（N-5）
-- 实际 EQ 听感与播放窗口 underrun 未测量（N-1、N-2）
+- 卸载 → 重装闭环未验证（N-3；安装本身已验证）
+- 播放中拔出 HDMI/DP 未验证（N-4）
+- macOS 14.4 与 x86_64 真机未认证（N-5、N-6）
+- 低 buffer / 高负载 underrun 未测（N-2；默认 buffer 30 分钟已验证）
+- ≥ 8 小时稳定性、多设备并发未测（N-7、N-8）
+- EQ 听感仅用户主观确认，无测量数据（N-1）
 
-源码级与测试级的收敛已完成；真实环境验证是下一阶段的工作。在它完成之前，本文档
-不会把任何 NOT_VERIFIED 项写成 PASS。
+签名与分发：ad-hoc 签名、未公证，`spctl` 拒绝是预期状态；首次启动按
+[安装指南](INSTALLATION_GUIDE.md) 放行，不关闭 Gatekeeper 与 SIP。
+
+原则不变：未验证项一律标注 NOT_VERIFIED，不写成 PASS。
