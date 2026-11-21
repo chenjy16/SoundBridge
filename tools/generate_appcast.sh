@@ -1,90 +1,66 @@
 #!/bin/bash
-# Generate the Sparkle appcast feed for the current release.
 #
-# The feed is uploaded next to the DMG in the GitHub release, which is why
-# SUFeedURL points at:
-#   https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml
-# `releases/latest` always resolves to the newest published release, so the URL
-# stays stable while the feed content follows the version.
+# Sparkle appcast generation is not part of SoundBridge's release policy.
 #
-# Requires:
-#   SPARKLE_ED_PRIVATE_KEY_FILE  file holding the EdDSA private key
-#                                (export one with `generate_keys -x <file>`)
+# Sparkle only signs an update archive whose bundle declares a non-empty
+# SUPublicEDKey, and its feed is useful only if the app ships that public key.
+# SoundBridge 1.2.0 ships with an empty SUPublicEDKey and no appcast, which means
+# the updater never initialises: the app prints "Update feed not configured" and
+# runs without auto-update.
 #
-# Optional:
-#   SPARKLE_DOWNLOAD_URL_PREFIX  overrides the URL prefix of the DMG enclosure
+# That is a deliberate policy, not an unfinished step:
+#   * no EdDSA key pair is created, stored or rotated for this project,
+#   * no appcast.xml is generated, uploaded or referenced by a release,
+#   * "releases/latest/download/appcast.xml" is never published, so nothing in
+#     Info.plist points at a live feed,
+#   * SUEnableAutomaticChecks is false and VersionManager.updateChannelAvailable
+#     is a compile-time false, so an empty SUPublicEDKey is not the only guard.
+#
+# SUFeedURL does stay in Info.plist, but not as an update channel: the driver
+# compatibility notice reads it to derive the GitHub releases page URL. It is a
+# link source, and no appcast is ever served from it.
+#
+# Sparkle.framework itself stays in the bundle: SoundBridgeApp links it through
+# @rpath, and removing the framework would break the app at launch. It is a
+# build dependency, not an update channel.
+#
+# The previous implementation is in git history at commit 0b50ae1.
+#
+set -uo pipefail
 
-set -euo pipefail
+print_help() {
+    cat <<'EOF'
+generate_appcast.sh - disabled
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DIST_DIR="$PROJECT_ROOT/dist"
-ARCHIVE_DIR="$DIST_DIR/appcast"
+Sparkle auto-update is not supported by SoundBridge 1.2.0: no EdDSA key pair is
+created, SUPublicEDKey stays empty and no appcast.xml is published.
 
-# create_dmg.sh names the archive after the app's version (SoundBridge-1.1.1.dmg).
-# The appcast enclosure is the same file, so the name is derived from the bundle
-# that ships in it rather than from the old unversioned convention.
-APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-    "$PROJECT_ROOT/dist/SoundBridge.app/Contents/Info.plist" 2>/dev/null || true)"
-if [ -n "$APP_VERSION" ]; then
-    DMG_PATH="$DIST_DIR/SoundBridge-$APP_VERSION.dmg"
-else
-    DMG_PATH="$DIST_DIR/SoundBridge.dmg"
-fi
-DOWNLOAD_URL_PREFIX="${SPARKLE_DOWNLOAD_URL_PREFIX:-https://github.com/chenjy16/SoundBridge/releases/latest/download/}"
+This script refuses every invocation and exits 2. Releases are published without
+an update feed; users update by downloading a new DMG.
+EOF
+}
 
-# Sparkle ships its command line tools next to the SwiftPM artifact bundle.
-SPARKLE_BIN_DIR="$(find "$PROJECT_ROOT/apps/mac/SoundBridgeApp/.build" \
-    -type d -name bin -path "*sparkle*" 2>/dev/null | head -1)"
-GENERATE_APPCAST="${SPARKLE_BIN_DIR:+$SPARKLE_BIN_DIR/generate_appcast}"
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) print_help; exit 0 ;;
+    esac
+done
 
-if [ ! -x "$GENERATE_APPCAST" ]; then
-    echo "Error: Sparkle's generate_appcast was not found."
-    echo "   Build the app first: swift build --package-path apps/mac/SoundBridgeApp"
-    exit 1
-fi
+cat >&2 <<'EOF'
+ERROR: appcast generation is disabled in this repository (exit 2).
 
-if [ -z "${SPARKLE_ED_PRIVATE_KEY_FILE:-}" ] || [ ! -f "${SPARKLE_ED_PRIVATE_KEY_FILE:-}" ]; then
-    echo "Error: SPARKLE_ED_PRIVATE_KEY_FILE must point to the EdDSA private key file."
-    echo "   Generate a key pair with Sparkle's generate_keys, then export the"
-    echo "   private half with: generate_keys -x <file>"
-    exit 1
-fi
+Sparkle auto-update is not supported by SoundBridge 1.2.0. The release pipeline
+publishes no appcast.xml and configures no Sparkle keys, so the updater stays
+disabled inside the app (SUPublicEDKey is empty, SUEnableAutomaticChecks is
+false, and VersionManager.updateChannelAvailable is a compile-time false).
 
-if [ ! -f "$DMG_PATH" ]; then
-    echo "Error: $DMG_PATH not found."
-    echo "   Build the DMG first: ./tools/create_dmg.sh"
-    exit 1
-fi
+Nothing was generated and nothing in dist/ was modified.
 
-# generate_appcast scans a directory of archives and writes appcast.xml into it,
-# so stage a clean copy of just this release.
-rm -rf "$ARCHIVE_DIR"
-mkdir -p "$ARCHIVE_DIR"
-cp "$DMG_PATH" "$ARCHIVE_DIR/"
+Release assets are limited to:
+  SoundBridge-<version>.dmg, SoundBridge-<version>.pkg, SHA256SUMS.txt,
+  INSTALLATION_GUIDE.md, RELEASE_NOTES.md
 
-echo "Generating appcast for $(basename "$DMG_PATH")"
-echo "   Download prefix: $DOWNLOAD_URL_PREFIX"
-
-"$GENERATE_APPCAST" \
-    --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
-    --ed-key-file "$SPARKLE_ED_PRIVATE_KEY_FILE" \
-    "$ARCHIVE_DIR"
-
-if [ ! -f "$ARCHIVE_DIR/appcast.xml" ]; then
-    echo "Error: generate_appcast did not produce appcast.xml"
-    exit 1
-fi
-
-# Sparkle only signs archives whose bundle declares SUPublicEDKey, and it
-# silently emits an unsigned feed otherwise. An unsigned feed is useless to the
-# app (every update fails verification), so refuse to ship one.
-if ! grep -q "sparkle:edSignature" "$ARCHIVE_DIR/appcast.xml"; then
-    echo "Error: appcast.xml has no EdDSA signature."
-    echo "   Set SPARKLE_ED_PUBLIC_KEY when building the bundle so"
-    echo "   SUPublicEDKey is present in Info.plist."
-    exit 1
-fi
-
-echo ""
-echo "Appcast written to $ARCHIVE_DIR/appcast.xml"
+Users update by downloading the next DMG. Auto-update is listed as unsupported in
+docs/risks/Known-Limitations.md.
+EOF
+exit 2

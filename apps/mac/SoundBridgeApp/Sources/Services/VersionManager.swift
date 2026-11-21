@@ -17,12 +17,24 @@ struct VersionManager {
 
 	// MARK: - App Updates
 
+	/// This release ships no update channel at all.
+	///
+	/// It is a compile-time switch rather than an Info.plist value on purpose.
+	/// SoundBridge 1.2.0 is distributed unsigned, so it cannot ship a signing key
+	/// and must never fetch an appcast. `SUFeedURL` stays in Info.plist only
+	/// because the driver compatibility notice derives the GitHub releases page
+	/// from it; that does not make it a feed. Checking this constant means the
+	/// updater stays off even if a plist is edited or a key is injected by
+	/// mistake -- the empty `SUPublicEDKey` is a second guard, not the only one.
+	static let updateChannelAvailable = false
+
 	/// Whether Sparkle has a usable update feed.
 	///
 	/// Sparkle needs both `SUFeedURL` and `SUPublicEDKey` in Info.plist. When
 	/// either is empty it fails on every launch with "Unable to check for
 	/// updates", so the updater must not be started in that case.
 	static var isUpdaterConfigured: Bool {
+		guard updateChannelAvailable else { return false }
 		let info = Bundle.main.infoDictionary
 		let feed = (info?["SUFeedURL"] as? String)?
 			.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

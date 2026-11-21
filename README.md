@@ -31,7 +31,7 @@ No kernel extensions. No background daemons you can't see. Just a lightweight me
 - Automatic device detection and hot-plug support
 - Universal binary (Apple Silicon + Intel)
 - Guided onboarding that points at the official installer package
-- Ad-hoc signed (not notarized — see [Installation](#installation))
+- Unsigned and unnotarized — no code signature of any kind (see [Installation](#installation) and [Known limitations](docs/risks/Known-Limitations.md))
 
 ## Requirements
 
@@ -54,7 +54,19 @@ Two files are published, and they install different things:
 
 Upgrading from 1.1.x **must** use the PKG: the shared-memory protocol changed to `0x00020200`, so an old driver with a new app produces no audio.
 
-> **First launch**: releases are ad-hoc signed rather than notarized, so Gatekeeper asks for confirmation once. If the app or the package is blocked, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Older systems also accept right-click → **Open**. Do not disable Gatekeeper or SIP.
+> **First launch**: nothing in this release is signed. There is no Developer ID
+> signature, no ad-hoc signature, no PKG signature and no notarization, so Gatekeeper
+> refuses both the app and the package by design (`spctl` reports
+> `rejected / source=no usable signature`). Approval is manual: try to open the app,
+> then go to **System Settings → Privacy & Security**, scroll down and click
+> **Open Anyway**. Older systems also accept right-click → **Open**. Do not disable
+> Gatekeeper or SIP. If your organisation enforces a managed policy that forbids
+> unsigned software, this release cannot be installed at all.
+>
+> **Driver loading is not verified everywhere.** The unsigned HAL driver is accepted by
+> the HAL directory copy step, but whether `coreaudiod` loads an unsigned driver from
+> `/Library/Audio/Plug-Ins/HAL` has not been verified on macOS 14 or on Intel Macs. See
+> [Known limitations](docs/risks/Known-Limitations.md).
 
 Full steps, troubleshooting and the data a removal keeps are in [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
 
@@ -194,31 +206,35 @@ make run
 ### 打包与分发
 
 ```bash
-# 代码签名
-make sign
-
-# 验证签名
+# 断言 .app 未签名（无 bundle 封印、无签名身份、SUPublicEDKey 为空）
 make verify
+
+# 断言 app + PKG + DMG 全部未签名，且未发布 appcast
+make verify-unsigned
 
 # 创建 DMG 安装包（含拖拽到 Applications 的布局）
 make dmg
 
-# 完整发布流程：构建 → 签名 → 验证 → DMG
+# 完整发布流程：构建 → 未签名断言 → DMG
 make full-release
 ```
 
 | 命令 | 说明 |
 |------|------|
-| `make sign` | Sign the .app (ad-hoc by default; `SIGN_MODE=developer-id` requires a certificate) |
-| `make verify` | Verify the code signatures of every component |
+| `make verify` | Assert the `.app` bundle is unsigned (no seal, no identity, empty `SUPublicEDKey`) |
+| `make verify-unsigned` | Assert app, PKG and DMG are unsigned and that no appcast exists |
 | `make dmg` | Create the DMG with a drag-to-Applications layout |
-| `make release` | Build + sign + verify |
-| `make full-release` | Build + sign + verify + DMG (full pipeline) |
-| `make test-release` | Test the signed release build |
+| `make release` | Build + assert unsigned |
+| `make full-release` | Build + assert unsigned + DMG (full pipeline) |
+| `make test-release` | Open the release build |
+| `make sign` | Refuses: signing is not part of this project (exit 2) |
 
-> This product ships **ad-hoc signed and notarized = no**. `make sign` succeeds without
-> an Apple Developer account; Developer ID signing and notarization are not part of the
-> 1.2.0 release path. Users approve the first launch once, as described in
+> This product ships **unsigned: no Developer ID, no ad-hoc signature, no PKG
+> signature, no notarization**. `make sign` and `tools/notarize.sh` exist only to fail
+> loudly with an explanation; they produce nothing. The only signature inside a built
+> binary is the ad-hoc CodeDirectory `ld64` writes into every Mach-O, which Apple
+> silicon requires in order to load the code at all — it carries no certificate and no
+> TeamIdentifier. Users approve the first launch once, as described in
 > [Installation](#installation).
 
 ### 手动构建各组件
@@ -262,59 +278,32 @@ dist/
 
 Releases are automated via GitHub Actions. When you publish a release with a `vX.Y.Z` tag:
 
-1. Builds all components as universal binaries (arm64 + x86_64)
-2. Creates the `.app` bundle
-3. Ad-hoc signs the bundle (no Apple Developer account needed)
-4. Builds the installer PKG (`tools/build_installer_pkg.sh`) and the DMG (`tools/create_dmg.sh`)
-5. Generates the Sparkle `appcast.xml` feed (only when the Sparkle secrets exist)
-6. Uploads the PKG, DMG, checksums and appcast to the GitHub Release
+1. Checks that `VERSION`, the tag and every component agree, and that the shared-memory
+   protocol header is single-sourced
+2. Builds all components as universal binaries (arm64 + x86_64)
+3. Creates the `.app` bundle — **no signing step exists**
+4. Asserts the bundle is unsigned (`tools/verify_signatures.sh`), then builds the
+   installer PKG (`tools/build_installer_pkg.sh`) and the DMG (`tools/create_dmg.sh`)
+5. Asserts the driver, package and image structures, and that all three artifacts are
+   still unsigned (`tools/verify_unsigned_release.sh`)
+6. Uploads the PKG, DMG, checksums and the two documents to the GitHub Release
 
-The only optional secrets are the two Sparkle ones below. Builds are not notarized, so users approve the first launch once, as described in [Installation](#installation).
+No secrets are required. There is no certificate, no notary credential and no Sparkle
+key pair; the workflow passes no signing key to the build and refuses to run if any
+artifact comes out signed. `tools/create_app_bundle.sh` fails outright if
+`SPARKLE_ED_PUBLIC_KEY` is inherited from the environment, so an old secret cannot
+silently re-enable the update path.
 
-To produce a Developer ID signed and notarized build locally instead, run `SIGN_MODE=developer-id ./tools/codesign.sh` and then `./tools/notarize.sh`. That is **not** what 1.2.0 ships, and the project does not promise a notarized release.
+### Auto-updates (not supported in 1.2.0)
 
-### Auto-updates (not enabled in 1.2.0)
-
-**The shipped build has an empty `SUPublicEDKey`, so `initializeUpdater()` returns early
-and Sparkle never starts.** There is no in-app update check in 1.2.0; upgrades are a
-downloaded PKG. The rest of this section describes the pipeline that exists for a future
-release, not current behaviour.
-
-Sparkle discovers new versions through an appcast feed. `SUFeedURL` is set to
-`https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml`, and the
-release workflow uploads the generated feed as a release asset, so the URL keeps working
-as new versions are published.
-
-Update archives are signed with an EdDSA key pair. One-time setup:
-
-```bash
-# The Sparkle command line tools ship with the SwiftPM artifact bundle
-swift build --package-path apps/mac/SoundBridgeApp
-SPARKLE_BIN=apps/mac/SoundBridgeApp/.build/artifacts/sparkle/Sparkle/bin
-
-# 1. Generate a key pair (private half goes to the login keychain).
-#    The printed key is the value for SUPublicEDKey.
-$SPARKLE_BIN/generate_keys
-
-# 2. Export the private half for CI - never commit this file
-$SPARKLE_BIN/generate_keys -x sparkle_private_key
-
-# 3. Store both halves as repository secrets
-gh secret set SPARKLE_ED_PUBLIC_KEY   # paste the public key from step 1
-gh secret set SPARKLE_ED_PRIVATE_KEY --body "$(cat sparkle_private_key)"
-rm sparkle_private_key
-```
-
-`tools/create_app_bundle.sh` injects `SPARKLE_ED_PUBLIC_KEY` into the bundle's
-`Info.plist`, and `tools/generate_appcast.sh` signs the feed with
-`SPARKLE_ED_PRIVATE_KEY`. Without either secret the workflow still publishes the DMG but
-skips the appcast, and the app keeps Sparkle stopped instead of failing on launch.
-
-To generate and inspect a feed locally:
-
-```bash
-SPARKLE_ED_PRIVATE_KEY_FILE=/path/to/sparkle_private_key ./tools/generate_appcast.sh
-```
+**There is no update channel.** The bundle ships an empty `SUPublicEDKey`, no
+`appcast.xml` is generated or uploaded, and `tools/generate_appcast.sh` refuses to run.
+`SUFeedURL` still points at
+`https://github.com/chenjy16/SoundBridge/releases/latest/download/appcast.xml`, which is
+never published, so the updater cannot start even if the key were filled in by mistake.
+Upgrades are a downloaded PKG. `Sparkle.framework` stays in the bundle only because
+`SoundBridgeApp` links it through `@rpath`; removing it would stop the app from
+launching.
 
 ## Contributing
 

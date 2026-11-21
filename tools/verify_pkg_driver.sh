@@ -27,17 +27,24 @@
 # --require-developer-id turns a NOT_VERIFIED into a failure, which is how a
 # release job that does sign would gate on it.
 #
+# --require-unsigned is its mirror image, and the one this project uses: a
+# Developer ID signature on the shipped driver makes the run fail, because
+# SoundBridge 1.2.0 is published without any signing identity. An ad-hoc or
+# linker-signed driver satisfies it -- that is the expected state.
+#
 # Usage
 #   tools/verify_pkg_driver.sh --pkg build/p34/pkg/SoundBridge-1.1.1.pkg
 #   tools/verify_pkg_driver.sh --pkg <pkg> --app build/p34/unsigned/SoundBridge.app
 #   tools/verify_pkg_driver.sh --driver <path>/SoundBridgeDriver.driver
 #   tools/verify_pkg_driver.sh --pkg <pkg> --require-developer-id
+#   tools/verify_pkg_driver.sh --pkg <pkg> --require-unsigned
 #
 # Exit codes
 #   0  STRUCTURAL_PASS (and, with --require-developer-id, signature verified)
 #   1  a structural check failed
 #   2  usage error
 #   4  structure passed but --require-developer-id was not satisfied
+#   5  structure passed but --require-unsigned found a Developer ID signature
 #
 set -uo pipefail
 
@@ -51,11 +58,12 @@ EXPECT_VERSION=""
 EXPECT_ID="com.soundbridge.driver"
 EXPECT_TEAM=""
 REQUIRE_DEV_ID=0
+REQUIRE_UNSIGNED=0
 KEEP_EXPANDED=0
 WORK_DIR=""
 
 usage() {
-    sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -68,6 +76,7 @@ while [ $# -gt 0 ]; do
         --expect-id)            EXPECT_ID="$2"; shift 2 ;;
         --expect-team)          EXPECT_TEAM="$2"; shift 2 ;;
         --require-developer-id) REQUIRE_DEV_ID=1; shift ;;
+        --require-unsigned)     REQUIRE_UNSIGNED=1; shift ;;
         --keep-expanded)        KEEP_EXPANDED=1; shift ;;
         --work-dir)             WORK_DIR="$2"; shift 2 ;;
         -h|--help)              usage ;;
@@ -340,6 +349,13 @@ fi
 echo "PKG_DRIVER_VERSION=${BUNDLE_VERSION:-unknown}"
 echo "PKG_DRIVER_ID=${BUNDLE_ID:-unknown}"
 echo "PKG_DRIVER_TEAM=${TEAM:-not set}"
+if [ "$REQUIRE_DEV_ID" = "1" ]; then
+    echo "PKG_DRIVER_REQUIREMENT=developer-id"
+elif [ "$REQUIRE_UNSIGNED" = "1" ]; then
+    echo "PKG_DRIVER_REQUIREMENT=unsigned"
+else
+    echo "PKG_DRIVER_REQUIREMENT=none"
+fi
 echo ""
 echo "STRUCTURAL_PASS covers structure, architecture and content only."
 if [ "$SIGNATURE_VERDICT" = "DEVELOPER_ID_SIGNATURE_VERIFIED" ]; then
@@ -355,5 +371,10 @@ if [ "$REQUIRE_DEV_ID" = "1" ] && [ "$SIGNATURE_VERDICT" != "DEVELOPER_ID_SIGNAT
     echo ""
     echo "FAIL: --require-developer-id was requested and the driver is not Developer ID signed"
     exit 4
+fi
+if [ "$REQUIRE_UNSIGNED" = "1" ] && [ "$SIGNATURE_VERDICT" = "DEVELOPER_ID_SIGNATURE_VERIFIED" ]; then
+    echo ""
+    echo "FAIL: --require-unsigned was requested and the driver carries a Developer ID signature"
+    exit 5
 fi
 exit 0

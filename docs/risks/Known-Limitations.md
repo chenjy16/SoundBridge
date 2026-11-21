@@ -141,6 +141,20 @@
 | 当前约束 | 依赖 Host 单实例锁与按设备路径命名排除这两种情况 |
 | 关联 | `SharedMemory-Lifecycle.md` §7 |
 
+### L-13 发布物完全未签名、未公证，且没有自动更新
+
+| 项 | 内容 |
+|---|---|
+| 决策 | 项目没有 Apple Developer Program 账号。**不**使用 Developer ID Application / Developer ID Installer 签名，**不**做 ad-hoc 签名，PKG 不签名，**不**提交 notarization，**不**发布 Sparkle appcast |
+| 现象 | App、HAL 驱动、PKG、DMG 全部无签名身份。`codesign --verify --strict` 对 App 与驱动报 `code object is not signed at all`，`pkgutil --check-signature` 对 PKG 报 `no signature`，`spctl` 对 App/PKG/DMG 一律 `rejected / source=no usable signature` |
+| 唯一残留 | `ld64` 对每个 Mach-O 写入的 ad-hoc CodeDirectory（`flags=0x20002(adhoc,linker-signed)`）。Apple silicon 要求它存在才能加载代码；它没有证书、没有 TeamIdentifier。`codesign --remove-signature` 会让 arm64 进程被内核 `killed`，因此这是平台可达的最小签名状态 |
+| 第三方例外 | `Sparkle.framework` 2.10.1 的 SwiftPM 产物自带上游 ad-hoc bundle 签名与 4 个 `_CodeSignature`（framework 本体、`Updater.app`、`Downloader.xpc`、`Installer.xpc`）。无 Authority、无 TeamIdentifier；删除需重签（禁止）或剥离（会破坏 `@rpath` 加载）。这是**第三方产物**，不是本项目签的 |
+| Gatekeeper 后果 | 首次打开 App 与 PKG 都必须手动批准（系统设置 → 隐私与安全性 → 仍要打开）。**不得**为安装而关闭 Gatekeeper 或 SIP。受 MDM/受管控策略禁止未签名软件的组织，本版本无法安装 |
+| 更新通道 | 无。`SUPublicEDKey` 为空，`appcast.xml` 从不发布，`tools/generate_appcast.sh` 拒绝运行（exit 2），`SUFeedURL` 指向的地址永远 404。升级方式只有下载新 PKG |
+| 为什么不改 | 签名需要付费账号与 macOS 构建机上的证书；本项目选择「完全未签名 + 完整披露」而不是「部分签名 + 误导用户」 |
+| 构建期约束 | `tools/codesign.sh`、`tools/notarize.sh`、`tools/generate_appcast.sh` 是 fail-closed 存根：`--help` 返回 0，其余调用返回 2。`tools/verify_signatures.sh` 与 `tools/verify_unsigned_release.sh` 断言产物**未**签名，`tools/test_unsigned_release.sh` 在 CI 中锁定这一状态 |
+| 关联 | [INSTALLATION_GUIDE.md](../INSTALLATION_GUIDE.md) §0、§5.3、§11；[RELEASE_NOTES.md](../RELEASE_NOTES.md) |
+
 ---
 
 ## 2. B 类：尚未验证
@@ -166,6 +180,8 @@ P4 Batch 1A 起，每条未验证事项都带**证据位置**：要么是已执�
 | **U-14** | **实际 EQ 听感** | **已有用户主观听感确认**（Batch 3A §10、§R2.9#7：各频段调整与 Reset 可听辨、符合预期；30 分钟播放无爆音/断续）；**没有频响 / 相位 / 削波测量**，跨设备与跨内容、旁通/启用切换未取证。**不得**声称音质已通过测量 |
 | **U-15** | **播放窗口 underrun** | 默认 buffer 下 **30 分钟零 underrun 增量**（Batch 3A §11、§R2.9#8）；低 buffer / 高负载未测；计数器无法区分空闲与播放期（Batch 3B O-3） |
 | **U-16** | **真实卸载/重装闭环** | PKG **安装**已真机验证（Batch 3A §R2.9#2）；「卸载 → 重装 → 恢复 EQ/音量」整条路径仍未执行，**无证据** |
+| **U-17** | **未签名 HAL 驱动能否被 `coreaudiod` 加载** | **NOT_VERIFIED**。构建成功、PKG 生成与载荷校验、`preinstall` 不含签名依赖，均已验证；但这三项**不能**证明系统会接受未签名驱动的加载。未在 macOS 14、未在任何 Intel Mac、未在受管控设备上验证。详见 [INSTALLATION_GUIDE](../INSTALLATION_GUIDE.md) §5.3 |
+| **U-18** | **未签名 PKG 在真实机器上的安装全流程** | **NOT_VERIFIED**。`pkgutil`/`spctl` 输出与载荷结构已验证；手动批准 Gatekeeper 拦截、真实写入 HAL 目录、安装后首次发声，均未在本版本上执行 |
 
 U-4 已由自动化测试关闭；U-14、U-15 与 U-2 的安装部分已取得真机证据（部分关闭）。
 其余未验证项（U-1、U-3、U-5、U-7、U-8、U-16 等）按发布策略作为**已披露限制**，
@@ -238,6 +254,7 @@ RT-1 – RT-5 属于**既有实现缺陷**，不是设计取舍。本轮（Closu
 | **P-6** | Host / App 全量回归 | `swift test` 全绿 + UI 冒烟 |
 | **P-7** | 真实负载下的排空预算 | 高负载（低 buffer size）下设备移除仍能证明排空 |
 | **P-8** | `coreaudiod` 重启 | 重启后能通过一次 IO 重启恢复（验证 L-6 的实际影响） |
+| **P-9** | **未签名发布在真实 Mac 上的可安装性与驱动加载** | 在一台干净的 Apple silicon Mac 上：手动批准 Gatekeeper → 安装 PKG → 确认驱动落在 HAL 目录 → 确认 `system_profiler SPAudioDataType` 出现 SoundBridge → 播放 30 分钟。macOS 14 与一台 Intel Mac 各做一次；记录 `spctl`、`pkgutil --check-signature`、`codesign -dv` 的原始输出 |
 
 ---
 
@@ -260,10 +277,10 @@ RT-1 – RT-5 属于**既有实现缺陷**，不是设计取舍。本轮（Closu
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
-| A 已知实现限制 | 12（L-1 – L-12） | 设计取舍，不修 |
-| B 尚未验证 | 16（U-1 – U-16，U-4 已关闭） | 其中 U-2（安装）、U-14、U-15 已部分取证；其余按发布策略作为已披露限制，不阻断 1.2.0 |
+| A 已知实现限制 | 13（L-1 – L-13） | 设计取舍，不修；L-13 是「完全未签名」发布策略 |
+| B 尚未验证 | 18（U-1 – U-18，U-4 已关闭） | 其中 U-2（安装）、U-14、U-15 已部分取证；U-17/U-18 为未签名发布新增，其余按发布策略作为已披露限制，不阻断 1.2.0 |
 | C 需要工程修复 | 10（RT-1 – RT-5、F-1 – F-5） | 有明确动作；H-1 – H-3 已关闭 |
-| D 产品测试要求 | 8（P-1 – P-8） | 发布前活动 |
+| D 产品测试要求 | 9（P-1 – P-9） | 发布前活动 |
 | 已关闭（历史） | 3 + 7 | 3 项历史风险 + 本文 §0 的 7 项 |
 
 **没有任何一条「未验证」因归档而变成「已验证」。** U-2（安装）、U-14、U-15 的升级

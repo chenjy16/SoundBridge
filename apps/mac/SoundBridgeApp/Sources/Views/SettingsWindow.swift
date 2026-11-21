@@ -51,56 +51,55 @@ struct SettingsView: View {
 			// Content
 			ScrollView {
 				VStack(spacing: 24) {
-					// Update Settings Section
-					VStack(alignment: .leading, spacing: 16) {
-						Text("Updates")
-							.font(.headline)
-							.foregroundColor(.primary)
+					// Update Settings Section.
+					// Only rendered when Sparkle actually has a feed. This release
+					// ships none, and a disabled "Check for Updates" button plus a
+					// "not configured" caption would advertise an entry that can
+					// never work -- so the section is omitted entirely instead.
+					if let updaterController = updaterController {
+						VStack(alignment: .leading, spacing: 16) {
+							Text("Updates")
+								.font(.headline)
+								.foregroundColor(.primary)
 
-						VStack(alignment: .leading, spacing: 12) {
-							Toggle("Automatically check for updates", isOn: $automaticCheckEnabled)
-								.onChange(of: automaticCheckEnabled) { newValue in
-									updaterController?.updater.automaticallyChecksForUpdates = newValue
-								}
-								.disabled(updaterController == nil)
-
-							if let lastCheck = lastCheckDate {
-								HStack {
-									Text("Last checked:")
-										.foregroundColor(.secondary)
-									Spacer()
-									Text(lastCheck, style: .relative)
-										.foregroundColor(.secondary)
-								}
-								.font(.caption)
-							}
-
-							Button(action: checkForUpdates) {
-								HStack {
-									if isCheckingForUpdates {
-										ProgressView()
-											.scaleEffect(0.8)
-											.frame(width: 16, height: 16)
-									} else {
-										Image(systemName: "arrow.triangle.2.circlepath")
+							VStack(alignment: .leading, spacing: 12) {
+								Toggle("Automatically check for updates", isOn: $automaticCheckEnabled)
+									.onChange(of: automaticCheckEnabled) { newValue in
+										updaterController.updater.automaticallyChecksForUpdates = newValue
 									}
-									Text(isCheckingForUpdates ? "Checking..." : "Check for Updates")
-								}
-								.frame(maxWidth: .infinity)
-							}
-							.disabled(isCheckingForUpdates || updaterController == nil)
-							.controlSize(.large)
 
-							if updaterController == nil {
-								Text("Update checking is not configured in this build.")
+								if let lastCheck = lastCheckDate {
+									HStack {
+										Text("Last checked:")
+											.foregroundColor(.secondary)
+										Spacer()
+										Text(lastCheck, style: .relative)
+											.foregroundColor(.secondary)
+									}
 									.font(.caption)
-									.foregroundColor(.secondary)
+								}
+
+								Button(action: checkForUpdates) {
+									HStack {
+										if isCheckingForUpdates {
+											ProgressView()
+												.scaleEffect(0.8)
+												.frame(width: 16, height: 16)
+										} else {
+											Image(systemName: "arrow.triangle.2.circlepath")
+										}
+										Text(isCheckingForUpdates ? "Checking..." : "Check for Updates")
+									}
+									.frame(maxWidth: .infinity)
+								}
+								.disabled(isCheckingForUpdates)
+								.controlSize(.large)
 							}
 						}
+						.padding(16)
+						.background(Color.secondary.opacity(0.05))
+						.cornerRadius(12)
 					}
-					.padding(16)
-					.background(Color.secondary.opacity(0.05))
-					.cornerRadius(12)
 
 					// System Info Section
 					VStack(alignment: .leading, spacing: 16) {

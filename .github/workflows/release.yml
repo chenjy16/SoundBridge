@@ -4,9 +4,19 @@ name: Release
 #
 # What this pipeline promises, and what it does not:
 #
-#   * The artifacts are ad-hoc signed. There is no Developer ID certificate, no
-#     `productsign` and no notarization anywhere in this file. The DMG and the
-#     PKG are unsigned archives that carry an ad-hoc signed app.
+#   * Every artifact is UNSIGNED. There is no Developer ID certificate, no
+#     ad-hoc signature, no `codesign` invocation, no `productsign`, no
+#     notarization and no stapling anywhere in this file or in the scripts it
+#     calls. The project has no Apple Developer Program membership and does not
+#     plan to get one.
+#     The only signature left in a built binary is the ad-hoc CodeDirectory ld64
+#     writes into every Mach-O; Apple silicon will not load a binary without it,
+#     and it carries no certificate, no TeamIdentifier and no bundle seal.
+#   * There is no Sparkle feed: no EdDSA key pair, no appcast.xml, and an empty
+#     SUPublicEDKey in the bundle, so the updater stays disabled in the app.
+#   * Gatekeeper is not a success condition. `spctl` is expected to refuse every
+#     artifact, and the unsigned gate below asserts exactly that. Users approve
+#     the first launch manually (docs/INSTALLATION_GUIDE.md).
 #   * A release is only published if every verification step below passes. The
 #     checks are not advisory: a missing PKG, a driver that disagrees with the
 #     protocol header, an entry missing from SHA256SUMS.txt or a stale artifact
@@ -184,20 +194,23 @@ jobs:
           make test-installer
           echo "✓ Install transaction tests passed"
 
-      - name: Run signing-argument tests
+      - name: Run unsigned release policy tests
         run: |
-          make test-codesign
-          echo "✓ codesign argument tests passed (no signature is created)"
+          # Static scan (no signing, notarization or appcast command may exist)
+          # plus fixture tests against tools/verify_signatures.sh. Nothing here
+          # signs anything, and dist/ is neither read nor written.
+          make test-unsigned
+          echo "✓ Unsigned release policy tests passed"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Create App Bundle
+      #
+      # No signing key is passed in: the bundle is assembled and nothing else.
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Create App Bundle
-        env:
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
         run: |
           make bundle
-          echo "✓ App bundle created"
+          echo "✓ App bundle created (unsigned)"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Verify the shipped Driver
@@ -206,7 +219,7 @@ jobs:
       # i.e. the bundle CMake emitted and create_app_bundle.sh copied. Source-level
       # checks cannot see a stale packages/driver/build or a packaging step that
       # drops the plist, so this runs on the finished artifact and stops the
-      # release before signing if the driver disagrees with the protocol header.
+      # release before the unsigned gate if the driver disagrees with the header.
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Verify Release Driver Bundle
         run: |
@@ -216,28 +229,19 @@ jobs:
           echo "✓ Bundled driver matches the protocol header"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Code Sign
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      # No Apple Developer account is required. Ad-hoc signing is what Apple
-      # silicon needs to execute the binaries at all, and it is enough to ship a
-      # DMG through GitHub releases. macOS asks the user to approve the first
-      # launch instead of trusting a notarized signature.
+      #  Assert the bundle is unsigned
       #
-      # This is NOT a Developer ID signature and must not be described as one:
-      # the signature has no certificate chain, no TeamIdentifier, and Gatekeeper
-      # has never seen it. The release notes say so in the same words.
-      - name: Code Sign App (ad-hoc)
-        env:
-          SIGN_MODE: adhoc
+      # This replaces the old sign-and-verify pair. The check is inverted: the
+      # run fails if the bundle turns out to be sealed, to carry an Authority or
+      # a TeamIdentifier, to declare a Sparkle public key, or to be accepted by
+      # Gatekeeper. The linker's ad-hoc stamp is reported, not failed -- Apple
+      # silicon will not load a binary without it, and it is not a signature this
+      # project produced.
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Verify App Bundle Is Unsigned
         run: |
-          make sign
-          echo "✓ App signed ad-hoc (not Developer ID, not notarized)"
-
-      - name: Verify Signatures
-        run: |
-          ./tools/verify_signatures.sh
-          codesign --verify --deep --strict --verbose=2 dist/SoundBridge.app
-          echo "✓ Ad-hoc signatures verify strictly; the bundle is sealed"
+          ./tools/verify_signatures.sh dist/SoundBridge.app
+          echo "✓ App bundle is unsigned (no seal, no identity, updater disabled)"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Create DMG
@@ -306,12 +310,15 @@ jobs:
       - name: Verify Package Driver
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          # --require-unsigned is the policy gate: a Developer ID signature on
+          # the shipped driver fails the run. Ad-hoc / linker-signed is expected.
           ./tools/verify_pkg_driver.sh \
             --pkg "dist/SoundBridge-$VERSION.pkg" \
             --expect-version "$VERSION" \
-            --expect-id com.soundbridge.driver
-          echo "The driver is structurally sound and ad-hoc signed."
-          echo "It is NOT Developer ID signed; that is expected for this pipeline."
+            --expect-id com.soundbridge.driver \
+            --require-unsigned
+          echo "The driver is structurally sound and carries no signing identity."
+          echo "PKG_DRIVER_SIGNATURE=DEVELOPER_ID_SIGNATURE_NOT_VERIFIED is expected."
 
       - name: Verify Installer Version Gate
         run: |
@@ -342,6 +349,20 @@ jobs:
             --expect "$VERSION" \
             --app dist/SoundBridge.app \
             --pkg "dist/SoundBridge-$VERSION.pkg"
+
+      - name: Verify Unsigned Release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # One gate over the three finished artifacts plus the feed. It fails if
+          # any of them turns out to be signed, sealed or notarized, and if an
+          # appcast.xml was left in dist/. Gatekeeper refusing them is the
+          # expected verdict, not a failure.
+          ./tools/verify_unsigned_release.sh \
+            --app dist/SoundBridge.app \
+            --pkg "dist/SoundBridge-$VERSION.pkg" \
+            --dmg "dist/SoundBridge-$VERSION.dmg" \
+            --dist dist
+          echo "✓ App, PKG and DMG are unsigned; no Sparkle feed was published"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  Stage the documents that ship with the binaries
@@ -387,34 +408,6 @@ jobs:
             exit 1
           fi
           echo "✓ Checksums verified ($lines entries)"
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  Generate Sparkle Appcast
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      - name: Generate Sparkle Appcast
-        id: appcast
-        env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-          SPARKLE_ED_PUBLIC_KEY: ${{ secrets.SPARKLE_ED_PUBLIC_KEY }}
-        run: |
-          # The appcast is optional for 1.2.0: auto-update is disabled unless the
-          # bundle carries a non-empty SUPublicEDKey, and generate_appcast.sh
-          # refuses to emit an unsigned feed. Both halves of the key pair are
-          # therefore required, and a missing pair is a skip - not a failure.
-          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ] || [ -z "$SPARKLE_ED_PUBLIC_KEY" ]; then
-            echo "::warning::Sparkle keys are not configured - the appcast is skipped and auto-update stays disabled in this build"
-            echo "generated=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          KEY_FILE="$RUNNER_TEMP/sparkle_ed_private_key"
-          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$KEY_FILE"
-          chmod 600 "$KEY_FILE"
-
-          SPARKLE_ED_PRIVATE_KEY_FILE="$KEY_FILE" ./tools/generate_appcast.sh
-          rm -f "$KEY_FILE"
-          echo "generated=true" >> "$GITHUB_OUTPUT"
-          echo "✓ Appcast generated"
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       #  The upload is all-or-nothing
@@ -464,19 +457,6 @@ jobs:
           # A published release with half its files is worse than a failed run:
           # fail_on_unmatched_files is what makes the list above a contract
           # instead of a wish.
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # The feed is uploaded by a second call rather than in the list above:
-      # it only exists when both Sparkle secrets are configured, and putting a
-      # conditional file in a fail_on_unmatched_files list would fail every
-      # first release instead of shipping without auto-update.
-      - name: Upload Sparkle Appcast
-        if: steps.appcast.outputs.generated == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/appcast/appcast.xml
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

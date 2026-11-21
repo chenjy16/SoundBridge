@@ -6,7 +6,7 @@
 # preparing a different release without editing the file.
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-driver test-host test-app test-installer protocol-check dsp-build sign verify release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
+.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-driver test-host test-app test-installer test-unsigned protocol-check dsp-build sign verify verify-unsigned release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
 
 # Default target - show help
 help:
@@ -27,15 +27,15 @@ help:
 	@echo "    make rebuild      - Full clean + rebuild"
 	@echo "    make update-version - Update all component versions from git tag"
 	@echo ""
-	@echo "  Release (Code Signing):"
-	@echo "    make release      - Build, sign, and verify for distribution"
-	@echo "    make sign         - Code sign the .app bundle"
-	@echo "    make verify       - Verify all code signatures"
-	@echo "    make test-release - Test the signed release build"
+	@echo "  Release (Unsigned):"
+	@echo "    make release      - Build and assert an unsigned distribution"
+	@echo "    make verify       - Assert the .app bundle is unsigned (no seal, no identity)"
+	@echo "    make verify-unsigned - Assert app + PKG + DMG are unsigned, no appcast"
+	@echo "    make test-release - Open the release build"
 	@echo ""
 	@echo "  Distribution:"
 	@echo "    make dmg          - Create DMG with drag-to-Applications layout"
-	@echo "    make full-release - Complete pipeline (build + sign + DMG)"
+	@echo "    make full-release - Complete pipeline (build + verify + DMG)"
 	@echo ""
 	@echo "  Verification (read-only, works on what is already in dist/):"
 	@echo "    make verify-pkg   - The package's two driver copies match the bundle in dist/"
@@ -127,7 +127,7 @@ install-deps:
 # Run all tests: protocol consistency first, then DSP -> Driver -> Host -> App.
 # The Host links the prebuilt DSP static library through a relative path, so
 # `dsp-build` has to run before `swift test` in packages/host.
-test: protocol-check version-check test-dsp test-driver test-host test-app test-installer test-codesign
+test: protocol-check version-check test-dsp test-driver test-host test-app test-installer test-unsigned
 	@echo "✓ All test suites passed"
 
 # Every version source agrees on $(VERSION) (App, Driver, VERSION files, CMake).
@@ -186,16 +186,18 @@ test-app:
 	@echo "Running App tests..."
 	@cd apps/mac/SoundBridgeApp && swift test
 
-# Signing script argument tests (Phase 3.4A)
+# Unsigned release policy tests
 #
-# codesign.sh --dry-run resolves the bundle, the identity and the options and
-# prints the plan it would execute; nothing is signed. That makes the
-# SB_APP_BUNDLE override, the refusals and the nesting order testable without a
-# certificate, and it works before `make bundle` because the test builds its own
-# fixture bundle.
-test-codesign:
-	@echo "Running codesign argument tests..."
-	@./tools/test_codesign_args.sh
+# Two halves: a static scan that fails if a signing, notarization or appcast
+# command has crept back into the workflow, the Makefile or tools/, and fixture
+# tests that build a tiny unsigned bundle in a temporary directory and assert the
+# verifiers accept it -- and refuse a sealed bundle, a bundle carrying a Sparkle
+# public key, or a release directory carrying an appcast.
+#
+# Nothing is signed and dist/ is never read or written.
+test-unsigned:
+	@echo "Running unsigned release policy tests..."
+	@./tools/test_unsigned_release.sh
 
 # Driver install transaction tests (Phase 2.2.1)
 #
@@ -250,37 +252,50 @@ rebuild: clean build bundle
 # into the driver bundle and `create_app_bundle.sh` copied into the app. Those
 # are two extra steps where a stale value can survive every source-level check.
 # `release` and `full-release` depend on it, so a mismatch stops the build
-# before anything is signed or packaged.
+# before anything is packaged.
 release-verify:
 	@./tools/verify_release_bundle.sh
 
-# Code signing targets
+# Unsigned release policy
+#
+# SoundBridge 1.2.0 is published without any signing identity: no Developer ID,
+# no ad-hoc signature, no PKG signature and no notarization. `sign` is kept only
+# so an old habit fails loudly -- it calls tools/codesign.sh, which refuses with
+# exit 2 and explains why. The verifiers are inverted accordingly: they pass only
+# when nothing was signed.
 sign:
-	@echo "Code signing SoundBridge.app..."
 	@./tools/codesign.sh
 
+# Assert the app bundle is unsigned (no seal, no Authority, empty SUPublicEDKey).
 verify:
-	@echo "Verifying signatures..."
 	@./tools/verify_signatures.sh
 
-# Build and sign (for release)
-release: build bundle release-verify sign verify
+# Assert the whole release set is unsigned: app, PKG, DMG, and no appcast.
+verify-unsigned:
+	@./tools/verify_unsigned_release.sh \
+		--app "$(APP_BUNDLE)" \
+		--pkg "$(dir $(APP_BUNDLE))SoundBridge-$(VERSION).pkg" \
+		--dmg "$(dir $(APP_BUNDLE))SoundBridge-$(VERSION).dmg"
+
+# Build and assert an unsigned distribution
+release: build bundle release-verify verify
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "     Release Build Complete!"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
-	@echo "Signed app: dist/SoundBridge.app"
+	@echo "Unsigned app: dist/SoundBridge.app"
+	@echo "  no Developer ID, no ad-hoc signature, no notarization"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  • Test: make test-release"
-	@echo "  • Notarize: ./tools/notarize.sh (Phase 2)"
-	@echo "  • Package DMG: ./tools/create_dmg.sh (Phase 3)"
+	@echo "  • Package DMG: ./tools/create_dmg.sh"
+	@echo "  • Package PKG: ./tools/build_installer_pkg.sh"
 	@echo ""
 
-# Test the signed release build
+# Open the release build
 test-release:
-	@echo " Testing signed release build..."
+	@echo "Testing release build..."
 	@open dist/SoundBridge.app
 
 # The app bundle the DMG wraps. Overridable so `make dmg-precheck` can be pointed
@@ -413,13 +428,14 @@ verify-payload:
 test-release-payload:
 	@./tools/test_release_payload.sh
 
-# Full release pipeline (build, sign, create DMG)
-full-release: build bundle release-verify sign verify dmg
+# Full release pipeline (build, assert unsigned, create DMG)
+full-release: build bundle release-verify verify dmg
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  Full Release Build Complete!"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
+	@echo "  Signed by nothing: no Developer ID, no ad-hoc, no notarization"
 	@ls -lh dist/*.dmg
 
 # Update changelog

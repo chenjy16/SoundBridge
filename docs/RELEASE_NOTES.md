@@ -1,7 +1,7 @@
 # SoundBridge 1.2.0 — Release Notes
 
 发布日期：2026-11-21（GitHub Releases）
-发布类型：**正式发布（ad-hoc 签名，未公证；首次启动需按安装指南放行）**
+发布类型：**正式发布（完全未签名、未公证；首次启动需按安装指南手动放行）**
 协议版本：`0x00020200`（131584）
 
 ---
@@ -19,9 +19,11 @@
 
 **本版本已完成首次真机验证。** P4 Batch 3A 在真实 macOS 27.2.1 上按用户路径完成了
 PKG 安装 → 启动 → 播放 → 音量 / Mute / EQ → 30 分钟基线共 8 项验证（见 §4.1）。
-仍未验证的事项（卸载/重装闭环、热插拔、低 buffer、8 小时、多设备、14.4、x86_64）
-在 §5 逐条列出。**不得**把本版本描述为「音频质量已通过测量」——EQ 只有用户主观听感
-确认，没有频响/相位数据。
+那次验证用的是**带 ad-hoc 签名的 RC**；P4 Batch 7 改为完全未签名后，尚未在新产物上
+重跑，故 §4.1 中与签名有关的结论带明确归属标注。
+仍未验证的事项（卸载/重装闭环、热插拔、低 buffer、8 小时、多设备、14.4、x86_64、
+未签名驱动的实际加载）在 §5 逐条列出。**不得**把本版本描述为「音频质量已通过测量」——
+EQ 只有用户主观听感确认，没有频响/相位数据。
 
 ---
 
@@ -38,9 +40,15 @@ PKG 安装 → 启动 → 播放 → 音量 / Mute / EQ → 30 分钟基线共 8
 | `SoundBridge-1.2.0.pkg` | App + 驱动 | **安装与升级的唯一受支持路径** |
 | `SoundBridge-1.2.0.dmg` | 仅 App | 只替换 App，或查看包内容 |
 
-两个包都是 **ad-hoc 签名，未经 Apple 公证**。本项目不承诺 Developer ID 或
-Notarization 版本。首次运行需要一次 Gatekeeper 放行，步骤见
+两个包都是 **完全未签名**：没有 Developer ID 签名，没有 ad-hoc 签名，PKG 没有签名，
+整个发布没有经过 Apple notarization。`spctl` 对两者都报
+`rejected / source=no usable signature`，这是设计上的预期状态，不是构建失败。首次运行
+App 与 PKG 都需要一次手动放行，步骤见
 [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) 第 5 节。
+
+本项目没有 Apple Developer Program 账号，因此**不提供也不会提供**任何签名或公证版本。
+唯一残留在二进制里的签名是链接器写入的 ad-hoc CodeDirectory（Apple silicon 要求它
+存在才能加载代码，见 [Known-Limitations](risks/Known-Limitations.md) L-13）。
 
 ---
 
@@ -181,7 +189,16 @@ Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 
   三/四向驱动一致性、架构、Sparkle 结构、Host 版本证据。
 - `test_release_payload.sh`：先做破坏再断言检查器失败（244 断言，`TEST_VERIFIED`）。
   本版本起使用**合成 fixture**，不再依赖 `dist/` 中任何历史发布产物。
-- `test_codesign_args.sh`：58 项签名参数检查（`TEST_VERIFIED`）。
+- `test_unsigned_release.sh`：68 项未签名发布策略检查（`TEST_VERIFIED`）。前半段静态
+  断言 workflow / Makefile / `tools/` 中不存在任何签名、公证或 appcast 调用；后半段用
+  临时 fixture 断言两个检查器**确实拒绝**已签名、带 `SUPublicEDKey` 或带 appcast 的
+  产物。取代了 1.1.x 的 `test_codesign_args.sh`（该脚本随签名功能一起删除）。
+- `verify_signatures.sh` / `verify_unsigned_release.sh`：断言产物未签名 —— bundle 未
+  封印、无签名身份、`SUPublicEDKey` 为空、PKG 无签名、DMG 无签名、无 appcast。前者在
+  `make verify` 中，后者在 release workflow 的 `Verify Unsigned Release` 步骤中执行。
+- `create_app_bundle.sh`：不再接受 `SPARKLE_ED_PUBLIC_KEY`。这个变量一旦被继承（旧的
+  CI secret、残留的 shell），更新通道会被悄悄重新启用，所以现在直接失败（exit 1），
+  并把 bundle 内的 `SUPublicEDKey` 强制置空后复查。
 
 ---
 
@@ -195,7 +212,7 @@ Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 
 | App（`swift test`，`apps/mac/SoundBridgeApp`） | **253 tests / 0 failures** | TEST_VERIFIED |
 | DSP（`make test-dsp`） | **33 tests** | TEST_VERIFIED |
 | 安装器静态检查 | **36 scenarios / 168 assertions** | TEST_VERIFIED |
-| 签名参数 | **58 checks** | TEST_VERIFIED |
+| 未签名发布策略 | **68 checks** | TEST_VERIFIED |
 | 发布载荷破坏测试 | **244 assertions**（含合成 fixture 构建） | TEST_VERIFIED |
 | 安装事务 / 安装门禁 | `make test-install-transaction`、`make test-installer-gate` | TEST_VERIFIED |
 | Protocol 布局与四份头副本 | `make protocol-check`、`tools/sync_shared_header.sh --check` | TEST_VERIFIED |
@@ -207,20 +224,26 @@ Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 
 
 ### 4.1 真实环境验证（P4 Batch 3A，2026-11-21，macOS 27.2.1）
 
+> **证据归属**：下表取自 P4 Batch 3A 的 RC 构建，该构建当时仍带 **ad-hoc 签名**。P4
+> Batch 7 已把发布策略改为完全未签名，**本表未在未签名产物上重跑**。第 3 行与第 5 行
+> 的签名相关描述只描述当时那个 RC，不适用于当前发布物；当前发布物的签名状态由
+> `tools/verify_signatures.sh` 与 `tools/verify_unsigned_release.sh` 断言，见 §3.11。
+
 | # | 项目 | 结果 | 关键证据 |
 |---|---|---|---|
 | 1 | RC 产物完整性 | PASS | PKG `42ae57b1…` / DMG `4d5da867…`；装后逐文件 diff 0 |
 | 2 | PKG 首次安装事务 | PASS | 首次安装分支命中；receipt 1.2.0 @19:24:02；`protocol 131584` |
-| 3 | 首次启动 / Gatekeeper | PASS（首启未被拦截） | 无 quarantine 属性；`spctl` rejected 为 ad-hoc 预期，**不宣称通过 Gatekeeper** |
+| 3 | 首次启动 / Gatekeeper | PASS（首启未被拦截） | 无 quarantine 属性；`spctl` rejected 为未公证的预期结果，**不宣称通过 Gatekeeper** |
 | 4 | App / Host / HAL 启动 | PASS | App 7693 → Host 7695（PPID 正确）；驱动由 `coreaudiod` 加载 |
-| 5 | 安装后签名完整性 | PASS | deep-strict 校验 exit 0；`TeamIdentifier=not set` 为预期 |
+| 5 | 安装后签名完整性 | PASS（**仅对带 ad-hoc 签名的 RC**） | deep-strict 校验 exit 0；`TeamIdentifier=not set`。当前未签名产物上该检查必然失败，这是新策略下的预期值，不再作为发布门禁 |
 | 6 | 真实设备识别 | PASS | 两个代理设备，48 kHz / virtual |
 | 7 | 音量 / Mute / EQ | PASS | 音量 13 档轨迹；Mute 双向跳变 + 人耳确认；`eq_sequence` 2→14 |
 | 8 | 30 分钟播放基线 | PASS | **播放区间** underrun 增量 0、overrun 0、overBudget 0、max 120 µs、RSS 不增长 |
 
 边界：本表不等于卸载/重装、热插拔、`coreaudiod` 重启、低 buffer、8 小时、14.4、
 x86_64 通过；这些仍在 §5 列为未验证。计数器本身不区分空闲与播放期（Batch 3B O-3），
-因此本表只引用播放区间内的增量。
+因此本表只引用播放区间内的增量。**切换为未签名发布后，第 1–4、6–8 行的结论需要在新
+产物上重新取证（P-9）。**
 
 ---
 
@@ -239,15 +262,20 @@ x86_64 通过；这些仍在 §5 列为未验证。计数器本身不区分空�
 | N-6 | x86_64 真机运行 | 只有 universal 构建产物，未在 Intel 机器上运行。 |
 | N-7 | 长时间稳定性（≥ 8 小时） | 未执行。 |
 | N-8 | 多设备并发 / 热插拔矩阵 | 未执行。 |
+| **N-9** | **未签名 HAL 驱动能否被 `coreaudiod` 加载** | **NOT_VERIFIED**。「驱动构建成功」「PKG 无签名且载荷校验通过」「`preinstall` 不调用签名工具」都**不能**证明系统会接受未签名驱动的加载。未在 macOS 14、未在任何 Intel Mac、未在受管控设备上验证。见 [INSTALLATION_GUIDE](INSTALLATION_GUIDE.md) §5.3。 |
+| **N-10** | **未签名 PKG 的真实安装全流程** | **NOT_VERIFIED**。手动批准 Gatekeeper 拦截、真实写入 HAL 目录、安装后首次发声，均未在未签名产物上执行。 |
 
-完整登记见 [Known-Limitations](risks/Known-Limitations.md) 的 B 类（U-1 – U-16，U-4 已关闭）与
-D 类（P-1 – P-8）。
+完整登记见 [Known-Limitations](risks/Known-Limitations.md) 的 B 类（U-1 – U-18，U-4 已关闭）与
+D 类（P-1 – P-9）。
 
 ---
 
 ## 6. 已知限制（不影响本版本可安装）
 
-- Sparkle 自动更新**未启用**：`SUPublicEDKey` 为空，updater 不初始化。请下载新 PKG 升级。
+- Sparkle 自动更新**不存在**：`SUPublicEDKey` 为空，`appcast.xml` 从不发布，
+  `tools/generate_appcast.sh` 拒绝运行。请下载新 PKG 升级。
+- **发布物完全未签名、未公证**（L-13）：没有 Developer ID、没有 ad-hoc 签名、PKG 无
+  签名。App 与 PKG 首次打开都需要手动放行；受 MDM 策略禁止未签名软件的组织无法安装。
 - 安装器不检查 App/Host 是否在运行：安装前请手动退出（P2-5）。
 - DSP 采集侧测试计数器存在已知偏差（P2-1）：它不参与发布门禁，但读取该数字时需注意。
 - Driver 侧 RT-1 – RT-5、Host 侧残余 RT 问题仍未处理完：可能导致真实负载下的爆音/卡顿，
@@ -277,7 +305,10 @@ D 类（P-1 – P-8）。
 - ≥ 8 小时稳定性、多设备并发未测（N-7、N-8）
 - EQ 听感仅用户主观确认，无测量数据（N-1）
 
-签名与分发：ad-hoc 签名、未公证，`spctl` 拒绝是预期状态；首次启动按
-[安装指南](INSTALLATION_GUIDE.md) 放行，不关闭 Gatekeeper 与 SIP。
+签名与分发：**完全未签名、未公证**（无 Developer ID、无 ad-hoc 签名、PKG 无签名），
+`spctl` 报 `rejected / source=no usable signature` 是预期状态；首次启动与 PKG 安装按
+[安装指南](INSTALLATION_GUIDE.md) 第 5 节手动放行，不关闭 Gatekeeper 与 SIP。未签名
+HAL 驱动是否会被 `coreaudiod` 加载仍为 NOT_VERIFIED（N-9），真实 Mac 验证计划见
+Known-Limitations P-9。
 
 原则不变：未验证项一律标注 NOT_VERIFIED，不写成 PASS。

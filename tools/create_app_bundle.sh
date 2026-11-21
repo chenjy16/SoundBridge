@@ -357,18 +357,43 @@ echo "  Created bundle structure"
 echo "  Copying Info.plist..."
 cp "$PROJECT_ROOT/apps/mac/SoundBridgeApp/Info.plist" "$APP_PATH/Contents/Info.plist"
 
-# Inject the Sparkle public key at bundle time.
-# The public key is safe to publish, but it is kept out of the repository so a
-# fresh checkout (and any local build) stays keyless: with an empty
-# SUPublicEDKey the app never starts Sparkle. Release builds set
-# SPARKLE_ED_PUBLIC_KEY from the CI secret.
+# The bundle must ship an empty Sparkle public key.
+#
+# Auto-update is not part of this project's release policy, so no key is ever
+# injected: an empty SUPublicEDKey is what makes the updater refuse to start,
+# and it is also what tools/verify_signatures.sh asserts. A build that inherits
+# SPARKLE_ED_PUBLIC_KEY from the environment (an old CI secret, a stale shell)
+# would silently re-enable the update path, so it fails instead of injecting.
 if [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then
-    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_ED_PUBLIC_KEY" \
-        "$APP_PATH/Contents/Info.plist"
-    echo "  Sparkle public key injected"
-else
-    echo "  No SPARKLE_ED_PUBLIC_KEY set - auto-update will be disabled in this build"
+    echo "Error: SPARKLE_ED_PUBLIC_KEY is set, but this project publishes an" >&2
+    echo "       empty SUPublicEDKey and no update feed. Unset it to build." >&2
+    exit 1
 fi
+/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey " "$APP_PATH/Contents/Info.plist"
+BUNDLED_KEY="$( /usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' \
+    "$APP_PATH/Contents/Info.plist" 2>/dev/null || true )"
+if [ -n "$BUNDLED_KEY" ]; then
+    echo "Error: the bundled Info.plist carries SUPublicEDKey=$BUNDLED_KEY." >&2
+    exit 1
+fi
+echo "  SUPublicEDKey forced empty - auto-update cannot start"
+
+# Automatic checks are the second switch: an empty key stops the updater from
+# initialising, but a plist saying "check automatically" still promises the user
+# something. Pin it to false here so a hand-edited source plist cannot slip
+# through, and so verify_signatures.sh has something deterministic to assert.
+/usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" \
+    "$APP_PATH/Contents/Info.plist"
+BUNDLED_AUTOCHECKS="$( /usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' \
+    "$APP_PATH/Contents/Info.plist" 2>/dev/null || true )"
+case "$BUNDLED_AUTOCHECKS" in
+    false|FALSE|NO|0)
+        echo "  SUEnableAutomaticChecks forced false - no update entry is advertised" ;;
+    *)
+        echo "Error: the bundled Info.plist sets SUEnableAutomaticChecks='$BUNDLED_AUTOCHECKS'." >&2
+        exit 1 ;;
+esac
+
 echo "  Info.plist copied"
 
 # Copy app icon

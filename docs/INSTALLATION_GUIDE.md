@@ -17,9 +17,15 @@ SoundBridge 由两部分组成：
 
 只安装 App 是不够的：驱动在系统目录里，只有安装包能写入。**因此有两个下载文件，用途不同。**
 
-**本版本未经 Apple 公证（notarization），使用 ad-hoc 签名。** 这不是 Developer ID
-签名，macOS 无法验证发布者，首次运行时系统会要求手动确认一次。这是预期行为，不是
-安装失败。本项目不提供、也不承诺 Developer ID 签名或公证版本。
+**本版本完全未签名，也未公证。** 没有 Developer ID 签名，没有 ad-hoc 签名，PKG 没有
+签名，整个发布没有经过 Apple notarization。macOS 无法验证发布者或完整性，首次运行 App
+与 PKG 时都会拦下，需要按要求手动批准一次（第 5 节）。这是预期行为，不是安装失败。
+本项目不提供、也不承诺任何签名或公证版本 —— 因为没有 Apple Developer Program 账号。
+
+唯一残留在二进制里的「签名」是链接器（`ld64`）给每个 Mach-O 写入的 ad-hoc
+CodeDirectory：Apple silicon 要求它存在才允许加载代码。它不含证书、不含团队标识，
+不构成身份认证。`codesign --verify --strict` 对 App、驱动和 PKG 都会报
+`code object is not signed at all` 或 `no signature`，这是正常的。
 
 **安装前请先退出 SoundBridge。** 安装器不检查 App 或 Host 是否在运行（见
 [Known-Limitations](risks/Known-Limitations.md) P2-5）：一个正在运行的 Host 会在驱动
@@ -131,6 +137,25 @@ shasum -a 256 -c SHA256SUMS.txt
 「系统设置 → 隐私与安全性」的被阻止项目列表里。如果上述路径在你的系统上不生效，
 请提 issue 并附系统版本，而不是降低系统安全级别。
 
+### 5.3 未签名 HAL 驱动会被 `coreaudiod` 加载吗（未验证）
+
+这一条必须与其他几条分开看，四件事不能互相证明：
+
+| 环节 | 状态 | 依据 |
+|---|---|---|
+| 未签名驱动能被构建出来 | 已验证 | 本机构建产出的 `SoundBridgeDriver.driver` 为 `arm64 + x86_64`，无签名身份 |
+| 未签名 PKG 能被生成并校验载荷 | 已验证 | `pkgutil --check-signature` 报 `no signature`，载荷与结构校验全部通过 |
+| PKG 能被安装、驱动能被拷入 HAL 目录 | 未在本版本实测 | 安装脚本无签名依赖（`preinstall`/`postinstall` 不调用 `codesign`/`spctl`），但未执行真实安装 |
+| **`coreaudiod` 真的加载了这个未签名驱动** | **NOT VERIFIED** | 需要在真实 Mac 上安装并观察，本版本未做 |
+
+也就是说：构建成功、PKG 结构正确，都**不能**推出「系统会接受这个驱动的加载」。历史上
+HAL 插件目录对代码签名的要求随 macOS 版本变化，且可能受本机安全策略、MDM 配置、SIP
+状态影响。**本版本没有在 macOS 14 上验证过，也没有在任何 Intel Mac 上验证过。**
+
+如果安装后 `system_profiler SPAudioDataType | grep -i soundbridge` 没有输出，请先按
+8.2.1–8.2.2 收集 `coreaudiod` 日志再提 issue —— 这类失败很可能是系统拒绝加载未签名
+驱动，而不是安装出错。
+
 ---
 
 ## 6. 确认驱动已安装
@@ -216,13 +241,19 @@ log show --last 10m --predicate 'process == "coreaudiod"' 2>/dev/null \
 
 **8.2.3 文件是否完整**
 
+该驱动**未签名**，所以不能用 `codesign --verify` 验它 —— 那会返回
+`code object is not signed at all`，而这正是本版本的正常状态，不代表文件损坏。用户侧
+唯一可用的完整性手段是对下载的 PKG/DMG 核对 `SHA256SUMS.txt`（第 2 节）：安装器本身
+在写入前校验载荷，PKG 的 preinstall 阶段也会再次核对装入的副本。
+
+确认 bundle 结构存在即可：
+
 ```bash
-codesign --verify --strict --verbose=2 \
-  "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
+/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+  "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
 ```
 
-期望 `valid on disk` 与 `satisfies its Designated Requirement`。ad-hoc 签名同样会
-通过这项检查；它证明文件未被改动，不代表 Apple 认可发布者。
+期望 `com.soundbridge.driver`。读不出 plist 说明副本被破坏，重新用 PKG 安装。
 
 **8.2.4 让系统重新扫描 HAL 目录**
 
@@ -338,9 +369,13 @@ sudo cp -R "$HOME/SoundBridgeDriver-backup-YYYYMMDD" \
 
 ## 11. 自动更新
 
-**Sparkle 自动更新当前未启用。** `Info.plist` 的 `SUPublicEDKey` 为空，App 启动时
-会跳过 updater 初始化并打印 `Update feed not configured`。升级方式就是下载新的 PKG
-并按本文第 3 节安装。驱动永远不会自行更新。
+**没有更新通道。** `Info.plist` 的 `SUPublicEDKey` 为空，`SUFeedURL` 指向的
+`appcast.xml` 永远不会被发布，`tools/generate_appcast.sh` 会直接拒绝运行（exit 2）。
+App 启动时跳过 updater 初始化并打印 `Update feed not configured`。升级方式就是下载
+新的 PKG 并按本文第 3 节安装。驱动永远不会自行更新。
+
+`Sparkle.framework` 仍然在 bundle 里，只是因为 `SoundBridgeApp` 通过 `@rpath` 链接它，
+删掉会导致 App 无法启动。它不参与任何更新流程。
 
 ---
 
@@ -355,14 +390,18 @@ sudo cp -R "$HOME/SoundBridgeDriver-backup-YYYYMMDD" \
 | 2 校验 SHA256 | SOURCE_VERIFIED | Release 流程生成 `SHA256SUMS.txt` |
 | 3 用 PKG 安装 | SOURCE_VERIFIED | 载荷布局与 preinstall 门禁由 `make verify-installer-pkg` 静态校验 |
 | 4 用 DMG 安装 | SOURCE_VERIFIED | DMG 只含 App |
-| 5 被系统拦下 | SOURCE_VERIFIED | ad-hoc 签名的必然结果；未在本版本上实测 |
+| 5 被系统拦下 | SOURCE_VERIFIED | 未签名产物的必然结果（`spctl` 报 `rejected / source=no usable signature`）；未在本版本上实测批准流程 |
+| 5.3 驱动能否被加载 | **NOT_VERIFIED** | 构建、PKG 结构与载荷校验通过，但 `coreaudiod` 是否接受未签名驱动未在真实 Mac 上验证 |
 | 6 确认驱动已安装 | TEST_VERIFIED（读取命令） | 命令在现有 1.1.x 驱动上执行过；1.2.0 的安装结果未验证 |
 | 7 声音设置 | SOURCE_VERIFIED | 设备选择由 CoreAudio 与菜单栏列表决定 |
 | 8.1 HDMI/DP 无声 | NOT_VERIFIED | 未在真实 HDMI/DP 设备上执行本版排查流程 |
 | 8.2 驱动未加载 | SOURCE_VERIFIED | 命令可用，未用于诊断真实加载失败 |
 | 9 卸载 | TEST_VERIFIED（策略） | 策略与 `tools/uninstall_driver.sh` 由单元测试锁定；真实卸载未执行 |
 | 10 恢复旧版驱动 | NOT_VERIFIED | 未执行 |
-| 11 自动更新 | SOURCE_VERIFIED | `SUPublicEDKey` 为空，updater 不初始化 |
+| 11 自动更新 | SOURCE_VERIFIED | `SUPublicEDKey` 为空，无 appcast 发布，`generate_appcast.sh` 拒绝运行 |
+
+**未在以下环境验证**：macOS 14、任何 Intel Mac、任何启用了 MDM/受管控策略的设备。
+本版本的构建与结构校验只在 macOS 27.2.1（arm64）上完成。
 
 **尚未验证的三件事**（详见 [Release Notes](RELEASE_NOTES.md)）：
 

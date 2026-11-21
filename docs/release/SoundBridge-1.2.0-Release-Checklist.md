@@ -60,7 +60,7 @@ make test           # protocol check + DSP/Host/App/installer
 | App | `make test-app` | **253 tests / 0 failures** |
 | 安装事务 | `make test-installer` | 见输出（每个场景独立 mktemp） |
 | 安装门禁 | `make test-installer-gate PKG=<pkg>` | 36 scenarios / 168 assertions |
-| 签名参数 | `make test-codesign` | 58 checks |
+| 未签名发布策略 | `make test-unsigned` | **68 checks**（静态扫描 + fixture 拒绝测试） |
 | 发布载荷破坏测试 | `make test-release-payload` | **244 assertions**（合成 fixture，不读 `dist/`） |
 | 安装器静态检查 | `make verify-installer-pkg PKG=<pkg>` | 布局 + 烘焙版本/协议 + 事务脚本一致 |
 
@@ -83,24 +83,34 @@ clang++ -std=c++17 -O1 -g -fsanitize=thread  ...
 已记录的能力限制：macOS arm64 上不提供 LSan 独立目标；TSan 只覆盖被执行的
 代码，未报告 ≠ 无竞争。
 
-## 4. 打包与签名
+## 4. 打包（不签名）
 
 ```bash
 make bundle
-make sign
-make verify
+make verify            # 断言 .app 未签名
+make verify-unsigned   # 断言 app / PKG / DMG 未签名，且无 appcast
 ```
 
 | 检查项 | 期望 |
 |---|---|
 | `.app` bundle | 生成于 `dist/` |
-| 签名 | **ad-hoc（非公证）**，与当前发布方式一致 |
-| `make verify` | 全部签名校验通过 |
+| 签名 | **无**。不执行 `codesign`，没有 Developer ID，没有 ad-hoc 签名，没有公证 |
+| `make verify` | `UNSIGNED_APP=PASS`：bundle 未封印、无 `Authority`/`TeamIdentifier`、`SUPublicEDKey` 为空 |
+| `make verify-unsigned` | `UNSIGNED_RELEASE=PASS`：PKG `no signature`、DMG 未签名、无 appcast |
+| `make sign` | **必须失败**（exit 2）。若它成功，说明有签名路径被重新引入 |
 
-若改为 Developer ID + 公证，必须先更新
-[risks/Known-Limitations.md](../risks/Known-Limitations.md) 与
+预期会看到的正常输出：`codesign --verify --strict` 对 App/驱动报
+`code object is not signed at all`，`spctl` 报 `rejected / source=no usable signature`。
+**这两条是本策略的期望值，不是缺陷**，任何「修正」它们的行为都违反发布策略。
+
+唯一允许存在的签名是 `ld64` 写入每个 Mach-O 的 ad-hoc CodeDirectory，以及
+`Sparkle.framework`（第三方 SwiftPM 产物）自带的 ad-hoc bundle 签名。两者均无证书
+身份；`verify_signatures.sh` 对前者计入 `LINKER_SIGNED`，对后者仅以 NOTE 列出。
+
+若将来改为 Developer ID + 公证，必须先更新
+[risks/Known-Limitations.md](../risks/Known-Limitations.md) L-13、
 [architecture/SoundBridge-1.2.0-Architecture.md](../architecture/SoundBridge-1.2.0-Architecture.md)
-§1 中对签名方式的描述，不能只改脚本。
+§1、本检查单与 README 中对签名方式的描述，并重写三个 fail-closed 存根，不能只改脚本。
 
 ## 5. 安装器与 DMG
 
@@ -128,6 +138,10 @@ make test-release-payload
 
 第 1–3 项已完成；第 4、5 项只覆盖主观听感与默认 buffer 部分；其余 7 项仍**从未执行**。
 执行后请把输出路径填在第 4 列。
+
+> **这些证据取自带 ad-hoc 签名的 RC。** P4 Batch 7 把发布策略改为完全未签名后，第 1–3
+> 行**尚未在新产物上重跑**：安装、启动、驱动加载都必须在未签名产物上重新取证，见 §8.2
+> 的 L-8/L-9。旧证据不能沿用。
 
 | # | 步骤 | 通过判据 | 证据（当前） |
 |---|---|---|---|
@@ -184,9 +198,14 @@ underrun 指标，应先降级日志级别；本检查单与 [RELEASE_NOTES](../
 | L-5 | ≥ 8 小时稳定性、多设备并发未测 | U-7、U-8 | NOT_VERIFIED |
 | L-6 | EQ 听感仅主观确认，无测量数据 | U-14 | 部分取证 |
 | L-7 | RT-1 – RT-5 未处理（可能真实负载下爆音/卡顿，不影响内存安全） | Known-Limitations §3.1 | 已知缺陷 |
+| L-8 | 发布物完全未签名、未公证：App/PKG/DMG 首次打开均被 Gatekeeper 拒绝，需手动放行；受 MDM 策略禁止未签名软件的组织无法安装 | L-13 | SOURCE_VERIFIED（`spctl`/`pkgutil` 输出已取证） |
+| L-9 | **未签名 HAL 驱动能否被 `coreaudiod` 加载未验证**（构建成功 ≠ 安装成功 ≠ 系统接受 ≠ 实际加载） | U-17、N-9 | NOT_VERIFIED |
+| L-10 | 未签名 PKG 在真实机器上的完整安装流程（批准拦截 → 写入 HAL → 首次发声）未在未签名产物上执行 | U-18、N-10 | NOT_VERIFIED |
+| L-11 | 无自动更新通道：`SUPublicEDKey` 为空、无 appcast、`generate_appcast.sh` 拒绝运行 | L-13 | SOURCE_VERIFIED |
 
 L-1 – L-6 属于「缺证据」，通过真实环境执行结案；L-7 属于「已知缺陷」，只能通过工程
-修改结案。两者不能用同一种方式结案。
+修改结案。L-8、L-11 是**刻意的发布策略**，不可「修复」；L-9、L-10 是策略带来的
+**未验证边界**，只能通过真实 Mac 执行 P-9 结案。四类不能用同一种方式处理。
 
 **已在本轮关闭**：Host / App 全量回归（原 B-3）——测试数字见
 [RELEASE_NOTES](../RELEASE_NOTES.md) §4；Host-only Restart 与 EQ Mapping 自动恢复已完成
@@ -201,9 +220,11 @@ L-1 – L-6 属于「缺证据」，通过真实环境执行结案；L-7 属于�
 日期:                YYYY-MM-DD
 VERSION:             1.2.0（git tag: ...）
 协议版本:            0x00020200
-Driver Build:        ...
-Host Build:          ...
-签名方式:            ad-hoc / Developer ID
+驱动与 Host 构建:   ...
+签名方式:            无（未签名、未公证；仅 ld64 ad-hoc CodeDirectory）
+UNSIGNED_APP:        PASS / FAIL（tools/verify_signatures.sh 输出）
+UNSIGNED_RELEASE:    PASS / FAIL（tools/verify_unsigned_release.sh 输出）
+PKG SHA-256:         ...
 DMG SHA-256:         ...
 已执行检查单项:       §0 §1 §2 §3 §4 §5 §6(1-5)
 未执行项及原因:       ...

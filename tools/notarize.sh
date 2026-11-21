@@ -1,109 +1,54 @@
 #!/bin/bash
-set -e
+#
+# Notarization is not part of SoundBridge's release policy.
+#
+# This script used to zip the app, submit it with `xcrun notarytool`, staple the
+# ticket with `xcrun stapler` and rebuild the DMG. That path required an Apple
+# Developer Program account (APPLE_ID / APPLE_ID_PASSWORD / APPLE_TEAM_ID) and a
+# Developer ID signature -- neither exists for SoundBridge 1.2.0, and neither is
+# planned.
+#
+# Notarization is also impossible without a signature: the notary service only
+# accepts Developer ID signed code, so "unsigned but notarized" is not a state a
+# release can be in. The install guide tells users what they will see instead.
+#
+# The previous implementation is in git history at commit 0b50ae1.
+#
+set -uo pipefail
 
-# SoundBridge Notarization Script
-# Notarizes the signed app, staples the ticket, then rebuilds the DMG.
+print_help() {
+    cat <<'EOF'
+notarize.sh - disabled
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-APP_PATH="$PROJECT_ROOT/dist/SoundBridge.app"
+Apple notarization is not part of SoundBridge's release policy. It requires a
+Developer ID signature, an Apple Developer Program account and a notary service
+credential, none of which exist for this project.
 
-# create_dmg.sh names the archive after the app's version (SoundBridge-1.1.1.dmg),
-# so the path reported at the end is derived the same way instead of assuming the
-# old unversioned name.
-APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
-if [ -n "$APP_VERSION" ]; then
-    DMG_PATH="$PROJECT_ROOT/dist/SoundBridge-$APP_VERSION.dmg"
-else
-    DMG_PATH="$PROJECT_ROOT/dist/SoundBridge.dmg"
-fi
-ZIP_PATH="$PROJECT_ROOT/dist/SoundBridge-notarize.zip"
+This script refuses every invocation and exits 2. The DMG and PKG are published
+unsigned; users approve the first launch manually (see docs/INSTALLATION_GUIDE.md).
+EOF
+}
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) print_help; exit 0 ;;
+    esac
+done
 
-section() { echo -e "\n${BLUE}----------------------------------------\n  $1\n----------------------------------------${NC}"; }
+cat >&2 <<'EOF'
+ERROR: notarization is disabled in this repository (exit 2).
 
-# ── Prerequisites ──────────────────────────────────────────────
+SoundBridge 1.2.0 is published unsigned and unnotarized. No Apple Developer
+Program account exists, no Developer ID signature is produced, and the notary
+service would reject an unsigned submission anyway.
 
-section "Checking Prerequisites"
+Nothing was submitted, zipped, stapled or rebuilt. Nothing in dist/ was modified.
 
-if [ ! -d "$APP_PATH" ]; then
-    echo -e "${RED}ERROR: $APP_PATH not found. Run 'make release' first.${NC}"
-    exit 1
-fi
-
-# Require credentials via environment variables
-if [ -z "$APPLE_ID" ] || [ -z "$APPLE_ID_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
-    echo -e "${RED}ERROR: Missing required environment variables.${NC}"
-    echo ""
-    echo "Please set the following before running:"
-    echo "  export APPLE_ID=\"your-apple-id@example.com\""
-    echo "  export APPLE_ID_PASSWORD=\"your-app-specific-password\""
-    echo "  export APPLE_TEAM_ID=\"YOUR_TEAM_ID\""
-    echo ""
-    echo "Or create a .env file (not tracked by git) and source it:"
-    echo "  source .env && ./tools/notarize.sh"
-    exit 1
-fi
-
-echo -e "${GREEN}OK${NC}: App found: $APP_PATH"
-echo -e "${GREEN}OK${NC}: Apple ID: $APPLE_ID"
-echo -e "${GREEN}OK${NC}: Team ID: $APPLE_TEAM_ID"
-
-# ── Step 1: Create ZIP for notarization ────────────────────────
-
-section "Step 1/5: Creating ZIP Archive"
-
-rm -f "$ZIP_PATH"
-ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
-echo -e "${GREEN}OK${NC}: Created ZIP ($(du -h "$ZIP_PATH" | cut -f1))"
-
-# ── Step 2: Submit to Apple Notary Service ─────────────────────
-
-section "Step 2/5: Submitting to Apple Notary Service"
-echo "This may take a few minutes..."
-
-xcrun notarytool submit "$ZIP_PATH" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_ID_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
-
-echo -e "${GREEN}OK${NC}: Notarization accepted"
-
-# ── Step 3: Staple ticket to .app ──────────────────────────────
-
-section "Step 3/5: Stapling Ticket to App"
-
-xcrun stapler staple "$APP_PATH"
-echo -e "${GREEN}OK${NC}: Ticket stapled to SoundBridge.app"
-
-# ── Step 4: Rebuild DMG with stapled app ───────────────────────
-
-section "Step 4/5: Rebuilding DMG"
-
-"$SCRIPT_DIR/create_dmg.sh"
-echo -e "${GREEN}OK${NC}: DMG rebuilt with notarized app"
-
-# ── Step 5: Verify ─────────────────────────────────────────────
-
-section "Step 5/5: Verification"
-
-echo "Verifying app notarization..."
-spctl --assess -vv "$APP_PATH" 2>&1 || true
-
-# ── Cleanup ────────────────────────────────────────────────────
-
-rm -f "$ZIP_PATH"
-
-section "Done!"
-echo ""
-echo -e "  ${GREEN}Notarized DMG: $DMG_PATH${NC}"
-echo "  Size: $(du -h "$DMG_PATH" | cut -f1)"
-echo ""
-echo "  This DMG is ready for distribution."
-echo "  Users will not see Gatekeeper warnings."
-echo ""
+What users are told instead (docs/INSTALLATION_GUIDE.md):
+  * Gatekeeper will refuse the first launch of the app until it is approved
+    manually in System Settings > Privacy & Security,
+  * the PKG is unsigned, so the Installer asks for approval as well,
+  * there is no notarization ticket to verify, and `spctl --assess` reports
+    "rejected / source=no usable signature" on every artifact in the release.
+EOF
+exit 2
