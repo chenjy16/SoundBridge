@@ -361,6 +361,7 @@ final class EQControllerMappingRecoveryTests: XCTestCase {
 
     private func clearDefaults() {
         let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: EQDefaultsKey.state(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.bass(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.mids(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.treble(for: deviceUID))
@@ -389,7 +390,7 @@ final class EQControllerMappingRecoveryTests: XCTestCase {
         // the throttled pipeline must still get there.
         controller.bass = 3.25
         XCTAssertTrue(waitUntil(2) {
-            (UserDefaults.standard.object(forKey: EQDefaultsKey.bass(for: self.deviceUID)) as? Float) == 3.25
+            (UserDefaults.standard.dictionary(forKey: EQDefaultsKey.state(for: self.deviceUID))?["bass"] as? Float) == 3.25
         }, "the throttled pipeline must persist the pending value without a mapping")
 
         XCTAssertEqual(controller.bass, 3.25)

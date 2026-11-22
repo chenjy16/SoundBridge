@@ -454,7 +454,8 @@ final class HostSupervisorTests: XCTestCase {
         defer {
             manager.stop()
             fixture.teardown()
-            for key in [EQDefaultsKey.bass(for: uid), EQDefaultsKey.mids(for: uid),
+            for key in [EQDefaultsKey.state(for: uid),
+                        EQDefaultsKey.bass(for: uid), EQDefaultsKey.mids(for: uid),
                         EQDefaultsKey.treble(for: uid), EQDefaultsKey.isEnabled(for: uid)] {
                 defaults.removeObject(forKey: key)
             }

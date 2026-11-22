@@ -66,6 +66,7 @@ final class EQRecoveryTests: XCTestCase {
     private func clearDefaults() {
         guard let deviceUID else { return }
         let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: EQDefaultsKey.state(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.bass(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.mids(for: deviceUID))
         defaults.removeObject(forKey: EQDefaultsKey.treble(for: deviceUID))

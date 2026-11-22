@@ -59,12 +59,73 @@ private let unusedBandIndices: Set<Int> = [3, 6, 7]
 
 // MARK: - EQ Persistence Keys
 
-/// Per-device UserDefaults key generation for EQ state persistence.
+/// Per-device UserDefaults keys for EQ state persistence.
 enum EQDefaultsKey {
+    /// All four values under one key, written with one `set` call.
+    ///
+    /// P1-2: they used to be four independent keys, so a crash between two of
+    /// them could leave the gains of one drag next to the bypass flag of
+    /// another. One dictionary value is replaced as a unit by `cfprefsd`, which
+    /// makes the group atomic.
+    static func state(for deviceUID: String) -> String { "eq_\(deviceUID)_state" }
+
+    // The 1.2.0 layout. Read once when the new key is absent so an upgrade does
+    // not silently flatten a device's EQ; never written again.
     static func bass(for deviceUID: String) -> String { "eq_\(deviceUID)_bass_db" }
     static func mids(for deviceUID: String) -> String { "eq_\(deviceUID)_mids_db" }
     static func treble(for deviceUID: String) -> String { "eq_\(deviceUID)_treble_db" }
     static func isEnabled(for deviceUID: String) -> String { "eq_\(deviceUID)_enabled" }
+}
+
+// MARK: - Persisted State
+
+/// One device's EQ, as it is stored.
+struct EQPersistedState: Equatable {
+    var bass: Float
+    var mids: Float
+    var treble: Float
+    var isEnabled: Bool
+
+    /// Flat and enabled: what a device that has never been adjusted has.
+    static let flat = EQPersistedState(bass: 0, mids: 0, treble: 0, isEnabled: true)
+
+    /// The single value `UserDefaults` holds. Every field is a property-list
+    /// type, so the whole state round-trips as one object.
+    var dictionary: [String: Any] {
+        ["bass": bass, "mids": mids, "treble": treble, "enabled": isEnabled]
+    }
+
+    /// Decode field by field, so one unusable field cannot throw away the rest.
+    ///
+    /// A gain that is not a number or not finite falls back to the flat default
+    /// for that field only; a finite gain outside `[-12, 12]` is clamped rather
+    /// than discarded, because it is a real value that travelled badly. A
+    /// bypass flag that is not a boolean falls back to enabled, which is the
+    /// state where the user can see and correct it.
+    static func decode(_ raw: [String: Any]) -> EQPersistedState {
+        var state = EQPersistedState.flat
+        if let bass = gain(raw["bass"]) { state.bass = bass }
+        if let mids = gain(raw["mids"]) { state.mids = mids }
+        if let treble = gain(raw["treble"]) { state.treble = treble }
+        if let enabled = flag(raw["enabled"]) { state.isEnabled = enabled }
+        return state
+    }
+
+    private static func gain(_ value: Any?) -> Float? {
+        // A boolean is an `NSNumber` too and would read as 1.0, so the CF type
+        // has to be checked rather than the Swift cast alone.
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let gain = number.floatValue
+        guard gain.isFinite else { return nil }
+        return EQController.clampGain(gain)
+    }
+
+    private static func flag(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
 }
 
 // MARK: - EQController
@@ -198,6 +259,9 @@ class EQController: ObservableObject {
         bass = 0.0
         mids = 0.0
         treble = 0.0
+        // A button press, not a drag: persist now rather than at the next
+        // throttled delivery, so quitting straight afterwards cannot undo it.
+        saveToUserDefaults()
     }
 
     // MARK: - Build Initial Preset (Sub-task 1.6)
@@ -287,39 +351,46 @@ class EQController: ObservableObject {
 
                 let bypass = !isEnabled
 
-                // Change detection — skip if nothing meaningful changed
-                if abs(bass - self.lastBass) < 0.01 &&
-                   abs(mids - self.lastMids) < 0.01 &&
-                   abs(treble - self.lastTreble) < 0.01 &&
-                   bypass == self.lastBypass {
-                    return
+                // Change detection decides whether the *write* is worth doing.
+                let changed = abs(bass - self.lastBass) >= 0.01 ||
+                              abs(mids - self.lastMids) >= 0.01 ||
+                              abs(treble - self.lastTreble) >= 0.01 ||
+                              bypass != self.lastBypass
+
+                if changed {
+                    let bandGains = EQController.computeBandGains(bass: bass, mids: mids, treble: treble)
+                    let preamp = EQController.computeAutoGainCompensation(bass: bass, mids: mids, treble: treble)
+
+                    logger.debug("EQ update: bass=\(bass, privacy: .public) mids=\(mids, privacy: .public) treble=\(treble, privacy: .public) preamp=\(preamp, privacy: .public) bypass=\(bypass, privacy: .public)")
+
+                    // Write EQ state to shared memory
+                    let result = self.writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
+
+                    // Only a landed write makes the cache current. A skipped write
+                    // leaves the difference visible, so the values are re-sent when
+                    // a mapping appears instead of being treated as delivered.
+                    if case .written(let generation) = result {
+                        self.lastBass = bass
+                        self.lastMids = mids
+                        self.lastTreble = treble
+                        self.lastBypass = bypass
+                        self.appliedGeneration = generation
+                        self.lastAppliedGeneration = generation
+                        self.isAppliedToCurrentMapping = true
+                    } else {
+                        self.isAppliedToCurrentMapping = false
+                    }
                 }
 
-                let bandGains = EQController.computeBandGains(bass: bass, mids: mids, treble: treble)
-                let preamp = EQController.computeAutoGainCompensation(bass: bass, mids: mids, treble: treble)
-
-                logger.debug("EQ update: bass=\(bass, privacy: .public) mids=\(mids, privacy: .public) treble=\(treble, privacy: .public) preamp=\(preamp, privacy: .public) bypass=\(bypass, privacy: .public)")
-
-                // Write EQ state to shared memory
-                let result = self.writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
-
-                // Only a landed write makes the cache current. A skipped write
-                // leaves the difference visible, so the values are re-sent when
-                // a mapping appears instead of being treated as delivered.
-                if case .written(let generation) = result {
-                    self.lastBass = bass
-                    self.lastMids = mids
-                    self.lastTreble = treble
-                    self.lastBypass = bypass
-                    self.appliedGeneration = generation
-                    self.lastAppliedGeneration = generation
-                    self.isAppliedToCurrentMapping = true
-                } else {
-                    self.isAppliedToCurrentMapping = false
-                }
-
-                // The user's values are persisted either way: they are the
-                // source of truth the next incarnation is restored from.
+                // Persist on every delivery, changed or not.
+                //
+                // P1-2: this used to sit behind the early `return` above, and
+                // `flushToSharedMemory()` — which runs on every slider release —
+                // advanced the cache without going through this sink. Releasing
+                // the slider therefore made the pending delivery look like
+                // "nothing changed", and the final position of the drag was
+                // never saved. Saving unconditionally cannot over-save: this
+                // pipeline only emits when one of the four values changed.
                 self.saveToUserDefaults()
             }
             .store(in: &cancellables)
@@ -327,47 +398,68 @@ class EQController: ObservableObject {
 
     // MARK: - EQ Persistence (Sub-task 2.2, 2.3)
 
-    /// Save current EQ state to UserDefaults using per-device keys.
+    /// The current state, in the shape it is stored.
+    var persistedState: EQPersistedState {
+        EQPersistedState(bass: bass, mids: mids, treble: treble, isEnabled: isEnabled)
+    }
+
+    /// Save current EQ state to UserDefaults using a per-device key.
+    ///
+    /// One `set` of one dictionary, so the four values are replaced together.
     func saveToUserDefaults() {
-        let defaults = UserDefaults.standard
-        defaults.set(bass, forKey: EQDefaultsKey.bass(for: deviceUID))
-        defaults.set(mids, forKey: EQDefaultsKey.mids(for: deviceUID))
-        defaults.set(treble, forKey: EQDefaultsKey.treble(for: deviceUID))
-        defaults.set(isEnabled, forKey: EQDefaultsKey.isEnabled(for: deviceUID))
+        UserDefaults.standard.set(
+            persistedState.dictionary,
+            forKey: EQDefaultsKey.state(for: deviceUID)
+        )
     }
 
     /// Restore EQ state from UserDefaults. Defaults to (0.0, 0.0, 0.0, true) if not found.
+    ///
+    /// P1-2: the stored value is validated field by field (`EQPersistedState.decode`),
+    /// so corrupt data degrades one field at a time instead of flattening the
+    /// whole EQ, and a non-finite gain cannot reach the sliders or the DSP block
+    /// — `clampGain` cannot repair `NaN`, because every comparison with it is
+    /// false, so the sliders would keep it and `computeBandGains` would publish it.
     func loadFromUserDefaults() {
         let defaults = UserDefaults.standard
 
-        // Use object(forKey:) to distinguish "missing" from "stored 0.0",
-        // since float(forKey:) returns 0.0 for missing keys.
-        if let bassValue = defaults.object(forKey: EQDefaultsKey.bass(for: deviceUID)) as? Float {
-            bass = bassValue
+        if let stored = defaults.dictionary(forKey: EQDefaultsKey.state(for: deviceUID)) {
+            apply(EQPersistedState.decode(stored))
+        } else if let legacy = legacyState(in: defaults) {
+            // The 1.2.0 keys. Adopt them and rewrite in the current shape once,
+            // so the next launch takes the fast path.
+            apply(legacy)
+            saveToUserDefaults()
         } else {
-            bass = 0.0
-        }
-
-        if let midsValue = defaults.object(forKey: EQDefaultsKey.mids(for: deviceUID)) as? Float {
-            mids = midsValue
-        } else {
-            mids = 0.0
-        }
-
-        if let trebleValue = defaults.object(forKey: EQDefaultsKey.treble(for: deviceUID)) as? Float {
-            treble = trebleValue
-        } else {
-            treble = 0.0
-        }
-
-        if defaults.object(forKey: EQDefaultsKey.isEnabled(for: deviceUID)) != nil {
-            isEnabled = defaults.bool(forKey: EQDefaultsKey.isEnabled(for: deviceUID))
-        } else {
-            isEnabled = true
+            apply(.flat)
         }
 
         // Sync cache so the throttled pipeline doesn't immediately re-trigger
         updateCache()
+    }
+
+    private func apply(_ state: EQPersistedState) {
+        bass = state.bass
+        mids = state.mids
+        treble = state.treble
+        isEnabled = state.isEnabled
+    }
+
+    /// Read the four-key 1.2.0 layout. `nil` when none of the keys is present,
+    /// which is a fresh install rather than an upgrade.
+    private func legacyState(in defaults: UserDefaults) -> EQPersistedState? {
+        let legacy = [
+            "bass": EQDefaultsKey.bass(for: deviceUID),
+            "mids": EQDefaultsKey.mids(for: deviceUID),
+            "treble": EQDefaultsKey.treble(for: deviceUID),
+            "enabled": EQDefaultsKey.isEnabled(for: deviceUID),
+        ]
+        var raw: [String: Any] = [:]
+        for (field, key) in legacy {
+            if let value = defaults.object(forKey: key) { raw[field] = value }
+        }
+        guard !raw.isEmpty else { return nil }
+        return EQPersistedState.decode(raw)
     }
 
     // MARK: - Shared Memory Attachment
@@ -480,6 +572,11 @@ class EQController: ObservableObject {
     /// Returns the write result so callers can tell "applied to this incarnation"
     /// from "no mapping yet". The cache is only advanced on a landed write, which
     /// keeps a skipped attempt visible as a difference to be re-sent later.
+    ///
+    /// P1-2: this also persists. It runs on every slider release, and it is the
+    /// point that used to move the cache past the throttled sink — the sink then
+    /// saw no change and never saved, so the position the user released the
+    /// slider at was the one value that could not survive a restart.
     @discardableResult
     func flushToSharedMemory() -> SharedMemoryWriteResult {
         let bandGains = EQController.computeBandGains(bass: bass, mids: mids, treble: treble)
@@ -490,6 +587,11 @@ class EQController: ObservableObject {
 
         // Write immediately to shared memory, bypassing throttle
         let result = writeToSharedMemory(bandGains: bandGains, preamp: preamp, bypass: bypass)
+
+        // Persist regardless of the write: the user's values are the truth the
+        // next incarnation is restored from, and they must not depend on a
+        // mapping happening to exist.
+        saveToUserDefaults()
 
         // Force-update cache only when the write really landed, so the throttled
         // pipeline does not re-send values that are already inside the mapping

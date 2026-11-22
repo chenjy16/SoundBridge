@@ -143,6 +143,7 @@ final class EQUnitTests: XCTestCase {
 
         // Ensure nothing is stored
         let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: EQDefaultsKey.state(for: uid))
         defaults.removeObject(forKey: EQDefaultsKey.bass(for: uid))
         defaults.removeObject(forKey: EQDefaultsKey.mids(for: uid))
         defaults.removeObject(forKey: EQDefaultsKey.treble(for: uid))
@@ -173,6 +174,7 @@ final class EQUnitTests: XCTestCase {
         XCTAssertTrue(controller.isEnabled)       // default
 
         // Cleanup
+        defaults.removeObject(forKey: EQDefaultsKey.state(for: uid))
         defaults.removeObject(forKey: EQDefaultsKey.bass(for: uid))
     }
 

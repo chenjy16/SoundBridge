@@ -17,6 +17,7 @@ let displayGainGen: Gen<Float> = Gen<Float>.fromElements(in: -12.0...12.0)
 
 private func cleanupDefaults(for uid: String) {
     let defaults = UserDefaults.standard
+    defaults.removeObject(forKey: EQDefaultsKey.state(for: uid))
     defaults.removeObject(forKey: EQDefaultsKey.bass(for: uid))
     defaults.removeObject(forKey: EQDefaultsKey.mids(for: uid))
     defaults.removeObject(forKey: EQDefaultsKey.treble(for: uid))
