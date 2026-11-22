@@ -199,13 +199,25 @@ test-unsigned:
 	@echo "Running unsigned release policy tests..."
 	@./tools/test_unsigned_release.sh
 
-# Driver install transaction tests (Phase 2.2.1)
+# Driver install and uninstall lifecycle tests
 #
-# Every scenario runs in its own mktemp directory with a fake driver bundle. The
-# real HAL directory is never read or written, and nothing here needs sudo.
+# Install: every scenario runs in its own mktemp directory with a fake driver
+# bundle. The real HAL directory is never read or written, and nothing here needs
+# sudo.
+#
+# Uninstall: tools/uninstall_driver.sh runs for real against a --sandbox-root, so
+# the removal, the idempotent second run, the refusals, the Host stop (with its
+# bounded wait and SIGKILL escalation, on a compiled fixture process), the IPC
+# scope and the failure reporting are all exercised without touching this
+# machine. Nothing here installs, removes or signals anything outside mktemp.
+#
+# The process scenarios skip themselves, with a printed reason, on a machine that
+# cannot read process state or cannot compile the fixture.
 test-installer:
 	@echo "Running install transaction tests..."
 	@./tools/test_install_transaction.sh
+	@echo "Running uninstall lifecycle tests..."
+	@./tools/test_uninstall_lifecycle.sh
 
 # Installer package gate tests (Phase 3.2B)
 #
