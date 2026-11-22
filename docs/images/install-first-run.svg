@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 220" width="1140" height="220" role="img" aria-labelledby="install-title">
+  <title id="install-title">Installing SoundBridge in four steps: download the PKG, double-click and approve, allow it once in Privacy and Security, then select the SoundBridge output</title>
+  <desc>A four-step flow diagram, not a screenshot of the system UI.</desc>
+  <rect x="1" y="1" width="1138" height="218" rx="18" fill="#F7F8FA" stroke="#E4E7EC" stroke-width="2"/>
+
+  <!-- step 1 -->
+  <rect x="24" y="28" width="252" height="164" rx="14" fill="#FFFFFF" stroke="#E4E7EC"/>
+  <circle cx="58" cy="60" r="14" fill="#0A84FF"/>
+  <text x="58" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">1</text>
+  <text x="82" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#101828">Download</text>
+  <text x="44" y="104" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">SoundBridge-1.2.0.pkg</text>
+  <text x="44" y="126" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">from GitHub Releases</text>
+  <text x="44" y="148" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#98A2B3">app + HAL driver</text>
+
+  <!-- step 2 -->
+  <rect x="304" y="28" width="252" height="164" rx="14" fill="#FFFFFF" stroke="#E4E7EC"/>
+  <circle cx="338" cy="60" r="14" fill="#0A84FF"/>
+  <text x="338" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">2</text>
+  <text x="362" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#101828">Install</text>
+  <text x="324" y="104" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">Double-click the PKG</text>
+  <text x="324" y="126" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">and approve the admin</text>
+  <text x="324" y="148" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">prompt</text>
+
+  <!-- step 3 -->
+  <rect x="584" y="28" width="252" height="164" rx="14" fill="#FFFFFF" stroke="#E4E7EC"/>
+  <circle cx="618" cy="60" r="14" fill="#0A84FF"/>
+  <text x="618" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">3</text>
+  <text x="642" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#101828">Allow it once</text>
+  <text x="604" y="104" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">System Settings →</text>
+  <text x="604" y="126" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">Privacy &amp; Security →</text>
+  <text x="604" y="148" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#0A84FF">Open Anyway</text>
+
+  <!-- step 4 -->
+  <rect x="864" y="28" width="252" height="164" rx="14" fill="#FFFFFF" stroke="#E4E7EC"/>
+  <circle cx="898" cy="60" r="14" fill="#0A84FF"/>
+  <text x="898" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">4</text>
+  <text x="922" y="65" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#101828">Select the output</text>
+  <text x="884" y="104" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">&lt;Your display&gt;</text>
+  <text x="884" y="126" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#475467">(SoundBridge)</text>
+  <text x="884" y="148" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12.5" fill="#98A2B3">then volume keys work</text>
+
+  <!-- arrows -->
+  <path d="M284 104 L292 110 L284 116" fill="none" stroke="#98A2B3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M564 104 L572 110 L564 116" fill="none" stroke="#98A2B3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M844 104 L852 110 L844 116" fill="none" stroke="#98A2B3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
