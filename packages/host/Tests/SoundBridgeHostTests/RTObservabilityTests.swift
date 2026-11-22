@@ -397,8 +397,7 @@ final class RTObservabilityTests: XCTestCase {
     /// reads them and pushes them into the DSP engine.
     ///
     /// Nothing here calls `soundbridge_dsp_update_*` from a second thread -- the
-    /// engine has exactly one writer, the IO thread (see
-    /// `docs/P3-Batch-1.5-RT-Observability-Audit.md`). What is concurrent is the
+    /// engine has exactly one writer, the IO thread. What is concurrent is the
     /// snapshot, which is what the seqlock in `rf_store_eq_snapshot` covers. Run
     /// under TSan this test is the evidence that the split has no data race.
     func testEQUpdatesAndRingWritesDoNotRaceTheCallback() throws {

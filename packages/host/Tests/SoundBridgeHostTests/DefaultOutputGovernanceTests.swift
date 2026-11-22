@@ -17,8 +17,7 @@ import CoreAudio
 // is the meta-test that keeps that claim honest.
 //
 // What these tests do NOT prove: that the real CoreAudio implementation behaves
-// this way on a live system. That needs the P3 pass described in
-// `docs/P2-Batch-2-Default-Output-Governance-Report.md`.
+// this way on a live system. That needs a pass on real hardware.
 
 /// A `DefaultOutputHAL` that answers from a dictionary and records every write.
 final class RecordingDefaultOutputHAL: DefaultOutputHAL {
