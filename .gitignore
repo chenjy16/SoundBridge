@@ -110,6 +110,10 @@ coverage/
 *.gcda
 *.gcno
 
+# Local archive of stage reports that were retired from docs/.
+# Kept for the maintainer's own reference only, never published.
+/.archive/
+
 # Temporary files
 tmp/
 temp/

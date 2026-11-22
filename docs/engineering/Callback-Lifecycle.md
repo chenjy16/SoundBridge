@@ -1,8 +1,8 @@
 # 回调生命周期
 
 来源：Batch 2（回调出口与阈值）、Batch 3（准入 + 租约）、Batch 3 Closure Fix
-（单原子闸门）。结论状态 `CONDITIONAL PASS`，证据见
-[verification/Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md)。
+（单原子闸门）。结论状态 `CONDITIONAL PASS`；批次验证报告已随阶段报告移出仓库，
+当前结论由 `make test` 中的 Host 测试套件持续覆盖。
 
 本文描述**运行时视角**：一个 HAL 回调从进入到离开经过哪些检查、谁可能等它、
 什么条件下允许释放它脚下的内存。内存模型的形式化证明在
@@ -63,8 +63,7 @@ void OnWriteMixedOutput(...) {
 3. 只有计数读到 0 才承认排空。
 
 关闭与准入是同一条 RMW 的两个方向，因此不存在"闸门对计数器已关闭、对读者
-仍开放"的窗口（旧双原子实现的缺陷，见
-[verification/Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md) §3）。
+仍开放"的窗口（旧双原子实现 §3 记录的缺陷，批次报告已移出仓库）。
 
 ## 4. 排空的时限与语义
 

@@ -1,7 +1,8 @@
 # Shared Memory 生命周期
 
 来源：Batch 1（预填充迁移与路径修复）、Batch 2（admission 引入）、Batch 3
-（退役）。证据见 [verification/](../verification/)。
+（退役）。批次验证报告已随阶段报告移出仓库；当前结论由 `make test` 中的 Host
+测试套件持续覆盖。
 
 本文描述一块共享内存从创建到消失的完整过程，以及**崩溃恢复为什么不需要
 判活**。

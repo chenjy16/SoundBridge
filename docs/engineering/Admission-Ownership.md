@@ -1,8 +1,7 @@
 # Admission 与 Producer 所有权
 
-来源：Batch 2（`IMPLEMENTED — TESTS PASSED`）与 Batch 2 Closure（`PASS`）。
-证据见 [verification/Batch-2-Verification.md](../verification/Batch-2-Verification.md)
-与 [verification/Batch-2-Closure-Verification.md](../verification/Batch-2-Closure-Verification.md)。
+来源：Batch 2（`IMPLEMENTED — TESTS PASSED`）与 Batch 2 Closure（`PASS`）。批次
+验证报告已随阶段报告移出仓库；当前结论由 `make test` 中的 Host 测试套件持续覆盖。
 
 本文回答一个具体问题：**在共享内存里，谁有权写入当前这块 mapping？**
 

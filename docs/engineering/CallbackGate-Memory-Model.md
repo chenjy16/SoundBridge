@@ -3,8 +3,7 @@
 来源：Batch 3 Closure Fix（`CONDITIONAL PASS`）。原始证据：
 `CallbackGate-Memory-Model-Proof.md`、`CallbackGate-Interleaving-Analysis.md`、
 `Lock-Free-Guarantees.md`、`RT-Safety-Review.md`、`Closure-Fix-Report.md`，
-归档位置见
-[Documentation-Migration-Manifest.md](../Documentation-Migration-Manifest.md)。
+均为当年研究目录的产物，不随本仓库发布。
 
 本文是该证明的**正式归档版本**：保留全部规则编号、成立条件与不成立项，
 不把 `CONDITIONAL PASS` 表述为无条件 PASS。
@@ -313,7 +312,7 @@ Leave:      ldaddal / ldadd             ; 单条 RMW
 | RT Safety | **CONDITIONAL PASS** |
 | ABI Protection | PASS |
 
-完整报告见 [verification/Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md)。
+完整报告属当年批次归档，不随本仓库发布；上表结论未改动。
 
 ## 13. 相关文档
 

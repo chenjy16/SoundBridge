@@ -1,11 +1,8 @@
 # SoundBridge 1.2.0 架构说明
 
 本文档描述 **SoundBridge 1.2.0 实际采用的、当前已实现**的架构。它不描述
-曾经评估但未采用的方案；那部分历史记录只出现在
-[verification/Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md)
-（旧双原子闸门为何被替换）与
-[Documentation-Migration-Manifest.md](../Documentation-Migration-Manifest.md)
-（未采用的 XPC / E2 研究线为何不进入正式架构）中。
+曾经评估但未采用的方案（旧双原子闸门为何被替换、XPC / E2 研究线为何不进入
+正式架构）；那些评估记录不随仓库发布，本文只保留「当前实现为什么是这样」的结论。
 
 文中每一条约束都对应仓库中的实际代码或工具。凡未验证的系统行为，均在
 [risks/Known-Limitations.md](../risks/Known-Limitations.md) 中登记，不在本文
@@ -353,13 +350,20 @@ SoundBridge **不使用**任何"判活"启发式（不看 PID、不看 `st_mtime
 平台：macOS 27.2.1（`26B131`）/ arm64，Apple clang 21.0.0，Apple Swift
 6.4.2；Driver Release 构建为 universal（`x86_64 arm64`）。
 
-| 批次 | 结论 | 报告 |
+| 批次 | 结论 | 证据（批次报告已移出仓库，结论保留） |
 |---|---|---|
-| Batch 0 + 1 | `IMPLEMENTED — TESTS PASSED` | [Batch-0-1-Verification.md](../verification/Batch-0-1-Verification.md) |
-| Batch 2 | `IMPLEMENTED — TESTS PASSED` | [Batch-2-Verification.md](../verification/Batch-2-Verification.md) |
-| Batch 2 Closure | `PASS` | [Batch-2-Closure-Verification.md](../verification/Batch-2-Closure-Verification.md) |
-| Batch 3 | `CONDITIONAL PASS` | [Batch-3-Verification.md](../verification/Batch-3-Verification.md) |
-| Batch 3 Closure Fix | `CONDITIONAL PASS` | [Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md) |
+| Batch 0 + 1 | `IMPLEMENTED — TESTS PASSED` | 当前由 `make test` 持续覆盖：`check_protocol_layout.sh`、`sync_shared_header.sh --check` 与 Host 测试套件 |
+| Batch 2 | `IMPLEMENTED — TESTS PASSED` | 同上 |
+| Batch 2 Closure | `PASS` | 同上 |
+| Batch 3 | `CONDITIONAL PASS` | 同上 |
+| Batch 3 Closure Fix | `CONDITIONAL PASS` | 同上 |
+| 1.2.0 发布与端到端验证 | `PASS — RELEASED AND VERIFIED` | [SoundBridge-1.2.0-Final-Release-Report.md](../release/SoundBridge-1.2.0-Final-Release-Report.md) |
+
+1.2.0 的发布验证在架构层面确认了三件事：本文描述的路径确实被走到（驱动加载 → 共享
+内存连接 → 回调流动）；音量/静音/EQ 的控制字段确实通过共享内存生效；31 分 01 秒
+连续播放期间零欠载、零溢出、零回调超预算。它**没有**验证设备移除、其他 macOS 版本
+或 Intel 硬件，这些仍在
+[risks/Known-Limitations.md](../risks/Known-Limitations.md) 中以未验证状态保留。
 
 ## 12. 明确不在本架构内的东西
 

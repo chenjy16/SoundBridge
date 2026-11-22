@@ -270,74 +270,127 @@ log show --last 10m --predicate 'process == "coreaudiod"' 2>/dev/null \
 
 ---
 
-## 9. 卸载
+## 9. Uninstalling
 
-### 9.1 统一卸载政策
+> This section is in English because uninstall instructions are user-facing. The
+> rest of this guide is still in Chinese; nothing outside §9 was rewritten.
 
-App 内的「Uninstall Driver」与仓库里的 `tools/uninstall_driver.sh` 执行同一套政策
-（`DriverUninstallPolicy`），行为完全一致：
+### 9.1 One policy, two front ends
 
-1. **先识别**：读取 `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist`，
-   确认 `CFBundleIdentifier` 是 `com.soundbridge.driver`。不是这个 id、读不出 plist、
-   或者该路径是个符号链接，一律**拒绝删除**，并说明原因。
-2. **先停 Host**：通过 HostSupervisor 的 `shutdown(intent: .uninstall)` 有序退出 Host
-   并等待完成。退出意图会锁住 supervisor，卸载期间 Host 不会被重新拉起。
-3. **只删一个路径**：`/bin/rm -rf '/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver'`。
-   没有通配符，不碰 `/tmp`，不碰其它厂商的 HAL 驱动。
-4. **删完再确认**：路径消失后才清理引导状态。授权被取消或命令失败时不会宣称成功。
-5. **不重启 `coreaudiod`**：加载中的副本会保留到下次重启，何时重启由用户决定。
+The menu bar item **Uninstall Driver** and `tools/uninstall_driver.sh` implement
+the same policy (`DriverUninstallPolicy`): they identify the same bundle the same
+way and remove the same single path. The script can be read and run on its own,
+so it is the reference below. The two differ in one deliberate respect: the app
+also clears the onboarding keys after the removal is confirmed, and the script
+touches no user preference at all.
 
-### 9.2 用 App 卸载
+The script runs in four phases, in this order. Nothing is stopped or removed
+before identification.
 
-菜单栏图标 → **Uninstall Driver** → 确认对话框（其中逐条列出删除与保留的内容）→
-一次管理员授权 → 「Driver Removed」→ **Quit SoundBridge**。
+1. **Identify.** Read
+   `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist`
+   and require `CFBundleIdentifier` = `com.soundbridge.driver`. A symlink, a
+   plain file, an unreadable plist, or a different identifier is refused with a
+   reason and a non-zero exit; nothing is touched.
+2. **Stop the Host.** Only processes that belong to this installation: the
+   executable path must be the Host inside the app bundle, and the owner must be
+   you. It gets `SIGTERM` and a bounded wait (default 5 s, `--timeout`); if it is
+   still running when the wait expires, `SIGKILL` is sent to that same pid.
+   `--keep-host` skips this phase. If the process table cannot be read in the
+   current environment, the script reports that it could not check rather than
+   claiming no Host was running.
+3. **Release the runtime IPC.** `/tmp/soundbridge-<uid>-*` shared-memory files
+   and the device control file, and nothing else. A file that cannot be removed
+   is a failure, not a warning.
+4. **Remove the driver bundle.** One command, one constant path:
+   `/bin/rm -rf '/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver'`. No
+   wildcard, no other vendor's plug-in, no user data.
 
-随后把 `/Applications/SoundBridge.app` 拖到废纸篓即可。
+### 9.2 The report keeps four states apart
 
-### 9.3 用命令行卸载
+These are four different facts, and the script answers them separately rather
+than collapsing them into "uninstalled":
 
-仓库中的 `tools/uninstall_driver.sh` 是同一套政策的脚本版本：
+| State | What it reports | Done by the script |
+|---|---|---|
+| 1. driver files removed from disk | yes / no | yes (unless `--dry-run`) |
+| 2. driver unloaded from `coreaudiod` | no — `coreaudiod` keeps its loaded copy | never |
+| 3. CoreAudio device disappeared | not until `coreaudiod` restarts | never |
+| 4. `coreaudiod` restarted | no — this script never signals it | never |
+
+To actually unload the driver, restart `coreaudiod` yourself — log out and back
+in, restart the Mac, or `sudo killall coreaudiod`. Interrupting audio for every
+running process is your decision, so no part of the product does it for you.
+
+### 9.3 Running it
 
 ```bash
-tools/uninstall_driver.sh --dry-run   # 只打印将要删除的内容，不改动任何文件
-tools/uninstall_driver.sh             # 执行卸载（一次管理员授权）
+tools/uninstall_driver.sh --dry-run       # print the plan; change nothing
+tools/uninstall_driver.sh                 # run it (one administrator prompt)
+tools/uninstall_driver.sh --timeout 2     # shorter bounded wait for the Host
+tools/uninstall_driver.sh --keep-host     # leave a running Host alone
 ```
 
-它同样拒绝符号链接、校验 bundle id、不重启 `coreaudiod`。
+`--dry-run` ends before the Host is stopped and before anything is removed.
+Running the script twice is a no-op: the second run finds no driver and says so.
+Running it where nothing was installed exits 0. A failure exits non-zero and
+names what it could not do — the script never reports success for work it did
+not perform.
 
-若两者都不可用（例如 App 已被删除），可手动执行，**先确认身份再删除**：
+If neither the app nor the script is available (for example the app was already
+deleted), remove the bundle by hand — **identify it first**:
 
 ```bash
 /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
   "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
-# 只有当输出为 com.soundbridge.driver 时才继续
+# continue only if the output is com.soundbridge.driver
 sudo /bin/rm -rf "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver"
 ```
 
-### 9.4 卸载会删除什么、保留什么
+### 9.4 What is removed and what is kept
 
-**删除**
+**Removed**
 
 - `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver`
-- 引导状态（`hasCompletedOnboarding` 等 UserDefaults 键），使下次启动重新说明安装
+- the runtime IPC: `/tmp/soundbridge-<uid>-*` and the device control file
+- the onboarding keys (`hasCompletedOnboarding`, `onboardingVersion`,
+  `driverInstallDate`, `lastDriverVersionCheck`) — **app only**, and only after
+  the driver path is confirmed gone, so the next launch explains the install
+  again. The script does not touch `UserDefaults`.
 
-**保留**
+**Kept — on purpose**
 
-- App 本身（由用户自行拖到废纸篓）
-- EQ 设置与保存的 EQ 配置（`eq_default_*`）
-- 音量状态（`~/Library/Application Support/SoundBridge/volume-state.json`）
-- 日志（`~/Library/Logs/SoundBridge`）
+- the app bundle (drag it to the Trash yourself)
+- the EQ settings: one dictionary per device
+  (`{bass, mids, treble, enabled}`) under a single key, `eq_default_state` in
+  production, in `~/Library/Preferences/com.soundbridge.menubar.plist`
+- the volume state
+  (`~/Library/Application Support/SoundBridge/volume-state.json`)
+- the logs (`~/Library/Logs/SoundBridge`)
+- **reported but never deleted**: the PKG receipt `com.soundbridge.menubar` and
+  the installer transaction logs under
+  `~/Library/Application Support/SoundBridge/InstallerState/`
 
-保留这些是有意的：重装后音量与 EQ 直接恢复，日志是重装问题的诊断依据。想彻底清干净
-时，在卸载后再手动删除：
+Keeping these is deliberate: a reinstall resumes with your volume and EQ, and
+the logs are what a reinstall gets diagnosed from. The receipt is kept because
+forgetting it is irreversible and changes how a later install is classified; the
+uninstaller reports it instead of deciding for you. Remove it yourself if you
+want it gone:
+
+```bash
+sudo pkgutil --forget com.soundbridge.menubar
+```
+
+To remove everything SoundBridge ever wrote for your user, after uninstalling:
 
 ```bash
 rm -rf "$HOME/Library/Application Support/SoundBridge"
 rm -rf "$HOME/Library/Logs/SoundBridge"
 ```
 
-`/Library/Application Support/SoundBridge/InstallerPayload/` 是安装器暂存驱动的位置，
-由后续安装覆盖，不需要手动处理。
+`/Library/Application Support/SoundBridge/InstallerPayload/` is where the
+installer stages the driver. The next install overwrites it; you do not need to
+touch it.
 
 ---
 
@@ -396,7 +449,7 @@ App 启动时跳过 updater 初始化并打印 `Update feed not configured`。�
 | 7 声音设置 | SOURCE_VERIFIED | 设备选择由 CoreAudio 与菜单栏列表决定 |
 | 8.1 HDMI/DP 无声 | NOT_VERIFIED | 未在真实 HDMI/DP 设备上执行本版排查流程 |
 | 8.2 驱动未加载 | SOURCE_VERIFIED | 命令可用，未用于诊断真实加载失败 |
-| 9 卸载 | TEST_VERIFIED（策略） | 策略与 `tools/uninstall_driver.sh` 由单元测试锁定；真实卸载未执行 |
+| 9 卸载 | TEST_VERIFIED（脚本，沙盒执行） | `tools/test_uninstall_lifecycle.sh` 用 `--sandbox-root` 在临时目录树上**真实执行**脚本（19 组场景 / 99 断言，含真实进程 TERM → 有界等待 → SIGKILL 升级）；`UninstallLifecycleScriptTests` 锁定源码不变量。对真实 HAL 目录、真实 Host 与真实 `coreaudiod` 的卸载仍未执行 |
 | 10 恢复旧版驱动 | NOT_VERIFIED | 未执行 |
 | 11 自动更新 | SOURCE_VERIFIED | `SUPublicEDKey` 为空，无 appcast 发布，`generate_appcast.sh` 拒绝运行 |
 

@@ -8,7 +8,7 @@ It discovers physical output devices, creates shared memory endpoints for the HA
 - Enumerates physical output devices (excluding SoundBridge/Netcat and virtual/aggregate devices)
 - Validates candidate devices (active channels, display-audio jack status, format/rate checks)
 - Chooses an operating sample rate at startup from the current/selected physical device
-- Creates one shared-memory file per physical device (`/tmp/soundbridge-<sanitized-uid>`)
+- Creates one shared-memory file per physical device (`/tmp/soundbridge-<ownerUID>-<sanitized-deviceUID>`)
 - Writes the driver control file (`/tmp/soundbridge-devices.txt`)
 - Starts heartbeat updates for driver/host health signaling
 - Starts a CoreAudio HAL output unit and renders `ring buffer -> DSP -> hardware`
@@ -21,13 +21,13 @@ It discovers physical output devices, creates shared memory endpoints for the HA
 SoundBridgeHost
   |- DeviceDiscovery      (enumerate + validate physical devices)
   |- DeviceRegistry       (tracks devices, writes /tmp/soundbridge-devices.txt)
-  |- SharedMemoryManager  (creates /tmp/soundbridge-<uid>, heartbeat timer)
+  |- SharedMemoryManager  (creates /tmp/soundbridge-<ownerUID>-<deviceUID>, heartbeat timer)
   |- ProxyDeviceManager   (proxy<->physical mapping, auto-select, volume/mute forwarding)
   |- DSPProcessor         (CSoundBridgeDSP wrapper)
   |- AudioRenderer        (reads ring buffer, processes DSP, writes output buffers)
   |- AudioEngine          (HAL output unit setup/start/stop/switch)
   |- DeviceMonitor        (CoreAudio listeners for device/default-output changes)
-  |- PresetMonitor        (polls preset file and applies updates)
+  |- HostInstanceLock     (single-instance guard)
   |- SleepWakeMonitor     (IOKit notifications and wake recovery)
 ```
 
@@ -35,7 +35,7 @@ SoundBridgeHost
 
 Startup sequence in `main.swift`:
 
-1. Ensures app support/log directories and migrates old preset path
+1. Ensures app support/log directories exist
 2. Enumerates physical output devices and records validation status
 3. Resolves preferred output device and reads nominal sample rate
 4. Sets `SoundBridgeConfig.activeSampleRate`
@@ -44,16 +44,16 @@ Startup sequence in `main.swift`:
 7. Writes `/tmp/soundbridge-devices.txt`
 8. Starts host heartbeat timer
 9. Waits for driver proxy creation, then auto-selects proxy
-10. Initializes DSP (applies flat preset, and updates sample rate when needed)
+10. Initializes DSP (flat response, and updates sample rate when needed)
 11. Sets up/starts HAL output unit
-12. Starts preset monitoring and signal handlers
+12. Installs signal handlers
 
 Shutdown path:
 
 - Stops heartbeat and audio engine
 - Restores physical output device when possible
 - Removes control file and unmaps shared memory
-- Attempts to restart `coreaudiod` during cleanup
+- Leaves `coreaudiod` running (policy: no automatic audio-daemon restart)
 
 ## Device and Sample Rate Behavior
 
@@ -65,8 +65,7 @@ Shutdown path:
 ## Paths and IPC
 
 - Control file: `/tmp/soundbridge-devices.txt`
-- Shared memory per device: `/tmp/soundbridge-<sanitized-uid>`
-- Preset file: `~/Library/Application Support/SoundBridge/preset.json`
+- Shared memory per device: `/tmp/soundbridge-<ownerUID>-<sanitized-deviceUID>`
 
 ## Key Configuration (`Constants.swift`)
 
@@ -78,7 +77,6 @@ Shutdown path:
 | `defaultFormat` | `RF_FORMAT_FLOAT32` |
 | `defaultDurationMs` | 100 |
 | `heartbeatInterval` | 1.0s |
-| `presetMonitorInterval` | 0.5s |
 | `deviceWaitTimeout` | 2.0s |
 | `cleanupWaitTimeout` | 1.2s |
 | `physicalDeviceSwitchDelay` | 0.5s |

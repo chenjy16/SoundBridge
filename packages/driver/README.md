@@ -26,7 +26,7 @@ Application audio
 | - ring buffer write      |
 +-----------+--------------+
             | shared memory (mmap)
-            | /tmp/soundbridge-<uid>
+            | /tmp/soundbridge-<ownerUID>-<deviceUID>
             v
 +--------------------------+
 | SoundBridgeHost            |
@@ -98,7 +98,7 @@ DeviceName|DeviceUID
 
 When the first client starts IO, the handler:
 
-1. Opens `/tmp/soundbridge-<sanitized-uid>`
+1. Opens `/tmp/soundbridge-<ownerUID>-<sanitized-deviceUID>`
 2. Maps shared memory with `PROT_READ | PROT_WRITE` and `MAP_SHARED`
 3. Validates protocol version, sample rate, and channel count
 4. Sets `driver_connected = 1`
@@ -130,39 +130,39 @@ Implemented input conversion paths in `ConvertToFloat32Interleaved()`:
 
 ## Shared memory layout (`RFSharedAudio`)
 
-Defined in `include/RFSharedAudio.h`.
-In this build, `sizeof(RFSharedAudio)` is 264 bytes, and `audio_data[]` begins at offset 264.
+Defined in `include/RFSharedAudio.h` (the single source; the copies under the host,
+app and dsp include paths must stay byte-identical, checked by
+`tools/sync_shared_header.sh --check`).
 
-### Header fields
+In this build, `RF_AUDIO_PROTOCOL_VERSION` is `0x00020200` and
+`sizeof(RFSharedAudio)` is **320 bytes**; `audio_data[]` begins at offset 320.
 
-| Offset | Field | Type | Description |
-|---|---|---|---|
-| 0 | `protocol_version` | `uint32_t` | `0x00020000` |
-| 4 | `header_size` | `uint32_t` | `sizeof(RFSharedAudio)` |
-| 8 | `sample_rate` | `uint32_t` | 44100, 48000, 88200, 96000, 176400, 192000 |
-| 12 | `channels` | `uint32_t` | 1-8 |
-| 16 | `format` | `uint32_t` | `RFAudioFormat` enum |
-| 20 | `bytes_per_sample` | `uint32_t` | Derived from format |
-| 24 | `bytes_per_frame` | `uint32_t` | `bytes_per_sample * channels` |
-| 28 | `ring_capacity_frames` | `uint32_t` | `sample_rate * duration_ms / 1000` |
-| 32 | `ring_duration_ms` | `uint32_t` | Default 100 (allowed 20-100) |
-| 36 | `driver_capabilities` | `uint32_t` | `RF_CAP_*` bitmask |
-| 40 | `host_capabilities` | `uint32_t` | `RF_CAP_*` bitmask |
-| 48 | `creation_timestamp` | `uint64_t` | Unix epoch seconds |
-| 56 | `format_change_counter` | `atomic uint64_t` | Format-change counter |
-| 64 | `write_index` | `atomic uint64_t` | Producer frame index |
-| 72 | `read_index` | `atomic uint64_t` | Consumer frame index |
-| 80 | `total_frames_written` | `atomic uint64_t` | Cumulative writes |
-| 88 | `total_frames_read` | `atomic uint64_t` | Cumulative reads |
-| 96 | `overrun_count` | `atomic uint64_t` | Overflow events |
-| 104 | `underrun_count` | `atomic uint64_t` | Underrun events |
-| 112 | `format_mismatch_count` | `atomic uint64_t` | Negotiation failures |
-| 120 | `driver_connected` | `atomic uint32_t` | Driver connection flag |
-| 124 | `host_connected` | `atomic uint32_t` | Host connection flag |
-| 128 | `driver_heartbeat` | `atomic uint64_t` | Driver heartbeat |
-| 136 | `host_heartbeat` | `atomic uint64_t` | Host heartbeat |
-| 144-263 | `_reserved` | `uint8_t[120]` | Future expansion |
-| 264+ | `audio_data[]` | `uint8_t[]` | `ring_capacity_frames * bytes_per_frame` bytes |
+### Header sections
+
+The table below lists section offsets only. The field-by-field definition, the
+memory orders and the admission rules live in the header itself — do not copy them
+into prose that can drift.
+
+| Offset | Section | Notes |
+|---|---|---|
+| 0 | Protocol info | `protocol_version`, `header_size` |
+| 8 | Negotiated format | sample rate, channels, format, byte sizes |
+| 28 | Ring configuration | `ring_capacity_frames` (power of two), `ring_duration_ms` |
+| 36 | Capability flags | `RF_CAP_*` bitmasks |
+| 48 | Timing and sync | `creation_timestamp`, `format_change_counter` |
+| 64 | Ring indices | `write_index` (producer), `read_index` (consumer) |
+| 80 | Statistics | written/read frames, overrun, underrun, format mismatch |
+| 120 | Status flags | connected flags, driver/host heartbeats |
+| 144 | Volume / mute | `volume_scalar` (0.0–1.0), `mute_state` |
+| 152 | EQ control | `eq_sequence` SeqLock + 48-byte `eq_snapshot` |
+| 204 | Volume state model | `volume_mode`, `state_initialized`, `state_revision`, `underrun_frames` |
+| 228 | Reserved | 28 bytes, kept at a fixed offset so growth cannot swallow the admission block |
+| 256 | Admission | `admission_state` @256, `admission_epoch` @264, `producer_owner_token` @272, `admission_claim_seq` @280, `_reserved2[32]` @288 |
+| 320 | `audio_data[]` | flexible array member, must stay last |
+
+Layout is asserted at compile time (`static_assert`) and in both C11 and C++17 by
+`tools/check_protocol_layout.sh`. Adding or reordering a field requires bumping
+`RF_AUDIO_PROTOCOL_VERSION` and re-syncing all four header copies.
 
 ### Total mapped size
 
@@ -170,8 +170,9 @@ In this build, `sizeof(RFSharedAudio)` is 264 bytes, and `audio_data[]` begins a
 sizeof(RFSharedAudio) + (ring_capacity_frames * channels * bytes_per_sample)
 ```
 
-Example at 48 kHz, 2 channels, float32, 100 ms (in this build):
-`264 + (4800 * 2 * 4) = 38664` bytes.
+Example at 48 kHz, 2 channels, float32, 100 ms (in this build, capacity is rounded
+up to 8192 frames, giving the 65856-byte mapping seen at runtime):
+`320 + (8192 * 2 * 4) = 65856` bytes.
 
 ### Ring buffer behavior
 
@@ -186,7 +187,7 @@ Single producer (driver) and single consumer (host), with monotonically increasi
 
 Current liveness checks are applied during proxy-device sync (not in the per-buffer IO callback path):
 
-- `HostHeartbeatFresh()` maps `/tmp/soundbridge-<uid>` read-only, tracks `host_heartbeat` changes, and treats heartbeat as stale after 15 seconds with no change (`HEARTBEAT_TIMEOUT_SEC` in `Plugin.cpp`).
+- `HostHeartbeatFresh()` maps `/tmp/soundbridge-<ownerUID>-<deviceUID>` read-only, tracks `host_heartbeat` changes, and treats heartbeat as stale after 15 seconds with no change (`HEARTBEAT_TIMEOUT_SEC` in `Plugin.cpp`).
 - `SyncDevices()` only keeps/adds devices with fresh heartbeat state; stale entries are skipped and existing stale devices are removed.
 
 `UniversalAudioHandler` also includes `IsHealthy()` and `AttemptRecovery()` helpers for shared-memory/file/ring validation, but they are not currently called from `OnWriteMixedOutput()`.
@@ -278,4 +279,4 @@ log show --predicate 'subsystem == "com.soundbridge.driver"' --last 5m
 | `DEVICE_COOLDOWN_SEC` | 10 |
 | `RF_MAX_CHANNELS` | 8 |
 | `RF_RING_DURATION_MS_DEFAULT` | 100 |
-| `RF_AUDIO_PROTOCOL_VERSION` | `0x00020000` |
+| `RF_AUDIO_PROTOCOL_VERSION` | `0x00020200` |

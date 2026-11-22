@@ -1,9 +1,8 @@
 # Mapping 退役
 
 来源：Batch 3（Mapping Retirement & Device-Removal Safety，
-`CONDITIONAL PASS`）与 Batch 3 Closure Fix（`CONDITIONAL PASS`）。证据见
-[verification/Batch-3-Verification.md](../verification/Batch-3-Verification.md)
-与 [verification/Batch-3-Closure-Fix.md](../verification/Batch-3-Closure-Fix.md)。
+`CONDITIONAL PASS`）与 Batch 3 Closure Fix（`CONDITIONAL PASS`）。批次验证报告
+已随阶段报告移出仓库；当前结论由 `make test` 中的 Host 测试套件持续覆盖。
 
 本文描述**为什么**退役必须这样写，以及**哪些前提还没有被真实环境验证**。
 

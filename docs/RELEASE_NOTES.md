@@ -4,6 +4,11 @@
 发布类型：**正式发布（完全未签名、未公证；首次启动需按安装指南手动放行）**
 协议版本：`0x00020200`（131584）
 
+> **There is no 1.2.1 release.** Work on three P1 items exists in the working tree
+> and is described at the bottom of this file under
+> ["1.2.1 (unreleased)"](#121-unreleased). The 1.2.0 notes below are unchanged, and
+> no 1.2.0 validation result is restated or revised there.
+
 ---
 
 ## 0. 这份文档怎么读
@@ -132,8 +137,7 @@ App 侧的 Host 生命周期由一个 supervisor 独占：启动、watchdog、�
 - 卸载中、App 终止中、卸载进行中一律拒绝重启。
 - 重启请求合并，不会出现两个 Host 争锁。
 - 在真实 macOS 上执行过一次完整闭环（退出 → 重新拉起 → 拿锁 → 恢复音频路径），
-  日志与时间线见 [P3-Host-Restart-Entry-and-Recovery-Validation-Report.md](P3-Host-Restart-Entry-and-Recovery-Validation-Report.md)
-  （`REAL_MACOS_VERIFIED`，范围仅限 Host 进程重启，不含真实音频听感）。
+  `REAL_MACOS_VERIFIED`，范围仅限 Host 进程重启，不含真实音频听感。
 
 ### 3.6 EQService
 
@@ -217,7 +221,8 @@ Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 
 | 安装事务 / 安装门禁 | `make test-install-transaction`、`make test-installer-gate` | TEST_VERIFIED |
 | Protocol 布局与四份头副本 | `make protocol-check`、`tools/sync_shared_header.sh --check` | TEST_VERIFIED |
 
-证据索引：[verification/](verification/)、[docs/1.2.0/](1.2.0/)。
+阶段的验证报告与批次记录不随仓库发布；上表数字的复现命令见
+[development/DEVELOPMENT_GUIDE.md](development/DEVELOPMENT_GUIDE.md)。
 
 上表数字于 2026-11-21 在提交 `710101c` 上重新实测：Host `swift test` 379 tests / 0 failures
 （rc=0），App `swift test` 253 tests / 0 failures（rc=0）。
@@ -312,3 +317,87 @@ HAL 驱动是否会被 `coreaudiod` 加载仍为 NOT_VERIFIED（N-9），真实 
 Known-Limitations P-9。
 
 原则不变：未验证项一律标注 NOT_VERIFIED，不写成 PASS。
+
+---
+
+# 1.2.1 (unreleased)
+
+**This version has not been released.** `VERSION`, the app, driver and Host
+bundle versions, the package version and the shared-memory protocol
+(`0x00020200`) are unchanged. Nothing below has been run on a display, and no
+1.2.0 result is restated or revised here.
+
+This section is in English because release notes are user-facing. The 1.2.0 notes
+above are untouched.
+
+## What changed
+
+### Volume and mute commit without a playback session
+
+At 1.2.0 a write could return success and still not be in effect (OBS-1). The
+driver installs the volume control's committed value during `OnStartIO`, so a
+change made while nothing was playing stayed in the HAL control, and the next
+playback handshake could adopt the older value.
+
+- The app writes the property and then reads it back. The menu bar moves only to
+  what the device reports; a write that is accepted and then dropped is logged as
+  such and never shown as applied. For the SoundBridge proxy the tolerance is one
+  raw step of its 48-step taper, because the proxy quantises to its own steps. A
+  third-party device keeps HAL-status semantics, since it may quantise far more
+  coarsely and refusing its valid changes would be a regression.
+- The Host commits every accepted volume/mute change into the shared-memory
+  volume state block, so the value is already there when the driver next performs
+  the `OnStartIO` handshake, and it survives a Host restart or a driver
+  reconnection.
+
+### EQ settings persist, and are re-applied on launch
+
+At 1.2.0 the last position of a drag was not persisted (OBS-2): the throttled
+pipeline's save sat behind an early return, and releasing the slider advanced the
+cache without going through that pipeline, so the final value looked unchanged
+and was never written.
+
+- Each device's EQ is now one dictionary (`{bass, mids, treble, enabled}`) under
+  one key, `eq_<deviceUID>_state` (`eq_default_state` in production), so a crash
+  between two writes cannot mix the gains of one drag with the bypass flag of
+  another.
+- Restore validates field by field: an unusable field falls back to its default
+  and the other three survive; a non-finite gain is discarded, and a finite
+  out-of-range gain is clamped.
+- The four keys written by 1.2.0 are read once and rewritten in the current
+  shape, so upgrading does not flatten a device's EQ.
+- Reset persists immediately, and restored values are pushed to the DSP on
+  launch instead of waiting for a slider to move.
+
+Downgrade: once 1.2.1 has saved, 1.2.0 reads only its four old keys, which are no
+longer written, so it restores stale values.
+
+### Uninstall lifecycle
+
+At 1.2.0 the script removed the driver bundle and nothing else: it did not stop a
+running Host, left the runtime IPC files in `/tmp`, and could not distinguish a
+removed file from a reloaded driver (OBS-3).
+
+- Four phases in a fixed order — identify, stop, release IPC, remove. No phase
+  runs before identification succeeds.
+- Only processes whose executable is this installation's Host and whose owner is
+  you are signalled: `SIGTERM`, a bounded wait (default 5 s, `--timeout`), then
+  `SIGKILL` against that same pid. `--keep-host` skips the phase. An unreadable
+  process table is reported as "not verified", never as "nothing was running".
+- `/tmp/soundbridge-<uid>-*` and the device control file are released; a file that
+  cannot be removed is a failure, not a warning.
+- The report keeps four states apart — files removed from disk, driver unloaded
+  from `coreaudiod`, the CoreAudio device gone, `coreaudiod` restarted — and only
+  the first is performed.
+- The PKG receipt and the installer transaction logs are reported, never deleted.
+  EQ settings, volume state, logs and the app are kept.
+- Idempotent: a second run is a no-op, a machine with nothing installed exits 0,
+  and a failure exits non-zero naming the step it could not complete.
+
+## Still unverified
+
+- None of this has been executed on a display: volume/mute commit without
+  playback, EQ restore after an app or Host restart, and a real uninstall of a
+  real driver. The commands that were run, and the test counts, are in the
+  [1.2.1 product-quality report](release/SoundBridge-1.2.1-Product-Quality-Report.md).
+- The 1.2.0 items marked `NOT_VERIFIED` above (N-1 … N-10) are unchanged.

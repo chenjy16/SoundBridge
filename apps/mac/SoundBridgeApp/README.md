@@ -2,25 +2,29 @@
 
 Menu bar app for SoundBridge on macOS. Built with SwiftUI + AppKit.
 
-Last reviewed: March 1, 2026.
+Last reviewed: 2026-11-22 (1.2.0).
 
 ## Purpose
 
 `SoundBridgeApp` is the control plane for SoundBridge:
 
 - Presents onboarding and settings UI.
-- Manages EQ and preset state.
+- Manages EQ and volume state.
 - Starts `SoundBridgeHost` when needed.
-- Coordinates driver install/update prompts.
+- Detects the installed HAL driver and tells the user which version the build
+  needs; it never installs the driver itself (the PKG does that).
 
 It does not run real-time DSP processing.
 
 ## Key Capabilities
 
-- 10-band EQ controls with per-band frequency, Q, and filter type.
-- Bundled presets plus user presets persisted as JSON.
-- First-run onboarding and driver installation flow.
-- Sparkle-powered update checks.
+- Three EQ macro controls (Bass / Mids / Treble) over a 10-band engine, plus reset.
+- First-run onboarding that points at the official PKG and verifies the installed
+  driver matches this build.
+- Driver protocol gate: an old driver with a new app is reported at launch instead
+  of producing silence.
+- No automatic update channel in 1.2.0 (`SUPublicEDKey` is empty; `Sparkle.framework`
+  is linked but unused).
 - Menu bar-only interaction model.
 
 ## Prerequisites
@@ -71,10 +75,9 @@ cd packages/host && swift build -c release
 
 ## Data and State Paths
 
-- IPC preset file: `~/Library/Application Support/SoundBridge/preset.json`
-- User presets directory: `~/Library/Application Support/SoundBridge/Presets/`
 - App log: `~/Library/Logs/SoundBridge/app.log`
 - Driver install target: `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver`
+- EQ / volume defaults: `com.soundbridge.menubar` (`eq_default_*` keys)
 
 ## Developer Flags and Environment
 
@@ -82,25 +85,21 @@ cd packages/host && swift build -c release
 - `SOUNDBRIDGE_ROOT`: optional root path used during host binary discovery.
 - `ENABLE_LIQUID_GLASS=1`: forces `LIQUID_GLASS_AVAILABLE` compile define in `Package.swift`.
 
-## Test Utility
+## Test Utility (stale)
 
-`test-presets.sh` cycles bundled presets by writing each one to:
-
-`~/Library/Application Support/SoundBridge/preset.json`
-
-Run:
-
-```bash
-cd apps/mac/SoundBridgeApp
-./test-presets.sh
-```
+`test-presets.sh` is a leftover from an earlier prototype. 1.2.0 has no preset
+feature and no code reads the file it writes, so running it has no effect. The
+script is kept only because removing files is a separate change; do not treat it
+as a supported tool.
 
 ## Troubleshooting
 
 - Host not found:
   - Build host in `packages/host` and relaunch app.
-- Driver install/update fails:
-  - Ensure the driver bundle exists and grant admin privileges when prompted.
-- Presets not loading:
-  - Verify bundled JSON files exist under `Sources/Resources/Presets`.
-  - Check user preset JSON validity in `~/Library/Application Support/SoundBridge/Presets/`.
+- Driver missing or out of date:
+  - Install the PKG; the app never installs the driver itself. An old driver with
+    a new app shows a protocol-mismatch notice instead of producing audio.
+- EQ settings do not survive a restart:
+  - Known issue OBS-2 in `docs/risks/Known-Limitations.md`.
+- Volume change appears to do nothing:
+  - Known issue OBS-1: re-set it while audio is playing.

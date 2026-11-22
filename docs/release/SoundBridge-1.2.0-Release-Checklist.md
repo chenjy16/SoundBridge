@@ -3,11 +3,15 @@
 本检查单只列**仓库中真实存在的命令**。未执行过的步骤不要勾选；勾选前必须有
 该步骤的输出证据。
 
-> 当前状态：源码级与自动化测试级收敛已完成（到 P4 Batch 1A）；真实环境已执行
-> **5/12 项（3 项完成 + 2 项部分）**——P4 Batch 3A：安装、协议、播放三项完成，
-> EQ 听感（主观）与默认 buffer underrun 基线两项部分取证；其余 7 项（热插拔、
-> 卸载重装、`coreaudiod` 重启、双设备、8 小时、14.4、x86_64）仍未执行。
-> 因此本检查单尚未被完整走通一次。
+> **当前状态（2026-11-22，1.2.0 已发布）**：本检查单已按 1.2.0 实际发布过程走通一次，
+> 回填结果见 [§10](#10-120-发布回填2026-11-22)。原始表格与其判据保留不变，供下一次
+> 发布复用；表内「证据（当前）」列记录的是**发布前**（P4 Batch 3A，带 ad-hoc 签名的
+> RC）的状态，不要与 §10 的回填结论混读。
+>
+> 发布**之后**在验证机上跑出的结果（下载校验、安装、未签名驱动加载、功能与 31 分钟
+> 稳定性、两项未测）单独记录在
+> [SoundBridge-1.2.0-Post-Release-Validation-Addendum.md](SoundBridge-1.2.0-Post-Release-Validation-Addendum.md)。
+> 三者关系：**本表 = 发布前判据**，「§10 = 1.2.0 回填」，「Addendum = 发布后实测」。
 >
 > 「已执行」的判据是：有命令、有本轮输出、有可查的报告路径。没有证据的格子只能留空，
 > 不能填 PASS。
@@ -54,7 +58,7 @@ make test           # protocol check + DSP/Host/App/installer
 
 | 套件 | 命令 | 已知基线（最近一次记录） |
 |---|---|---|
-| Driver 全量 | `make test-driver` | 见 [verification/](../verification/)，scratch 目录构建 |
+| Driver 全量 | `make test-driver` | scratch 目录构建 |
 | DSP | `make test-dsp` | **33 tests** |
 | Host | `make test-host` | **379 tests / 0 failures** |
 | App | `make test-app` | **253 tests / 0 failures** |
@@ -142,6 +146,9 @@ make test-release-payload
 > **这些证据取自带 ad-hoc 签名的 RC。** P4 Batch 7 把发布策略改为完全未签名后，第 1–3
 > 行**尚未在新产物上重跑**：安装、启动、驱动加载都必须在未签名产物上重新取证，见 §8.2
 > 的 L-8/L-9。旧证据不能沿用。
+>
+> 表中 `Batch 3A`、`P4 Batch …` 是当年内部批次编号，批次报告不随仓库发布（见
+> [docs/README.md](../README.md) §6）；这里保留编号只为标注证据来源。
 
 | # | 步骤 | 通过判据 | 证据（当前） |
 |---|---|---|---|
@@ -167,7 +174,7 @@ make test-release-payload
 |---|---|---|
 | 1 | [architecture/SoundBridge-1.2.0-Architecture.md](../architecture/SoundBridge-1.2.0-Architecture.md) | 任何架构/协议/生命周期变化 |
 | 2 | [engineering/](../engineering/) | 对应机制变化 |
-| 3 | 新增 `verification/` 报告 | 每次批量验证 |
+| 3 | 批次验证结论回填到 [risks/Known-Limitations.md](../risks/Known-Limitations.md) 与 [architecture](../architecture/SoundBridge-1.2.0-Architecture.md) §11 | 每次批量验证 |
 | 4 | [risks/Known-Limitations.md](../risks/Known-Limitations.md) | 任何风险状态变化（关闭也必须记录） |
 | 5 | [RELEASE_NOTES.md](../RELEASE_NOTES.md) | 版本事实、测试数量、验证等级变化 |
 | 6 | [INSTALLATION_GUIDE.md](../INSTALLATION_GUIDE.md) | 安装/卸载路径、签名方式、排查命令变化 |
@@ -231,3 +238,83 @@ DMG SHA-256:         ...
 阻断项状态:           0（已披露限制见 §8.2）
 结论:                COMPLETE / PARTIAL / BLOCKED
 ```
+
+## 10. 1.2.0 发布回填（2026-11-22）
+
+本节按 §9 模板回填 1.2.0 的**实际**发布结果。原始证据：
+[SoundBridge-1.2.0-Final-Release-Report.md](SoundBridge-1.2.0-Final-Release-Report.md)。
+
+```
+版本:                1.2.0
+日期:                2026-11-21（GitHub Release 发布）/ 2026-11-22（报告出具）
+VERSION:             1.2.0（commit fc09aee，tag v1.2.0）
+协议版本:            0x00020200（131584），header 320 B
+驱动与 Host 构建:   universal（x86_64 arm64），独立输出目录构建
+签名方式:            无（未签名、未公证；仅 ld64 linker-signed CodeDirectory）
+UNSIGNED_APP:        PASS（tools/verify_signatures.sh）
+UNSIGNED_RELEASE:    PASS（tools/verify_unsigned_release.sh）
+PKG SHA-256:         2bf224605b4ecbcfbbf7253ba0bfc426fcaab96aee3e35623059dbdb86635a6f
+DMG SHA-256:         2c78d502c54d20dc4764843e5e1fbfa3c64daab2ad07fdc4943dffca8df643e7
+已执行检查单项:       §0 §1 §2 §3 §4 §5 §6 的 1-5、7、8
+未执行项及原因:       §6-6（设备移除，用户跳过）、§6-9/-10/-11/-12（双设备/8h/14.4/x86_64）
+阻断项状态:           0（已披露限制见 §8.2；发布后新增观察见 Known-Limitations §2A）
+结论:                COMPLETE（在 1.2.0 声明的验证边界内）
+```
+
+### 10.1 §6 真实环境验证逐行回填
+
+| # | 步骤 | 1.2.0 实际结果 | 证据 |
+|---|---|---|---|
+| 1 | 干净环境用 PKG 安装 | **已执行**：同机卸载后，用从 GitHub 下载的 PKG 经 `installer` 安装成功，payload 109/109 一致 | 发布报告 §11–§12 |
+| 2 | 确认驱动版本与协议 | **已执行**：`com.soundbridge.driver` 1.2.0；共享内存 `protocol=131584`、`header_size=320` | 发布报告 §1、§15 |
+| 3 | 播放音频（默认设置） | **已执行**：约 47.8k 帧/秒，用户确认听到 | 发布报告 §21 K2 |
+| 4 | 实际 EQ 听感 | **部分**：EQ 运行时生效有客观参数链（`eq_seq` 0→10、10 段增益与 UI 吻合）；本轮**未**取得主观听感确认 | 发布报告 §21 K4 |
+| 5 | 播放窗口 underrun | **已执行（默认 buffer）**：31 分 01 秒、89,320,455 帧，播放期 30 个采样点零增长；低 buffer / 高负载仍未测 | 发布报告 §22 |
+| 6 | 播放中拔出 HDMI/DP | **未执行**：用户选择跳过（K5c） | Known-Limitations §2A |
+| 7 | 卸载 → 重装闭环 | **已执行（同机）**：卸载、重装、播放/音量/静音/EQ 重新可用；EQ 数值跨重装一致性因 OBS-2 不作判据 | 发布报告 §11–§12、§21 |
+| 8 | `coreaudiod` 重启后恢复 | **部分**：`killall coreaudiod` 后驱动被重新加载（L3/L5 成立）；Host 侧自动恢复未单独判定 | 发布报告 §16、§18 |
+| 9 | 两台 HDMI 设备同时播放 | **未执行** | — |
+| 10 | 连续播放 ≥ 8 小时 | **未执行**（最长 31 分 01 秒） | 发布报告 §22 |
+| 11 | macOS 14.4 上重复 1–10 | **未执行** | — |
+| 12 | x86_64 真机 | **未执行**（产物为 universal） | — |
+
+### 10.2 §8.2 已披露限制的结案状态
+
+| 编号 | 原限制 | 1.2.0 发布后状态 |
+|---|---|---|
+| L-1 | 设备移除未验证 | **仍未验证**（K5c 跳过） |
+| L-2 | 卸载 → 重装闭环未验证 | **同机已执行**；跨版本/跨机器仍未验证（U-16） |
+| L-3 | macOS 14.4 / x86_64 未认证 | **仍未验证**（U-3、U-5） |
+| L-4 | 低 buffer / 高负载 underrun 未测 | **仍未验证**（默认 buffer 已两次长时间验证） |
+| L-5 | ≥8 小时、多设备并发未测 | **仍未验证** |
+| L-6 | EQ 听感仅主观确认 | **仍无测量数据**；1.2.0 轮次连主观确认也未单独取得 |
+| L-7 | RT-1 – RT-5 未处理 | **未处理**（已知缺陷） |
+| L-8 | 完全未签名 | **策略不变**（A 类，不修） |
+| L-9 | 未签名驱动能否加载未验证 | **单机已验证**（U-17，macOS 27.2.1 / arm64 / SIP+GK 开启）；其他环境仍未验证 |
+| L-10 | 未签名 PKG 完整安装流程未验证 | **CLI 路径已验证**；GUI 批准路径未测（G-UI） |
+| L-11 | 无自动更新通道 | **策略不变**（A 类，不修） |
+
+回填不改变任何一条「未验证」的等级，除非上一列明确写出「已验证」。
+
+## 11. 驱动加载取证阶梯（L1–L7，可复用）
+
+「安装了驱动」与「驱动在跑」是两件事，中间有若干层，必须逐层取证，不能用低层
+冒充高层（自 P4 Batch 8 的 P-9 程序提炼，已在 1.2.0 发布验证中实际执行）。
+
+| 层 | 判据 | 取证方式 | 容易犯的错 |
+|---|---|---|---|
+| **L1 安装成功** | `installer` 退出码 0；事务日志 `[SUCCESS] driver <ver> (protocol <n>)`；PKG 回执存在 | `installer -pkg … -target /`、`pkgutil --pkg-info` | 把「包解开」当成「安装成功」 |
+| **L2 bundle 落盘** | `/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver` 是真实目录（非符号链接）、`root:wheel`、bundle id 与版本正确、无 `_CodeSignature` | `ls -ld`、`plutil -p`、`codesign -dv` | 用 `lipo -archs` 存在推断可加载 |
+| **L3 被发现** | `coreaudiod` 日志出现 `HALS_RemotePlugInRegistrar … Attempting to load: SoundBridgeDriver.driver` | `log show --predicate …`（**必须** `--info --debug`，否则看不到） | 安装后立刻查，忽略「安装早于 coreaudiod 扫描」的时序 |
+| **L4 设备枚举** | `system_profiler SPAudioDataType` 出现代理设备 | `system_profiler SPAudioDataType` | 把枚举当成加载（枚举可由其他路径产生） |
+| **L5 实际加载** | 出现 `Core Audio Driver (SoundBridgeDriver.driver)` 进程；驱动自身 subsystem 有循环日志 | `ps`、`log show --predicate 'subsystem == "com.soundbridge.driver"'` | 只看 L4 就下结论 |
+| **L6 会话建立** | 控制文件存在；共享内存 mapping 出现；驱动日志 `✓ Mapped` / `✓ Connected`；生命周期快照 `sharedMemoryConnection=connected` | Host 侧日志 + `/tmp/soundbridge-*` 检查 | 在 App 未启动时查「无连接」并判失败 |
+| **L7 音频流动** | 生命周期 `audioPipeline=flowing`；帧计数按 48 kHz 速率增长；`overruns`/`format_mismatch` 为 0 | 共享内存探针 + 驱动 STATS | 以「设备存在」代替「音频在流」 |
+
+配套纪律：
+
+- 安装脚本**不重启** `coreaudiod`；若 `coreaudiod` 启动早于安装，必须等一次重新
+  扫描（注销/重启或用户自行 `killall coreaudiod`）才能进入 L3 之后。
+- 停止播放后 `driver_connected` 归 0 属正常回收，不得据此判「链路故障」。
+- 每一层都要留下原始输出路径；只有 L5 成立才可以说「未签名驱动被加载」，只有
+  L7 成立才可以说「音频链路可用」。

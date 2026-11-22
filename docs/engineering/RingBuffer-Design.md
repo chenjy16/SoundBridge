@@ -1,8 +1,8 @@
 # Ring Buffer 设计
 
 来源：Batch 0 + Batch 1（协议契约冻结与 Ring 实现修复）。结论状态
-`IMPLEMENTED — TESTS PASSED`，完整证据见
-[verification/Batch-0-1-Verification.md](../verification/Batch-0-1-Verification.md)。
+`IMPLEMENTED — TESTS PASSED`；批次验证报告已随阶段报告移出仓库，当前结论由
+`make test` 中的协议检查与 Host 测试套件持续覆盖。
 
 本文只描述**当前实现**的契约。Batch 0 之前的 Drop-Old 语义、可配置容量
 缺省 0、单一 `/tmp/soundbridge_<uid>` 路径均已删除，不再具备任何效力。
@@ -169,4 +169,4 @@ Host 在发布 mapping **之前**用
 
 - 协议头与 ABI：[architecture/SoundBridge-1.2.0-Architecture.md](../architecture/SoundBridge-1.2.0-Architecture.md)
 - 写入前的准入：[Admission-Ownership.md](Admission-Ownership.md)
-- 验证证据：[verification/Batch-0-1-Verification.md](../verification/Batch-0-1-Verification.md)
+- 验证入口：`make test`（`check_protocol_layout.sh` + Host 测试套件）
