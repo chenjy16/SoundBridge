@@ -35,6 +35,16 @@ let renderer = AudioRenderer(memoryManager: memoryManager)
 proxyManager.onManagedProxyChanged = { uid in
     memoryManager.setPreferredRenderUID(uid)
 }
+
+// Committing a volume or mute change must not wait for playback. The driver
+// installs the mapping into `SoundBridgeVolumeControl` only from `OnStartIO`,
+// so a change made while nothing is playing stays in the HAL control; without
+// this line the next `OnStartIO` handshake would adopt the older committed
+// value and discard the user's choice. The return value is whether the mapping
+// accepted the write, which is how the commit path reports failure.
+proxyManager.onProxyVolumeStateCommitted = { uid, scalar, muted in
+    memoryManager.publishVolumeState(for: uid, scalar: scalar, muted: muted)
+}
 let audioEngine = AudioEngine(renderer: renderer, registry: deviceRegistry)
 let deviceMonitor = DeviceMonitor(
     registry: deviceRegistry,

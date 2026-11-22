@@ -15,6 +15,12 @@ class ProxyDeviceManager {
     /// recorder here so a regression that puts one back fails a test instead of
     /// silently moving a user's audio.
     private let hal: DefaultOutputHAL
+    /// Every read and write of a device's own volume/mute goes through this.
+    ///
+    /// Held to the same rule as `hal`: it is the only seam that touches those
+    /// properties, so `ProxyVolumeCommitTests` can drive the commit path
+    /// without the machine's audio hardware.
+    private let volumeHAL: DeviceVolumeHAL
     /// Whether a CoreAudio rebuild is being recovered.
     ///
     /// DeviceMonitor must not act on default-output notifications while the
@@ -28,6 +34,12 @@ class ProxyDeviceManager {
     private let volumeForwardQueue = DispatchQueue.main
     private let volumeForwardEpsilon: Float32 = 0.001
     private var lastForwardedProxyVolume: Float32?
+    /// The last state this Host successfully pushed into shared memory.
+    ///
+    /// Only successful commits are recorded, so a mapping that was missing (or
+    /// refused the write) is retried on the next notification instead of being
+    /// remembered as done. Cleared whenever the monitored device changes.
+    private var lastCommittedProxyState: ProxyVolumeCommit?
     let volumePersistence: VolumePersistence
 
     /// The physical device whose proxy this Host is routing through.
@@ -56,6 +68,19 @@ class ProxyDeviceManager {
     /// which republishes the mapping the render callback reads.
     var onManagedProxyChanged: ((String?) -> Void)?
 
+    /// Called once per accepted volume/mute change, so the state can be
+    /// committed to shared memory.
+    ///
+    /// `main.swift` points this at `SharedMemoryManager.publishVolumeState`,
+    /// which bumps `state_revision` and latches `state_initialized`. The return
+    /// value is whether the mapping accepted the write; `false` means the
+    /// change is not yet committed and must be retried on the next change.
+    ///
+    /// Deliberately separate from `onManagedProxyChanged`: routing answers
+    /// "which mapping does the render path read", this answers "what does the
+    /// mapping say the volume is".
+    var onProxyVolumeStateCommitted: ((String, Float, Bool) -> Bool)?
+
     /// Pre-Phase-6A name for `managedProxyUID`.
     ///
     /// Kept as an alias rather than renamed at every call site: the render path
@@ -71,11 +96,13 @@ class ProxyDeviceManager {
 
     init(registry: DeviceRegistry, volumePersistence: VolumePersistence = VolumePersistence(),
          lifecycleGate: HostLifecycleGate = HostLifecycleGate(),
-         hal: DefaultOutputHAL = CoreAudioDefaultOutputHAL()) {
+         hal: DefaultOutputHAL = CoreAudioDefaultOutputHAL(),
+         volumeHAL: DeviceVolumeHAL = CoreAudioDeviceVolumeHAL()) {
         self.registry = registry
         self.volumePersistence = volumePersistence
         self.lifecycleGate = lifecycleGate
         self.hal = hal
+        self.volumeHAL = volumeHAL
     }
 
     deinit {
@@ -424,96 +451,9 @@ class ProxyDeviceManager {
     // `CoreAudioDefaultOutputHAL`, so that a test can answer them instead of
     // asking the machine.
 
-    private func getDeviceVolume(_ deviceID: AudioDeviceID) -> Float32? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        // Try getting master volume
-        if AudioObjectHasProperty(deviceID, &address) {
-            var volume: Float32 = 0
-            var dataSize = UInt32(MemoryLayout<Float32>.size)
-            let status = AudioObjectGetPropertyData(
-                deviceID,
-                &address,
-                0,
-                nil,
-                &dataSize,
-                &volume
-            )
-            if status == noErr {
-                return volume
-            }
-        }
-
-        // Try getting channel 1 volume (left channel)
-        address.mElement = 1
-        if AudioObjectHasProperty(deviceID, &address) {
-            var volume: Float32 = 0
-            var dataSize = UInt32(MemoryLayout<Float32>.size)
-            let status = AudioObjectGetPropertyData(
-                deviceID,
-                &address,
-                0,
-                nil,
-                &dataSize,
-                &volume
-            )
-            if status == noErr {
-                return volume
-            }
-        }
-
-        return nil
-    }
-
-    private func setDeviceVolume(_ deviceID: AudioDeviceID, volume: Float32) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        // Try setting master volume
-        if AudioObjectHasProperty(deviceID, &address) {
-            var vol = volume
-            let status = AudioObjectSetPropertyData(
-                deviceID,
-                &address,
-                0,
-                nil,
-                UInt32(MemoryLayout<Float32>.size),
-                &vol
-            )
-            if status == noErr {
-                return true
-            }
-        }
-
-        // Try setting per-channel volume (channel 1 and 2) if master failed
-        var channelSet = false
-        for channel: UInt32 in 1...2 {
-            address.mElement = channel
-            if AudioObjectHasProperty(deviceID, &address) {
-                var vol = volume
-                let status = AudioObjectSetPropertyData(
-                    deviceID,
-                    &address,
-                    0,
-                    nil,
-                    UInt32(MemoryLayout<Float32>.size),
-                    &vol
-                )
-                if status == noErr {
-                    channelSet = true
-                }
-            }
-        }
-
-        return channelSet
-    }
+    // The device volume/mute getters and setters that used to live here now
+    // belong to `CoreAudioDeviceVolumeHAL`, so that a test can answer them
+    // instead of asking the machine. Their probing order is unchanged.
 
     private func startVolumeForwarding(proxyDeviceID: AudioDeviceID) {
         if monitoredProxyDeviceID == proxyDeviceID {
@@ -523,9 +463,7 @@ class ProxyDeviceManager {
         stopVolumeForwarding()
         monitoredProxyDeviceID = proxyDeviceID
         monitoredVolumeElements.removeAll(keepingCapacity: true)
-        volumeForwardQueue.async { [weak self] in
-            self?.lastForwardedProxyVolume = nil
-        }
+        clearVolumeCaches()
 
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
@@ -590,9 +528,7 @@ class ProxyDeviceManager {
             monitoredProxyDeviceID = nil
             monitoredVolumeElements.removeAll(keepingCapacity: false)
             monitoredMuteRegistered = false
-            volumeForwardQueue.async { [weak self] in
-                self?.lastForwardedProxyVolume = nil
-            }
+            clearVolumeCaches()
         }
 
         // SAFETY: self 是 main.swift 中的全局 let 变量，生命周期与进程一致。
@@ -630,6 +566,9 @@ class ProxyDeviceManager {
             return
         }
 
+        // Commit before forwarding: forwarding is gated on the proxy being the
+        // default output, committing never is.
+        commitObservedProxyVolumeState()
         enqueueProxyVolumeForward()
     }
 
@@ -638,13 +577,106 @@ class ProxyDeviceManager {
             return
         }
 
-        let proxyDeviceID = activeProxyDeviceID
-        let physicalDeviceID = activePhysicalDeviceID
-        guard proxyDeviceID != 0, physicalDeviceID != 0 else { return }
+        commitObservedProxyVolumeState()
+        enqueueProxyMuteForward(token: token)
+    }
 
+    // MARK: - Committing the state (P1-1)
+
+    /// One volume/mute value this Host pushed into shared memory.
+    private struct ProxyVolumeCommit: Equatable {
+        var uid: String
+        var scalar: Float
+        var muted: Bool
+    }
+
+    /// How many times a commit re-reads the control before giving up on
+    /// convergence. Two extra passes cover "the user moved the slider while the
+    /// first value was being published"; a third would only be spin.
+    private static let commitConvergencePasses = 3
+
+    /// Commit the proxy's current volume and mute for the active route.
+    ///
+    /// Internal rather than private because the notification handlers are the
+    /// only production callers but the work behind them does not need a live
+    /// CoreAudio device: `ProxyVolumeCommitTests` calls this directly. It runs
+    /// on the caller's thread, which for both callers is the main thread — the
+    /// same queue `lastCommittedProxyState` is confined to.
+    func commitObservedProxyVolumeState() {
+        commitProxyVolumeState(
+            proxyDeviceID: activeProxyDeviceID,
+            physicalDeviceID: activePhysicalDeviceID
+        )
+    }
+
+    /// Publish the proxy's current volume and mute into shared memory and onto
+    /// disk, then forward them to the physical device.
+    ///
+    /// Committing and forwarding are deliberately separate steps:
+    ///
+    ///   - *Forwarding* the value to the physical device is only correct while
+    ///     the proxy is the macOS default output, which is why
+    ///     `forwardProxyVolumeToPhysical` is gated on
+    ///     `DefaultOutputPolicy.mayForwardVolume`.
+    ///   - *Committing* the value is always correct. The driver installs the
+    ///     shared-memory mapping into `SoundBridgeVolumeControl` only from
+    ///     `OnStartIO`, so a change made while nothing is playing reaches the
+    ///     HAL control and stops there. The next `OnStartIO` handshake then
+    ///     adopts the committed state and pushes it back into the control —
+    ///     discarding the user's choice. That is exactly the 1.2.0 observation
+    ///     "reapplying the setting during playback makes it take effect".
+    private func commitProxyVolumeState(proxyDeviceID: AudioDeviceID, physicalDeviceID: AudioDeviceID,
+                                        attempt: Int = 0) {
+        guard lifecycleGate.permitsNormal(),
+              proxyDeviceID == activeProxyDeviceID,
+              physicalDeviceID == activePhysicalDeviceID,
+              let uid = activeProxyUID,
+              let scalar = volumeHAL.volume(proxyDeviceID) else { return }
+
+        let muted = volumeHAL.muted(proxyDeviceID) ?? false
+
+        guard !isAlreadyCommitted(uid: uid, scalar: scalar, muted: muted) else { return }
+
+        // Persist first: the disk entry is what `VolumeStateResolver` prefers on
+        // the next Host start, so it must not depend on the mapping existing.
+        volumePersistence.save(uid: uid, volume: scalar, muted: muted)
+
+        guard let accepted = onProxyVolumeStateCommitted?(uid, scalar, muted), accepted else {
+            // Nothing recorded, so the next notification retries instead of
+            // treating an uncommitted value as done.
+            logger.error(
+                "Volume state for \(uid, privacy: .public) could not be published to shared memory; the next change will retry"
+            )
+            return
+        }
+        lastCommittedProxyState = ProxyVolumeCommit(uid: uid, scalar: scalar, muted: muted)
+
+        // Converge: a second change that landed while the first was being
+        // published must not be left behind only in the control, because the
+        // next handshake makes shared memory the authority.
+        guard attempt + 1 < Self.commitConvergencePasses,
+              let recheck = volumeHAL.volume(proxyDeviceID), recheck != scalar else { return }
+        commitProxyVolumeState(
+            proxyDeviceID: proxyDeviceID,
+            physicalDeviceID: physicalDeviceID,
+            attempt: attempt + 1
+        )
+    }
+
+    private func isAlreadyCommitted(uid: String, scalar: Float, muted: Bool) -> Bool {
+        guard let last = lastCommittedProxyState else { return false }
+        return last.uid == uid && last.scalar == scalar && last.muted == muted
+    }
+
+    /// Forget the "already handled" memories when the monitored device changes.
+    ///
+    /// Both fields are read on `volumeForwardQueue`, so the reset hops onto that
+    /// queue instead of writing across queues — the same ordering the previous
+    /// inline `volumeForwardQueue.async` had.
+    private func clearVolumeCaches() {
         volumeForwardQueue.async { [weak self] in
-            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
-            self.forwardProxyMuteToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID)
+            self?.lastForwardedProxyVolume = nil
+            self?.lastCommittedProxyState = nil
         }
     }
 
@@ -656,42 +688,15 @@ class ProxyDeviceManager {
 
     private func forwardProxyMuteToPhysical(proxyDeviceID: AudioDeviceID, physicalDeviceID: AudioDeviceID) {
         guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID),
-              let muted = getDeviceMute(proxyDeviceID),
+              let muted = volumeHAL.muted(proxyDeviceID),
               mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID) else { return }
-        _ = setDeviceMute(physicalDeviceID, muted: muted)
+        _ = volumeHAL.setMuted(physicalDeviceID, muted: muted)
 
         // Persist mute state for the physical device
         if let physicalUID = activeProxyUID {
-            let volume = getDeviceVolume(proxyDeviceID) ?? VolumePersistence.defaultVolume
+            let volume = volumeHAL.volume(proxyDeviceID) ?? VolumePersistence.defaultVolume
             volumePersistence.save(uid: physicalUID, volume: volume, muted: muted)
         }
-    }
-
-    private func getDeviceMute(_ deviceID: AudioDeviceID) -> Bool? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
-        var muted: UInt32 = 0
-        var dataSize = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &muted) == noErr else { return nil }
-        return muted != 0
-    }
-
-    private func setDeviceMute(_ deviceID: AudioDeviceID, muted: Bool) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectHasProperty(deviceID, &address) else { return false }
-        var value: UInt32 = muted ? 1 : 0
-        return AudioObjectSetPropertyData(
-            deviceID, &address, 0, nil,
-            UInt32(MemoryLayout<UInt32>.size), &value
-        ) == noErr
     }
 
     /// Restore persisted volume and mute state to a proxy device via HAL API.
@@ -707,8 +712,8 @@ class ProxyDeviceManager {
         override: DeviceVolumeState? = nil
     ) {
         let state = override ?? volumePersistence.load(uid: physicalUID)
-        let restored = setDeviceVolume(proxyDeviceID, volume: state.volumeScalar)
-        let muteRestored = setDeviceMute(proxyDeviceID, muted: state.isMuted)
+        let restored = volumeHAL.setVolume(proxyDeviceID, volume: state.volumeScalar)
+        let muteRestored = volumeHAL.setMuted(proxyDeviceID, muted: state.isMuted)
         logger.info("Restored volume state for \(physicalUID): volume=\(String(format: "%.0f%%", state.volumeScalar * 100)), muted=\(state.isMuted) (vol:\(restored), mute:\(muteRestored))")
     }
 
@@ -749,13 +754,7 @@ class ProxyDeviceManager {
         }
 
         enqueueProxyVolumeForward(force: true)
-
-        let proxyID = activeProxyDeviceID
-        let physicalID = activePhysicalDeviceID
-        volumeForwardQueue.async { [weak self] in
-            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
-            self.forwardProxyMuteToPhysical(proxyDeviceID: proxyID, physicalDeviceID: physicalID)
-        }
+        enqueueProxyMuteForward(token: token)
 
         if attempt > 1 {
             logger.info("Volume and mute listeners re-registered after wake (attempt \(attempt))")
@@ -764,6 +763,13 @@ class ProxyDeviceManager {
         }
     }
 
+    /// One volume notification's work: forward the state to the physical device.
+    ///
+    /// Forwarding only — the commit happened in `handleProxyVolumeChanged`. This
+    /// is also the entry point routing changes and wake recovery use, and those
+    /// must not publish: `restoreVolumeState` writes the persisted value into
+    /// the control, and the mapping may legitimately hold a newer recovered
+    /// state that the driver's next `OnStartIO` handshake is about to apply.
     private func enqueueProxyVolumeForward(force: Bool = false) {
         guard let token = lifecycleGate.normalToken() else { return }
         let proxyDeviceID = activeProxyDeviceID
@@ -782,13 +788,28 @@ class ProxyDeviceManager {
         }
     }
 
+    /// One mute notification's work: forward the mute flag to the physical device.
+    private func enqueueProxyMuteForward(token: UInt64) {
+        let proxyDeviceID = activeProxyDeviceID
+        let physicalDeviceID = activePhysicalDeviceID
+        guard proxyDeviceID != 0, physicalDeviceID != 0 else { return }
+
+        volumeForwardQueue.async { [weak self] in
+            guard let self, self.lifecycleGate.permitsNormal(token) else { return }
+            self.forwardProxyMuteToPhysical(
+                proxyDeviceID: proxyDeviceID,
+                physicalDeviceID: physicalDeviceID
+            )
+        }
+    }
+
     private func forwardProxyVolumeToPhysical(
         proxyDeviceID: AudioDeviceID,
         physicalDeviceID: AudioDeviceID,
         force: Bool = false
     ) {
         guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID),
-              let proxyVolume = getDeviceVolume(proxyDeviceID) else { return }
+              let proxyVolume = volumeHAL.volume(proxyDeviceID) else { return }
 
         if !force, let lastForwardedProxyVolume, abs(proxyVolume - lastForwardedProxyVolume) < volumeForwardEpsilon {
             return
@@ -796,11 +817,11 @@ class ProxyDeviceManager {
         guard mayForwardToPhysical(proxyDeviceID: proxyDeviceID, physicalDeviceID: physicalDeviceID) else { return }
 
         lastForwardedProxyVolume = proxyVolume
-        _ = setDeviceVolume(physicalDeviceID, volume: proxyVolume)
+        _ = volumeHAL.setVolume(physicalDeviceID, volume: proxyVolume)
 
         // Persist volume state for the physical device
         if let physicalUID = activeProxyUID {
-            let muted = getDeviceMute(proxyDeviceID) ?? false
+            let muted = volumeHAL.muted(proxyDeviceID) ?? false
             volumePersistence.save(uid: physicalUID, volume: proxyVolume, muted: muted)
         }
     }

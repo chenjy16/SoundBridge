@@ -69,6 +69,11 @@ class VolumeController: ObservableObject {
     /// list the user clicks.
     private let defaultOutputSwitch = DefaultOutputSwitch()
 
+    /// Writes the scalar/mute properties and reports what the device says.
+    ///
+    /// P1-1: the write and the reported state are no longer assumed to agree.
+    private let levelCommit = VolumeLevelCommit(level: CoreAudioVolumeLevelWriting())
+
     // Block references for proper listener removal (P0 fix: prevents listener leak)
     private var volumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var muteListenerBlock: AudioObjectPropertyListenerBlock?
@@ -182,105 +187,97 @@ class VolumeController: ObservableObject {
 
     /// Set volume on the proxy device via CoreAudio API.
     /// UI → Driver → Shared Memory → Host (zero file I/O).
-    func setVolume(_ value: Float) {
-        let targetDevice: AudioObjectID
-        if proxyDeviceID != kAudioObjectUnknown {
-            targetDevice = proxyDeviceID
-        } else if physicalDeviceID != kAudioObjectUnknown {
-            targetDevice = physicalDeviceID
-        } else {
-            return
-        }
+    ///
+    /// Returns what actually reached the device. `1.2.0` returned `Void` and
+    /// published the requested value to `currentVolume` on the strength of the
+    /// HAL status code, so a control that accepted the write and then discarded
+    /// it still looked applied in the menu bar.
+    @discardableResult
+    func setVolume(_ value: Float) -> VolumeCommitResult {
+        let target = currentLevelTarget
+        // `os.log` interpolation runs in an escaping closure, so every value it
+        // mentions is captured here as a local first.
+        let deviceID = currentLevelDeviceID
+        let shownVolume = currentVolume
+        let result = levelCommit.setVolume(value, target: target)
 
-        let clamped = max(0.0, min(1.0, value))
-        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
-        var succeeded = false
-
-        for element in elements {
-            var volume = clamped
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
-                mScope: kAudioObjectPropertyScopeOutput,
-                mElement: element
-            )
-
-            let status = AudioObjectSetPropertyData(
-                targetDevice, &address, 0, nil,
-                UInt32(MemoryLayout<Float>.size), &volume
-            )
-
-            if status == noErr {
-                succeeded = true
-                if element != kAudioObjectPropertyElementMain {
-                    logger.info("setVolume succeeded on per-channel element \(element) for device \(targetDevice)")
-                }
-                // For per-channel elements, continue to set all channels
-                if element == kAudioObjectPropertyElementMain { break }
-            }
-        }
-
-        if succeeded {
+        switch result {
+        case .committed(let applied):
+            // Publish what the device reports, not what was requested: the
+            // proxy quantises to its own raw steps, so showing the requested
+            // value would leave the slider a fraction of a step away from the
+            // state the audio path is actually using.
             DispatchQueue.main.async { [weak self] in
-                self?.currentVolume = clamped
+                self?.currentVolume = applied
             }
-        } else {
-            logger.error("setVolume failed on all elements for device \(targetDevice)")
-            // Diagnostic: check settable status for each element
-            for element in elements {
-                var diagAddress = AudioObjectPropertyAddress(
-                    mSelector: kAudioDevicePropertyVolumeScalar,
-                    mScope: kAudioObjectPropertyScopeOutput,
-                    mElement: element
-                )
-                var isSettable: DarwinBoolean = false
-                let settableStatus = AudioObjectIsPropertySettable(targetDevice, &diagAddress, &isSettable)
-                logger.error("  Diagnostic: device=\(targetDevice) element=\(element) settable=\(isSettable.boolValue) settableQueryStatus=\(formatOSStatus(settableStatus))")
-            }
+        case .rejected(let status):
+            logger.error("setVolume failed on all elements for device \(deviceID): \(formatOSStatus(status))")
+            logElementDiagnostics(selector: kAudioDevicePropertyVolumeScalar, deviceID: deviceID)
+        case .notVerified(let requested, let actual):
+            logger.error("setVolume(\(requested)) was accepted but the device reports \(actual.map { "\($0)" } ?? "nothing"); leaving the menu bar at \(shownVolume)")
+        case .unavailable:
+            logger.error("setVolume: no target device to write to")
         }
+
+        return result
     }
 
     /// Toggle mute on the target device (proxy or physical).
-    func setMute(_ muted: Bool) {
-        let targetDevice: AudioObjectID
-        if proxyDeviceID != kAudioObjectUnknown {
-            targetDevice = proxyDeviceID
-        } else if physicalDeviceID != kAudioObjectUnknown {
-            targetDevice = physicalDeviceID
-        } else {
-            return
+    ///
+    /// Same contract as `setVolume`: `isMuted` only moves when the device agrees.
+    @discardableResult
+    func setMute(_ muted: Bool) -> MuteCommitResult {
+        let target = currentLevelTarget
+        let deviceID = currentLevelDeviceID
+        let shownMuted = isMuted
+        let result = levelCommit.setMute(muted, target: target)
+
+        switch result {
+        case .committed(let applied):
+            DispatchQueue.main.async { [weak self] in
+                self?.isMuted = applied
+            }
+        case .rejected(let status):
+            logger.error("setMute failed on all elements for device \(deviceID): \(formatOSStatus(status))")
+            logElementDiagnostics(selector: kAudioDevicePropertyMute, deviceID: deviceID)
+        case .notVerified(let requested, let actual):
+            logger.error("setMute(\(requested)) was accepted but the device reports \(actual.map { "\($0)" } ?? "nothing"); leaving the menu bar at \(shownMuted)")
+        case .unavailable:
+            logger.error("setMute: no target device to write to")
         }
 
-        let elements: [UInt32] = [kAudioObjectPropertyElementMain, 1, 2]
-        var succeeded = false
+        return result
+    }
 
-        for element in elements {
-            var value: UInt32 = muted ? 1 : 0
+    /// The device this controller writes to, in preference order: the proxy when
+    /// it is the default output, otherwise a physical device that has volume.
+    private var currentLevelTarget: VolumeLevelCommit.Target {
+        if proxyDeviceID != kAudioObjectUnknown { return .proxy(proxyDeviceID) }
+        if physicalDeviceID != kAudioObjectUnknown { return .physical(physicalDeviceID) }
+        return .none
+    }
+
+    private var currentLevelDeviceID: AudioObjectID {
+        switch currentLevelTarget {
+        case .proxy(let deviceID), .physical(let deviceID): return deviceID
+        case .none: return kAudioObjectUnknown
+        }
+    }
+
+    /// Report why every element refused the write. Only reached after a
+    /// rejection, so these extra HAL round-trips never sit in the success path.
+    private func logElementDiagnostics(selector: AudioObjectPropertySelector, deviceID: AudioObjectID) {
+        guard deviceID != kAudioObjectUnknown else { return }
+
+        for element in VolumeLevelCommit.elements {
             var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyMute,
+                mSelector: selector,
                 mScope: kAudioObjectPropertyScopeOutput,
                 mElement: element
             )
-
-            let status = AudioObjectSetPropertyData(
-                targetDevice, &address, 0, nil,
-                UInt32(MemoryLayout<UInt32>.size), &value
-            )
-
-            if status == noErr {
-                succeeded = true
-                if element != kAudioObjectPropertyElementMain {
-                    logger.info("setMute succeeded on per-channel element \(element) for device \(targetDevice)")
-                }
-                if element == kAudioObjectPropertyElementMain { break }
-            }
-        }
-
-        if succeeded {
-            DispatchQueue.main.async { [weak self] in
-                self?.isMuted = muted
-            }
-        } else {
-            logger.error("setMute failed on all elements for device \(targetDevice)")
+            var isSettable: DarwinBoolean = false
+            let status = AudioObjectIsPropertySettable(deviceID, &address, &isSettable)
+            logger.error("  Diagnostic: device=\(deviceID) selector=\(selector) element=\(element) settable=\(isSettable.boolValue) settableQueryStatus=\(formatOSStatus(status))")
         }
     }
 
