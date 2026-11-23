@@ -1,0 +1,455 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://soundbridge.local/schema/hardware-realtime-result-v1.json",
+  "title": "SoundBridge hardware realtime validation result",
+  "description": "Machine-readable output of tools/hardware-validation/sb-hw-validate. One file per command invocation. Two kinds share this schema: 'hw-run' (collect) and 'inventory' (inventory). Every optional property is optional because the value could not be measured, not because it is unimportant: absent is not zero. Where a required metric has no reader at all, the string 'not observable' is used and must be preserved verbatim by any consumer.",
+  "oneOf": [
+    { "$ref": "#/$defs/hwRun" },
+    { "$ref": "#/$defs/inventory" }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 with fractional seconds and an explicit offset, e.g. 2026-11-23T15:09:42.645Z. Always UTC; the run's local timezone is reported separately in timezone.",
+      "examples": ["2026-11-23T07:09:42.645Z"]
+    },
+    "notObservable": {
+      "type": "string",
+      "const": "not observable",
+      "description": "The single accepted spelling for 'no reader exists'. Never replace with 0, null, \"unknown\" or \"n/a\" in a required metric field."
+    },
+    "hwRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "kind", "runID", "startedAt", "endedAt", "timezone",
+        "target", "collection", "windows", "formatChanges", "events",
+        "operatorMarkers", "criteria", "verdict", "verdictReasons", "telemetry"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "kind": { "const": "hw-run" },
+        "runID": {
+          "type": "string",
+          "description": "UUID generated per invocation; no meaning across runs.",
+          "examples": ["6F1B7B0E-2F0B-4F2B-9E2B-2B5B8C1D7A31"]
+        },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "endedAt": { "$ref": "#/$defs/timestamp" },
+        "timezone": {
+          "type": "string",
+          "description": "IANA identifier of the machine's zone at run time.",
+          "examples": ["Asia/Shanghai"]
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deviceUID", "deviceName", "initialBucket", "initialSnapshot", "finalSnapshot"],
+          "properties": {
+            "deviceUID": {
+              "type": "string",
+              "description": "kAudioDevicePropertyDeviceUID of the observed device. This, not the name, is the identity."
+            },
+            "deviceName": { "type": "string" },
+            "initialBucket": {
+              "type": "string",
+              "description": "Format bucket the first window was cut against: '<rate>Hz/<frames>f'.",
+              "examples": ["48000Hz/512f"]
+            },
+            "initialSnapshot": { "$ref": "#/$defs/deviceSnapshot" },
+            "finalSnapshot": {
+              "description": "Empty object when the device was gone at the end of the run.",
+              "oneOf": [
+                { "$ref": "#/$defs/deviceSnapshot" },
+                { "type": "object", "maxProperties": 0 }
+              ]
+            }
+          }
+        },
+        "collection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requestedSeconds", "windowSeconds", "windowsRecorded", "cpuLoadProcesses"],
+          "properties": {
+            "requestedSeconds": { "type": "number", "minimum": 0 },
+            "windowSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "windowsRecorded": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Windows actually written. Zero means nothing was observed; it does not mean the run was clean."
+            },
+            "cpuLoadProcesses": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "H7 reversible load processes started by the harness (all killed on exit)."
+            }
+          }
+        },
+        "windows": {
+          "type": "array",
+          "description": "One entry per observation window. Empty when no genuine IO was seen.",
+          "items": { "$ref": "#/$defs/window" }
+        },
+        "formatChanges": {
+          "type": "array",
+          "description": "Union of harness-detected format changes and CoreAudio property-listener events, in the order they were recorded. A consumer must treat the two shapes as one timeline.",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/formatChangedByHarness" },
+              { "$ref": "#/$defs/deviceDisappeared" },
+              { "$ref": "#/$defs/collectionAborted" },
+              { "$ref": "#/$defs/propertyListenerEvent" }
+            ]
+          }
+        },
+        "events": {
+          "type": "array",
+          "description": "Host log lines the collector classified, plus the collector's own start/stop records.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["timestamp", "kind", "detail"],
+            "properties": {
+              "timestamp": { "$ref": "#/$defs/timestamp" },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "collector",
+                  "driver-underrun",
+                  "ring-overrun",
+                  "host-recovery",
+                  "host-recovery-failure",
+                  "host-degraded",
+                  "host-shutdown",
+                  "device-hotplug",
+                  "proxy-device",
+                  "default-output",
+                  "render-path",
+                  "mapping-retire"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "description": "The log line verbatim, or a collector message. Never summarized or truncated."
+              }
+            }
+          }
+        },
+        "operatorMarkers": {
+          "type": "array",
+          "description": "Human timeline entries appended with `sb-hw-validate marker`. Empty means the operator recorded nothing, which is itself evidence.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["timestamp", "note"],
+            "properties": {
+              "timestamp": { "$ref": "#/$defs/timestamp" },
+              "note": { "type": "string" }
+            }
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "description": "Evaluation of the task's pass criteria. C1..C10 plus C-extra (p99.9).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "statement", "status", "evidence"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "enum": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C-extra"]
+              },
+              "statement": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["MET", "MET (none reported)", "UNMET", "NOT OBSERVABLE", "NOT EXECUTED"],
+                "description": "'MET (none reported)' is used only for audible symptoms when markers exist but none describes one. SKIPPED scenarios are represented by a marker containing the word 'skip', never by a status here."
+              },
+              "evidence": { "type": "string" }
+            }
+          }
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "PASS — HARDWARE REALTIME VALIDATION VERIFIED",
+            "CONDITIONAL PASS — HARDWARE VALIDATION WITH DOCUMENTED LIMITATIONS",
+            "FAIL — HARDWARE REALTIME VALIDATION FAILED",
+            "INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING"
+          ]
+        },
+        "verdictReasons": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Human-readable reasons, in the order they were detected. A non-empty list is required whenever verdict is not PASS."
+        },
+        "telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "p999", "p999FollowUp", "quantiles", "windowCounters",
+            "driverUnderruns", "driverUnderrunFollowUp",
+            "logSources", "logSourceRule", "hostVersion"
+          ],
+          "properties": {
+            "p999": { "$ref": "#/$defs/notObservable" },
+            "p999FollowUp": {
+              "type": "string",
+              "description": "Smallest safe production change that would make p99.9 observable. Documentation, not a promise."
+            },
+            "quantiles": {
+              "type": "string",
+              "description": "Provenance note for every pXXUs value in windows[].",
+              "examples": ["cumulative since AudioRenderer construction, not per window"]
+            },
+            "windowCounters": {
+              "type": "string",
+              "description": "Provenance note for callbacks / overBudget / overBudgetExcessMs / driverUnderrunDelta.",
+              "examples": ["callbacks / overBudget / excess / underrun are true per-window deltas"]
+            },
+            "driverUnderruns": {
+              "type": "string",
+              "description": "Which reader produced the underrun counters, or the literal 'not observable'.",
+              "examples": ["sb-shm-probe (read-only mmap of the live mapping)", "not observable"]
+            },
+            "driverUnderrunFollowUp": { "type": "string" },
+            "mappingUID": {
+              "type": "string",
+              "description": "The UID actually used to locate the shared mapping: the proxy device UID with the trailing '-soundbridge' removed, because the Host keys /tmp/soundbridge-<owner>-<uid> by the physical UID. Recorded so a reader can tell which path was probed."
+            },
+            "logSources": {
+              "type": "object",
+              "description": "Every process that wrote to subsystem com.soundbridge.host during the run, with a line count. Only SoundBridgeHost lines are treated as telemetry; the rest are counted here and dropped.",
+              "additionalProperties": { "type": "integer", "minimum": 1 },
+              "examples": [{ "SoundBridgeHost": 214 }]
+            },
+            "logSourceRule": { "type": "string" },
+            "hostVersion": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window", "start", "end", "bucket", "ioRunning", "callbacks",
+        "overBudget", "overBudgetExcessMs", "maxSaturated", "quantilesAreCumulative"
+      ],
+      "description": "A window is always cut against one (rate, frames) pair. Two windows with different bucket strings have different deadlines and their overBudget values must never be added together.",
+      "properties": {
+        "window": { "type": "integer", "minimum": 0 },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "bucket": { "type": "string", "examples": ["48000Hz/512f"] },
+        "ioRunning": {
+          "type": "boolean",
+          "description": "kAudioDevicePropertyDeviceIsRunning OR ...IsRunningSomewhere at window end. Part of the genuine-IO proof."
+        },
+        "callbacks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Callbacks observed in this window (delta of TimingSnapshot.observations)."
+        },
+        "overBudget": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Deadline misses in this window, against this window's own deadline."
+        },
+        "overBudgetExcessMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cumulative excess milliseconds over budget, differenced across the window."
+        },
+        "maxSaturated": {
+          "type": "boolean",
+          "description": "True when the reported max is the overflow floor (16.384 ms), i.e. the real max is at least that value."
+        },
+        "quantilesAreCumulative": {
+          "const": true,
+          "description": "Machine-readable guard: p50Us/p95Us/p99Us/maxUs are cumulative since the Host started, not per-window values."
+        },
+        "actualSampleRate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Stream physical rate when available, else nominal rate, read from CoreAudio."
+        },
+        "actualBufferFrames": { "type": "integer", "minimum": 0 },
+        "deadlineMicroseconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "frames / sampleRate * 1e6, computed from this window's own snapshot."
+        },
+        "p50Us": { "type": "number" },
+        "p95Us": { "type": "number" },
+        "p99Us": { "type": "number" },
+        "maxUs": { "type": "number" },
+        "p999Us": {
+          "type": ["number", "null"],
+          "description": "Always absent/null until a production change exposes it. Null is not zero."
+        },
+        "hostCpuPercent": { "type": "number" },
+        "observedCallbackRateHz": {
+          "type": "number",
+          "description": "callbacks / elapsed seconds. Compared against expectedCallbackRateHz to prove real IO."
+        },
+        "expectedCallbackRateHz": {
+          "type": "number",
+          "description": "sampleRate / frames."
+        },
+        "driverUnderrunDelta": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Underruns in this window. Absent means not observable, never zero."
+        },
+        "ringOverrunDelta": { "type": "integer", "minimum": 0 },
+        "underrunSource": {
+          "type": "string",
+          "description": "Which reader produced driverUnderrunDelta for this window."
+        }
+      }
+    },
+
+    "deviceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uid", "name", "deviceID", "transport", "isRunning",
+        "isRunningSomewhere", "outputChannelCount", "availableRates", "capturedAt"
+      ],
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "deviceID": { "type": "integer" },
+        "transport": {
+          "type": "string",
+          "description": "kAudioDevicePropertyTransportType rendered as text.",
+          "examples": ["hdmi", "displayport", "built-in", "virtual", "aggregate"]
+        },
+        "isRunning": {
+          "type": "boolean",
+          "description": "kAudioDevicePropertyDeviceIsRunning as seen by the observer process."
+        },
+        "isRunningSomewhere": {
+          "type": "boolean",
+          "description": "kAudioDevicePropertyDeviceIsRunningSomewhere: another process may hold the device."
+        },
+        "outputChannelCount": { "type": "integer", "minimum": 0 },
+        "availableRates": {
+          "type": "array",
+          "items": { "type": "number" },
+          "description": "kAudioDevicePropertyAvailableNominalSampleRates."
+        },
+        "capturedAt": { "$ref": "#/$defs/timestamp" },
+        "nominalSampleRate": { "type": "number" },
+        "bufferFrameSize": {
+          "type": "integer",
+          "description": "kAudioDevicePropertyBufferFrameSize — the ACTIVE size. Not the value in the range below."
+        },
+        "bufferFrameSizeMin": { "type": "integer" },
+        "bufferFrameSizeMax": { "type": "integer" },
+        "streamPhysicalSampleRate": { "type": "number" },
+        "streamVirtualSampleRate": { "type": "number" },
+        "deadlineMicroseconds": { "type": "number" }
+      }
+    },
+
+    "formatChangedByHarness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "event", "from", "to"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "event": { "const": "format-changed" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "fromDeadlineUs": { "type": ["number", "null"] },
+        "toDeadlineUs": { "type": ["number", "null"] }
+      }
+    },
+    "deviceDisappeared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "event", "uid"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "event": { "const": "device-disappeared" },
+        "uid": { "type": "string" }
+      }
+    },
+    "collectionAborted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "event", "reason"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "event": { "const": "collection-aborted" },
+        "reason": { "type": "string" }
+      }
+    },
+    "propertyListenerEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp", "event"],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "event": {
+          "type": "string",
+          "enum": [
+            "nominal-sample-rate-changed",
+            "buffer-frame-size-changed",
+            "device-is-running-changed"
+          ]
+        },
+        "bucket": { "type": "string" },
+        "sampleRate": { "type": "number" },
+        "frames": { "type": "integer" },
+        "deadlineMicroseconds": { "type": "number" },
+        "note": { "type": "string" }
+      }
+    },
+
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "kind", "capturedAt", "host", "defaults", "devices"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "kind": { "const": "inventory" },
+        "capturedAt": { "$ref": "#/$defs/timestamp" },
+        "host": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["osVersion", "architecture", "logicalCores"],
+          "properties": {
+            "osVersion": { "type": "string", "examples": ["Version 27.2.1 (Build 26B131)"] },
+            "architecture": { "type": "string", "examples": ["arm64"] },
+            "logicalCores": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["defaultOutput"],
+          "properties": {
+            "defaultOutput": { "$ref": "#/$defs/deviceSnapshot" },
+            "defaultInput": {
+              "description": "Recorded for reference only; the hardware test never routes through it.",
+              "oneOf": [
+                { "$ref": "#/$defs/deviceSnapshot" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        "devices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/deviceSnapshot" }
+        }
+      }
+    }
+  }
+}
