@@ -59,6 +59,11 @@ compile_commands.json
 CTestTestfile.cmake
 _deps/
 build/
+# Sanitizer builds (`make test-dsp-tsan`) are separate directories because a
+# sanitizer cannot share a build tree with a universal binary.
+build-tsan/
+build-asan/
+build-ubsan/
 out/
 
 # C/C++

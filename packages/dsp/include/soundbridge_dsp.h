@@ -7,13 +7,40 @@
  *
  * Thread Safety:
  * - Engine creation/destruction: NOT thread-safe (call from main thread)
- * - Parameter updates: Thread-safe (can call from any thread)
- * - Process function: Realtime-safe (call only from audio thread)
+ * - Parameter updates: thread-safe, from any thread, including several at once
+ * - Process function: one audio thread at a time
+ *
+ * How configuration reaches the audio thread:
+ * - soundbridge_dsp_apply_preset(), soundbridge_dsp_set_sample_rate() and the
+ *   soundbridge_dsp_update_*() setters build a complete configuration
+ *   (including the biquad coefficients, computed on the calling thread) and
+ *   publish it through a bounded mailbox. They never write state the audio
+ *   thread is using.
+ * - soundbridge_dsp_process_*() adopts the newest published configuration once,
+ *   at the top of the block, and uses nothing else for the rest of that block.
+ *   A change made mid-block takes effect at the next boundary, and one block can
+ *   never mix two configurations.
+ * - Several updates published before one block collapse into the newest one;
+ *   configurations are absolute snapshots, so nothing is lost.
+ * - Adopting a configuration is a bounded attempt: one load and at most one
+ *   compare-exchange. If a publish lands between the two, the block keeps the
+ *   configuration it already has and the new one is adopted at the next
+ *   boundary. The audio thread never spins waiting for a control thread.
+ * - The filter-state clearing in soundbridge_dsp_reset() and the re-derivation
+ *   of coefficients for a new sample rate also take effect at the next block
+ *   boundary, for the same reason.
  *
  * Realtime Safety:
  * - soundbridge_dsp_process_*() functions are lock-free and allocation-free
  * - soundbridge_dsp_set_bypass() is lock-free
- * - All other functions may allocate and should not be called from audio thread
+ * - soundbridge_dsp_try_update_eq() is bounded: one token attempt, one publish,
+ *   no retry, no allocation, no I/O. It is the entry point for a caller on the
+ *   audio thread.
+ * - The other configuration setters allocate nothing and perform no I/O, but
+ *   they do compute coefficients and wait for a peer publisher to finish. That
+ *   wait is a spin loop whose length is set by the scheduler, not by this
+ *   library, so those setters are control-thread only.
+ * - soundbridge_dsp_create() and soundbridge_dsp_destroy() allocate.
  */
 
 #ifndef SOUNDBRIDGE_DSP_H
@@ -61,7 +88,16 @@ void soundbridge_dsp_destroy(soundbridge_dsp_engine_t* engine);
  * @param engine Engine instance (must not be NULL)
  *
  * @note Useful when seeking in audio or recovering from underrun.
- * @note Not realtime-safe with concurrent processing.
+ * @note Statistics (frames processed, peak meters, CPU load) are cleared
+ *       immediately. The filter history belongs to the audio thread and is
+ *       cleared at the next block boundary, so this is safe to call while
+ *       audio is being processed; it does not allocate or block.
+ * @note A reset clears filter *history* only. It does not cancel a coefficient
+ *       transition already in flight: the target that update recorded is still
+ *       reached, because cancelling it would leave the filter at an
+ *       intermediate coefficient set that nothing would ever correct.
+ * @note A reset is not lost if a preset is applied right after it: it is a
+ *       monotonic request, not part of the configuration snapshot.
  */
 void soundbridge_dsp_reset(soundbridge_dsp_engine_t* engine);
 
@@ -69,11 +105,17 @@ void soundbridge_dsp_reset(soundbridge_dsp_engine_t* engine);
  * @brief Change sample rate
  *
  * @param engine Engine instance (must not be NULL)
- * @param sample_rate New sample rate in Hz
+ * @param sample_rate New sample rate in Hz (8000 to 384000)
  * @return SOUNDBRIDGE_OK on success, error code otherwise
  *
- * @note Recalculates coefficients and reinitializes related state.
- * @note NOT realtime-safe.
+ * @note Every coefficient is recomputed for the new rate on the calling thread
+ *       and published with the rest of the configuration; the audio thread
+ *       re-initialises the smoother, DC blocker and ramp length when it applies
+ *       it at the next block boundary. Biquad history is preserved across the
+ *       change (only the coefficients change), the DC blocker is re-initialised
+ *       because its pole depends on the rate, and the preamp gain in flight is
+ *       carried over rather than restarted from silence.
+ * @note Safe to call while audio is being processed.
  */
 soundbridge_error_t soundbridge_dsp_set_sample_rate(
     soundbridge_dsp_engine_t* engine,
@@ -137,9 +179,15 @@ void soundbridge_dsp_process_planar(
  * @param preset Preset configuration (must not be NULL)
  * @return SOUNDBRIDGE_OK on success, error code otherwise
  *
- * @note NOT realtime-safe (recalculates filter coefficients)
- * @note Band coefficients are applied immediately; preamp changes follow smoother settings
- * @note Call this from UI thread, not audio thread
+ * @note Validated and turned into coefficients on the calling thread, then
+ *       published; the audio thread adopts it at the next block boundary. This
+ *       is safe while audio is being processed, although it is not realtime-safe
+ *       (see the note at the top of this file).
+ * @note A preset is a new baseline: every band takes its coefficients
+ *       immediately and any ramp in flight is cancelled. The preamp keeps its
+ *       own ~10 ms ramp. Use the soundbridge_dsp_update_*() setters for changes
+ *       that should be smoothed band by band.
+ * @note Call this from the UI thread, not the audio thread.
  */
 soundbridge_error_t soundbridge_dsp_apply_preset(
     soundbridge_dsp_engine_t* engine,
@@ -147,11 +195,17 @@ soundbridge_error_t soundbridge_dsp_apply_preset(
 );
 
 /**
- * @brief Get the currently active preset
+ * @brief Get the currently requested preset
  *
  * @param engine Engine instance (must not be NULL)
  * @param preset Pointer to preset struct to fill (must not be NULL)
  * @return SOUNDBRIDGE_OK on success, error code otherwise
+ *
+ * @note Returns the most recently requested configuration, which is what the
+ *       caller last published. It is not necessarily the configuration a block
+ *       that is running right now is using: that one is picked up at the next
+ *       block boundary. Reading the requested value keeps a read-after-write
+ *       in the UI consistent instead of showing a stale value for one block.
  */
 soundbridge_error_t soundbridge_dsp_get_preset(
     soundbridge_dsp_engine_t* engine,
@@ -176,7 +230,15 @@ void soundbridge_dsp_preset_init_flat(soundbridge_preset_t* preset);
 soundbridge_error_t soundbridge_dsp_preset_validate(const soundbridge_preset_t* preset);
 
 // ============================================================================
-// Realtime Parameter Updates (Lock-free)
+// Realtime Parameter Updates (thread-safe, smoothed)
+//
+// Each setter folds one change into the published configuration: it updates the
+// requested preset, recomputes that band's coefficients, marks the band for
+// ramp-in and publishes the complete snapshot. The audio thread applies it at
+// the next block boundary, so a setter can run at any time and any thread, and
+// a burst of setters collapses into the newest snapshot. Nothing here allocates
+// or performs I/O; the cost is one coefficient computation plus one bounded POD
+// copy, serialised against other publishers by a short spin.
 // ============================================================================
 
 /**
@@ -187,6 +249,9 @@ soundbridge_error_t soundbridge_dsp_preset_validate(const soundbridge_preset_t* 
  *
  * @note REALTIME-SAFE: Uses atomic operation, safe to call from any thread
  * @note Bypass is instant (no ramping) to preserve audio in emergency
+ * @note Deliberately not part of the configuration snapshot: it is read once per
+ *       block, so an emergency passthrough takes effect immediately rather than
+ *       waiting behind a queued configuration
  */
 void soundbridge_dsp_set_bypass(soundbridge_dsp_engine_t* engine, bool bypass);
 
@@ -199,15 +264,17 @@ void soundbridge_dsp_set_bypass(soundbridge_dsp_engine_t* engine, bool bypass);
 bool soundbridge_dsp_get_bypass(const soundbridge_dsp_engine_t* engine);
 
 /**
- * @brief Update a single band's gain in realtime (REALTIME-SAFE)
+ * @brief Update a single band's gain (thread-safe, smoothed)
  *
  * @param engine Engine instance (must not be NULL)
- * @param band_index Band index (0 to num_bands-1)
- * @param gain_db New gain in dB (-12.0 to +12.0)
+ * @param band_index Band index (0 to num_bands-1); out-of-range values are ignored
+ * @param gain_db New gain in dB (-12.0 to +12.0); non-finite values are ignored
  *
- * @note REALTIME-SAFE: Queues parameter change, applied with smoothing
- * @note Safe to call from UI thread while audio is processing
- * @note Changes are applied over ~10ms to avoid zipper noise
+ * @note Safe to call from any thread while audio is processing
+ * @note The band ramps to the new coefficients over ~10 ms from the next block
+ *       boundary, which is what keeps a gain change free of zipper noise
+ * @note Not realtime-safe in the strict sense: it computes coefficients and
+ *       serialises with other publishers (see the note at the top of this file)
  */
 void soundbridge_dsp_update_band_gain(
     soundbridge_dsp_engine_t* engine,
@@ -216,12 +283,16 @@ void soundbridge_dsp_update_band_gain(
 );
 
 /**
- * @brief Update preamp gain in realtime (REALTIME-SAFE)
+ * @brief Update preamp gain (thread-safe, smoothed)
  *
  * @param engine Engine instance (must not be NULL)
- * @param gain_db New preamp gain in dB (-12.0 to +12.0)
+ * @param gain_db New preamp gain in dB (-12.0 to +12.0); non-finite values are ignored
  *
- * @note REALTIME-SAFE: Queues parameter change, applied with smoothing
+ * @note Safe to call from any thread while audio is processing
+ * @note Ramped by the preamp smoother rather than by coefficients, so there is
+ *       nothing to mark for band smoothing
+ * @note Not realtime-safe in the strict sense: it serialises with other
+ *       publishers (see the note at the top of this file)
  */
 void soundbridge_dsp_update_preamp(
     soundbridge_dsp_engine_t* engine,
@@ -229,14 +300,54 @@ void soundbridge_dsp_update_preamp(
 );
 
 /**
- * @brief Update a band's frequency in realtime (REALTIME-SAFE)
+ * @brief Apply a whole ten-band gain set plus the preamp in one bounded step
+ *
+ * This is the audio-thread entry point for an EQ change. It makes **one**
+ * attempt at the publisher token and **one** publish:
+ *
+ * - Nothing here loops, allocates, logs or waits. If another publisher is
+ *   inside the mailbox right now, the attempt is refused immediately.
+ * - On refusal nothing has been modified: the engine keeps the configuration it
+ *   already has, and the caller should retry with its next block's snapshot.
+ *   That is what the Host does, so an EQ change can be delayed by one block but
+ *   can never stall the callback.
+ * - On success every band below the preset's band count is updated, marked for
+ *   the usual ~10 ms coefficient ramp, and one complete configuration is
+ *   published. A batch is never half-published: either the token was taken, in
+ *   which case all of the bands and the preamp went in together, or none did.
+ *
+ * Per-value handling matches the individual setters: a non-finite gain leaves
+ * that band's last valid value in place (it is not an error, and it does not
+ * refuse the batch), and finite values are clamped to -12.0 … +12.0 dB.
  *
  * @param engine Engine instance (must not be NULL)
- * @param band_index Band index (0 to num_bands-1)
- * @param frequency_hz New center frequency in Hz (20.0 to 20000.0)
+ * @param band_gains_db SOUNDBRIDGE_MAX_BANDS gains in dB, index = band slot
+ * @param preamp_db Preamp gain in dB (-12.0 to +12.0); non-finite is ignored
+ * @return true when the batch was published; false when the attempt was refused
+ *         or an argument was NULL
  *
- * @note REALTIME-SAFE: Changes are applied with smoothing to avoid clicks
- * @note Safe to call from UI thread while audio is processing
+ * @note REALTIME-SAFE: bounded work, no allocation, no blocking wait.
+ * @note Bypass is not part of this call - soundbridge_dsp_set_bypass() is an
+ *       independent lock-free toggle and must still be applied when this
+ *       returns false.
+ */
+bool soundbridge_dsp_try_update_eq(
+    soundbridge_dsp_engine_t* engine,
+    const float band_gains_db[SOUNDBRIDGE_MAX_BANDS],
+    float preamp_db
+);
+
+/**
+ * @brief Update a band's frequency (thread-safe, smoothed)
+ *
+ * @param engine Engine instance (must not be NULL)
+ * @param band_index Band index (0 to num_bands-1); out-of-range values are ignored
+ * @param frequency_hz New center frequency in Hz (20.0 to 20000.0); non-finite
+ *        values are ignored
+ *
+ * @note Safe to call from any thread while audio is processing
+ * @note Not realtime-safe: it serialises with other publishers and may wait for one
+ * @note Applied with coefficient smoothing at the next block boundary to avoid clicks
  */
 void soundbridge_dsp_update_band_frequency(
     soundbridge_dsp_engine_t* engine,
@@ -245,14 +356,15 @@ void soundbridge_dsp_update_band_frequency(
 );
 
 /**
- * @brief Update a band's Q factor in realtime (REALTIME-SAFE)
+ * @brief Update a band's Q factor (thread-safe, smoothed)
  *
  * @param engine Engine instance (must not be NULL)
- * @param band_index Band index (0 to num_bands-1)
- * @param q_factor New Q factor (0.1 to 10.0)
+ * @param band_index Band index (0 to num_bands-1); out-of-range values are ignored
+ * @param q_factor New Q factor (0.1 to 10.0); non-finite values are ignored
  *
- * @note REALTIME-SAFE: Changes are applied with smoothing to avoid clicks
- * @note Safe to call from UI thread while audio is processing
+ * @note Safe to call from any thread while audio is processing
+ * @note Not realtime-safe: it serialises with other publishers and may wait for one
+ * @note Applied with coefficient smoothing at the next block boundary to avoid clicks
  */
 void soundbridge_dsp_update_band_q(
     soundbridge_dsp_engine_t* engine,
@@ -271,6 +383,17 @@ void soundbridge_dsp_update_band_q(
  * @param stats Pointer to stats struct to fill (must not be NULL)
  *
  * @note Safe to call from any thread (reads atomic counters)
+ *
+ * Level semantics (see soundbridge_stats_t for the full contract):
+ * - `peak_left_db` / `peak_right_db` are the engine's *output* peak, i.e. after
+ *   the limiter when limiting is enabled.
+ * - `peak_left_db_pre_limiter` / `peak_right_db_pre_limiter` are the same
+ *   measurement taken before the limiter, so overdrive stays visible.
+ * - Positive values are overrange and are reported, not clamped to 0 dBFS.
+ * - Values are always finite, never NaN, bounded by
+ *   [SOUNDBRIDGE_PEAK_FLOOR_DB, SOUNDBRIDGE_PEAK_CEILING_DB].
+ * - `underrun_count` is reserved and always 0; real underrun accounting lives
+ *   in the Host's shared-memory ring telemetry.
  */
 void soundbridge_dsp_get_stats(
     const soundbridge_dsp_engine_t* engine,
@@ -280,7 +403,12 @@ void soundbridge_dsp_get_stats(
 /**
  * @brief Get library version string
  *
- * @return Version string (e.g., "1.0.0")
+ * @return Version string of the release this library was built for (e.g.
+ *         "1.2.0"), or "0.0.0-dev" for a build that did not get one
+ *
+ * @note The DSP has no independent version: it is compiled into SoundBridge.app,
+ *       so this reports the product version from the repository VERSION file.
+ *       tools/verify_version_consistency.sh checks that relationship.
  */
 const char* soundbridge_dsp_get_version(void);
 
@@ -296,8 +424,10 @@ const char* soundbridge_dsp_get_version(void);
  * hardware flush-to-zero (FTZ) and denormals-are-zero (DAZ) modes.
  *
  * @note This affects only the calling thread
- * @note Automatically called in soundbridge_dsp_create(), but you should
- *       also call this once from your audio thread for best performance
+ * @note The process functions apply this themselves on entry, so an audio
+ *       thread that only ever calls soundbridge_dsp_process_*() is already
+ *       covered. Call it explicitly only if you do other floating-point work
+ *       on the same thread and want the mode in place before the first block.
  * @note REALTIME-SAFE: No allocations, just sets CPU flags
  *
  * Example usage:

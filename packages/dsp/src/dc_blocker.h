@@ -61,7 +61,25 @@ public:
      */
     inline float process(float input) {
         // One-pole high-pass: y[n] = x[n] - x[n-1] + coeff * y[n-1]
+        //
+        // A single non-finite sample would poison x_prev_/y_prev_ for good: the
+        // recursion feeds the corrupted value straight back in, so every later
+        // sample is NaN too. Reset and emit silence instead, mirroring the
+        // biquad guard. The output check covers finite-but-huge inputs, where
+        // `input - x_prev_` can overflow to infinity.
+        if (!std::isfinite(input)) {
+            x_prev_ = 0.0f;
+            y_prev_ = 0.0f;
+            return 0.0f;
+        }
+
         const float output = input - x_prev_ + coeff_ * y_prev_;
+        if (!std::isfinite(output)) {
+            x_prev_ = 0.0f;
+            y_prev_ = 0.0f;
+            return 0.0f;
+        }
+
         x_prev_ = input;
         y_prev_ = output;
         return output;

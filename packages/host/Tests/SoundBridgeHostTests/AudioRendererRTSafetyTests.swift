@@ -194,6 +194,39 @@ final class AudioRendererRTSafetyTests: XCTestCase {
         XCTAssertEqual(diagnostics.firstPass?.channels, 2)
     }
 
+    // MARK: - DSP diagnostics (audit finding F-14)
+
+    /// `takeDiagnostics()` used to read only the bypass flag, so the per-block
+    /// statistics the engine computes were paid for and thrown away. The engine
+    /// numbers now travel with the render diagnostics, including the pre-limiter
+    /// peak that shows how hard the engine is being driven.
+    func testDiagnosticsExposeEngineStatistics() throws {
+        let fixture = try makeFixture(eqBypassed: false)
+        // Below full scale, and below the limiter knee, so the meters report the
+        // input levels unchanged.
+        writeFrames(fixture.mem, frames: 512) { _, channel in channel == 0 ? 0.25 : -0.5 }
+
+        let output = OutputBuffers(channels: 2, frames: 512)
+        fixture.renderer.render(bufferList: output.list.unsafeMutablePointer, frameCount: 512)
+
+        let dsp = fixture.renderer.takeDiagnostics().dsp
+        XCTAssertTrue(dsp.available, "an engine exists, so the block must be populated")
+        XCTAssertEqual(dsp.framesProcessed, 512)
+        XCTAssertEqual(dsp.sampleRate, 48_000)
+        XCTAssertEqual(dsp.reservedUnderrunCount, 0, "documented as reserved by the engine")
+
+        XCTAssertTrue(dsp.peakLeftDb.isFinite)
+        XCTAssertTrue(dsp.peakRightDb.isFinite)
+        XCTAssertEqual(dsp.peakLeftDb, Float(20 * log10(0.25)), accuracy: 0.5)
+        XCTAssertEqual(dsp.peakRightDb, Float(20 * log10(0.50)), accuracy: 0.5)
+        XCTAssertLessThanOrEqual(dsp.peakLeftDb, 0)
+        XCTAssertLessThanOrEqual(dsp.peakRightDb, 0)
+
+        // The pre-limiter meter cannot read below the post-limiter one.
+        XCTAssertGreaterThanOrEqual(dsp.peakLeftDbPreLimiter, dsp.peakLeftDb)
+        XCTAssertGreaterThanOrEqual(dsp.peakRightDbPreLimiter, dsp.peakRightDb)
+    }
+
     func testCapacityDerivesFromTheFrozenRingHelper() {
         let renderer = AudioRenderer(memoryManager: manager)
         XCTAssertEqual(

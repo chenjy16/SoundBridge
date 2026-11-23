@@ -165,6 +165,40 @@ else
     note "packages/host/Info.plist does not exist (the Host binary carries no version of its own)"
 fi
 
+# ── DSP library ──────────────────────────────────────────────────────────────
+# The DSP is a static library compiled into SoundBridge.app, so it carries no
+# independent semver: `soundbridge_dsp_get_version()` must report the product
+# version. It used to report the CMake project version, which was pinned at
+# 1.0.0 while the release said 1.2.0 - a fourth source of truth that this script
+# did not see. Instead of adding one more number to compare, the derivation is
+# checked: project() must take its VERSION from the repository VERSION file.
+# The compiled-in result is asserted at runtime by
+# test_version_matches_the_repository_product_version in the DSP test suite
+# (`make test-dsp`), which reads the same file.
+echo ""
+echo "DSP library"
+
+DSP_CMAKE="$PROJECT_ROOT/packages/dsp/CMakeLists.txt"
+if [ -f "$DSP_CMAKE" ]; then
+    DSP_PROJECT_LINE="$(grep -E '^[[:space:]]*project\(soundbridge_dsp[[:space:]]+VERSION' "$DSP_CMAKE" | head -n 1)"
+    if [ -z "$DSP_PROJECT_LINE" ]; then
+        fail "packages/dsp/CMakeLists.txt has no project(soundbridge_dsp VERSION ...) line"
+    elif printf '%s' "$DSP_PROJECT_LINE" | grep -Eq 'VERSION[[:space:]]+[0-9]'; then
+        DSP_LITERAL="$(printf '%s' "$DSP_PROJECT_LINE" | sed -nE 's/.*VERSION[[:space:]]+([0-9][0-9.]*).*/\1/p')"
+        fail "packages/dsp/CMakeLists.txt pins project version ${DSP_LITERAL:-<unparsed>} instead of deriving it from VERSION"
+    else
+        pass "packages/dsp/CMakeLists.txt project() version is derived, not pinned"
+    fi
+
+    if grep -q 'SOUNDBRIDGE_PRODUCT_VERSION_FILE' "$DSP_CMAKE"; then
+        pass "packages/dsp/CMakeLists.txt reads VERSION as the DSP version source"
+    else
+        fail "packages/dsp/CMakeLists.txt does not reference SOUNDBRIDGE_PRODUCT_VERSION_FILE"
+    fi
+else
+    fail "packages/dsp/CMakeLists.txt is missing"
+fi
+
 # ── Protocol agreement ───────────────────────────────────────────────────────
 echo ""
 echo "Shared-memory protocol"

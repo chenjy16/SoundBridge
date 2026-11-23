@@ -8,6 +8,49 @@ import os.log
 
 private let logger = Logger(subsystem: "com.soundbridge.host", category: "AudioRenderer")
 
+/// Copy of `soundbridge_stats_t` with Swift-friendly field names.
+///
+/// The engine has been computing these numbers on every block since the first
+/// release, but nothing read them: `takeDiagnostics()` only asked for the bypass
+/// flag, so the meters, the CPU estimate and the frame count were paid for and
+/// discarded (audit finding F-14). They are copied out here, on the control
+/// thread, and travel with the rest of the render diagnostics.
+///
+/// Level contract (see `soundbridge_stats_t`): dBFS, 0 is full scale, positive
+/// values are overrange and are reported rather than clamped, and every value is
+/// finite.
+struct DSPDiagnostics: Equatable {
+    /// False when no engine exists (creation failed). The other fields are then
+    /// meaningless rather than zeroed-and-believable.
+    var available = false
+    var framesProcessed: UInt64 = 0
+    var cpuLoadPercent: Float = 0
+    var sampleRate: UInt32 = 0
+    /// Engine output peak, i.e. after the limiter.
+    var peakLeftDb: Float = 0
+    var peakRightDb: Float = 0
+    /// Peak before the limiter; this is what shows how hard the engine is driven.
+    var peakLeftDbPreLimiter: Float = 0
+    var peakRightDbPreLimiter: Float = 0
+    /// Reserved by the engine and always 0. Real underruns are counted on the
+    /// ring side and surface as `underrunFrames`.
+    var reservedUnderrunCount: UInt32 = 0
+
+    init() {}
+
+    init(_ raw: soundbridge_stats_t) {
+        available = true
+        framesProcessed = raw.frames_processed
+        cpuLoadPercent = raw.cpu_load_percent
+        sampleRate = raw.sample_rate
+        peakLeftDb = raw.peak_left_db
+        peakRightDb = raw.peak_right_db
+        peakLeftDbPreLimiter = raw.peak_left_db_pre_limiter
+        peakRightDbPreLimiter = raw.peak_right_db_pre_limiter
+        reservedUnderrunCount = raw.underrun_count
+    }
+}
+
 /// Per-callback diagnostics that may not allocate, log or block.
 ///
 /// The audio callback records into this box and a control thread reads it out;
@@ -36,6 +79,7 @@ final class RenderDiagnostics {
         var underrunFrames: UInt64
         var silenceFallbacks: UInt64
         var dspBypassed: Bool
+        var dsp: DSPDiagnostics
     }
 
     /// Allocated once; `nil` only when `calloc` failed, in which case the
@@ -105,7 +149,7 @@ final class RenderDiagnostics {
     }
 
     /// Control thread only: allocates the array the callback is not allowed to.
-    func snapshot(dspBypassed: Bool) -> Snapshot {
+    func snapshot(dspBypassed: Bool, dsp: DSPDiagnostics) -> Snapshot {
         var raw = rf_rt_render_snapshot()
         rf_rt_counters_read(counters, &raw)
 
@@ -131,7 +175,8 @@ final class RenderDiagnostics {
             channelMismatch: raw.refusals.2,
             underrunFrames: raw.underrun_frames,
             silenceFallbacks: raw.silence_fallbacks,
-            dspBypassed: dspBypassed
+            dspBypassed: dspBypassed,
+            dsp: dsp
         )
     }
 }
@@ -274,8 +319,16 @@ class AudioRenderer {
     /// Pure: it formats nothing and logs nothing, so it is safe to read from a
     /// test as often as needed. The logging lives in `drainDiagnostics()`.
     func takeDiagnostics() -> RenderDiagnostics.Snapshot {
-        diagnostics.snapshot(
-            dspBypassed: dspEngine.map { soundbridge_dsp_get_bypass($0) } ?? true
+        var raw = soundbridge_stats_t()
+        var dsp = DSPDiagnostics()
+        if let engine = dspEngine {
+            soundbridge_dsp_get_stats(engine, &raw)
+            dsp = DSPDiagnostics(raw)
+        }
+
+        return diagnostics.snapshot(
+            dspBypassed: dspEngine.map { soundbridge_dsp_get_bypass($0) } ?? true,
+            dsp: dsp
         )
     }
 
@@ -425,7 +478,7 @@ class AudioRenderer {
         }
 
         let line = String(
-            format: "n=%llu min=%@us p50=%@us p95=%@us p99=%@us max=%@%@us overBudget=%llu excess=%.1fms silence=%llu",
+            format: "n=%llu min=%@us p50=%@us p95=%@us p99=%@us max=%@%@us overBudget=%llu excess=%.1fms silence=%llu dsp=L%.1f/R%.1fdB pre=L%.1f/R%.1fdB cpu=%.1f%%",
             snapshot.observations,
             micro(snapshot.minMicroseconds),
             micro(snapshot.p50Microseconds),
@@ -435,17 +488,25 @@ class AudioRenderer {
             micro(snapshot.maxMicroseconds),
             snapshot.overBudget,
             snapshot.overBudgetExcessMilliseconds,
-            diagnostics.silenceFallbacks
+            diagnostics.silenceFallbacks,
+            diagnostics.dsp.peakLeftDb,
+            diagnostics.dsp.peakRightDb,
+            diagnostics.dsp.peakLeftDbPreLimiter,
+            diagnostics.dsp.peakRightDbPreLimiter,
+            diagnostics.dsp.cpuLoadPercent
         )
         logger.notice("Callback timing: \(line, privacy: .public)")
     }
 
     /// Rebuild the DSP for a new rate. Control thread only.
     ///
-    /// `soundbridge_dsp_set_sample_rate` rewrites `sample_rate`, the preamp
-    /// smoother, `coeff_transition_samples`, every biquad's coefficients and
-    /// the limiter threshold — the same fields
-    /// `soundbridge_dsp_process_interleaved` reads on the IO thread.
+    /// `soundbridge_dsp_set_sample_rate` no longer writes anything the IO thread
+    /// reads: it re-derives every coefficient for the new rate and publishes one
+    /// immutable snapshot, which the next render callback adopts at its block
+    /// boundary. The wait below is about the rebuild sequence rather than the
+    /// DSP call - the output unit is being torn down and the shared mapping
+    /// replaced, so a callback that is still inside the old mapping must finish
+    /// first.
     ///
     /// P2 Batch 4 sequenced this after `AudioOutputUnitStop` only. That is an
     /// assumption about CoreAudio, not an observation. The guard below adds the
@@ -602,26 +663,42 @@ class AudioRenderer {
         // read the wrong samples, so it is skipped rather than guessed at.
         if let engine = dspEngine, framesRead > 0, channelCount == 2 {
             var eqSnapshot = RFEQSnapshot()
-            rf_load_eq_snapshot(mem, &eqSnapshot)
 
-            // Detect changes from last snapshot and update DSP parameters
-            let changed = withUnsafeBytes(of: &eqSnapshot) { newBytes in
-                withUnsafeBytes(of: &lastEQSnapshot) { oldBytes in
-                    memcmp(newBytes.baseAddress!, oldBytes.baseAddress!, MemoryLayout<RFEQSnapshot>.size) != 0
-                }
-            }
-
-            if changed {
-                withUnsafePointer(to: &eqSnapshot.bands) { ptr in
-                    ptr.withMemoryRebound(to: Float.self, capacity: 10) { floatPtr in
-                        for i in 0..<10 {
-                            soundbridge_dsp_update_band_gain(engine, UInt32(i), floatPtr[i])
-                        }
+            // A torn read leaves `eqSnapshot` zeroed. Applying that would flatten
+            // every band to 0 dB and clear bypass, so only a snapshot the
+            // seqlock validated is treated as a change; otherwise this block
+            // keeps whatever the DSP was last configured with.
+            if rf_load_eq_snapshot_safe(mem, &eqSnapshot) {
+                // Detect changes from last snapshot and update DSP parameters
+                let changed = withUnsafeBytes(of: &eqSnapshot) { newBytes in
+                    withUnsafeBytes(of: &lastEQSnapshot) { oldBytes in
+                        memcmp(newBytes.baseAddress!, oldBytes.baseAddress!, MemoryLayout<RFEQSnapshot>.size) != 0
                     }
                 }
-                soundbridge_dsp_update_preamp(engine, eqSnapshot.preamp)
-                soundbridge_dsp_set_bypass(engine, eqSnapshot.bypass)
-                lastEQSnapshot = eqSnapshot
+
+                if changed {
+                    // One bounded publish for the whole batch. Ten per-band
+                    // setters plus a preamp update would each take the publisher
+                    // token with a spin loop; a control thread preempted inside
+                    // its own publish would stall this callback, which must never
+                    // block. `soundbridge_dsp_try_update_eq` makes one token
+                    // attempt and publishes bands and preamp together.
+                    let published = withUnsafePointer(to: &eqSnapshot.bands) { ptr in
+                        ptr.withMemoryRebound(to: Float.self, capacity: 10) { floatPtr in
+                            soundbridge_dsp_try_update_eq(engine, floatPtr, eqSnapshot.preamp)
+                        }
+                    }
+                    // Bypass is an independent atomic on the engine, not part of
+                    // the published configuration: it stays an emergency
+                    // passthrough and must not wait on the token either.
+                    soundbridge_dsp_set_bypass(engine, eqSnapshot.bypass)
+                    // A refused attempt changed nothing, so the DSP keeps its
+                    // previous configuration and this snapshot is retried on the
+                    // next block instead of being recorded as applied.
+                    if published {
+                        lastEQSnapshot = eqSnapshot
+                    }
+                }
             }
 
             // Process audio through DSP (in-place on the pre-allocated buffer)

@@ -261,3 +261,76 @@ TEST(biquad_reset_clears_state) {
 
     PASS();
 }
+
+// Review finding R2: reset() and resetHistory() differ in exactly one thing -
+// whether a coefficient transition in flight survives.
+//
+// Both are measured with pure-gain coefficients (b0 only), where the filter's
+// output for a unit sample is b0 itself. That makes "which coefficient set is
+// in force" directly observable, with no frequency response to estimate.
+namespace {
+
+BiquadCoeffs pure_gain(float gain) {
+    BiquadCoeffs coeffs;
+    coeffs.b0 = gain;
+    coeffs.b1 = 0.0f;
+    coeffs.b2 = 0.0f;
+    coeffs.a1 = 0.0f;
+    coeffs.a2 = 0.0f;
+    return coeffs;
+}
+
+/// Advance `samples` samples of silence, i.e. let a coefficient ramp progress.
+void run_silence(Biquad& bq, int samples) {
+    for (int i = 0; i < samples; i++) {
+        float out_l = 0.0f;
+        float out_r = 0.0f;
+        bq.processSample(0.0f, 0.0f, &out_l, &out_r);
+    }
+}
+
+/// Gain currently in force: the output for a unit sample.
+float current_gain(Biquad& bq) {
+    float out_l = 0.0f;
+    float out_r = 0.0f;
+    bq.processSample(1.0f, 1.0f, &out_l, &out_r);
+    return out_l;
+}
+
+} // namespace
+
+TEST(biquad_reset_cancels_a_coefficient_transition) {
+    Biquad bq;
+    bq.init();
+    bq.setCoeffsInstant(pure_gain(1.0f));
+    bq.rampCoeffsTo(pure_gain(2.0f), 480);
+
+    run_silence(bq, 96);   // 20 % of the way: the gain is ~1.2 and rising
+
+    bq.reset();            // full reset: history *and* transition
+
+    const float stopped = current_gain(bq);
+    ASSERT(stopped > 1.0f && stopped < 2.0f);
+
+    // No transition is left to finish, so the gain stays where it stopped.
+    run_silence(bq, 960);
+    ASSERT_NEAR(current_gain(bq), stopped, 1e-6);
+
+    PASS();
+}
+
+TEST(biquad_reset_history_keeps_the_transition_running) {
+    Biquad bq;
+    bq.init();
+    bq.setCoeffsInstant(pure_gain(1.0f));
+    bq.rampCoeffsTo(pure_gain(2.0f), 480);
+
+    run_silence(bq, 96);
+    bq.resetHistory();     // history only: the update must still land
+
+    run_silence(bq, 960);
+    ASSERT_NEAR(current_gain(bq), 2.0f, 1e-5);
+
+    PASS();
+}
+

@@ -6,7 +6,7 @@
 # preparing a different release without editing the file.
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 
-.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-driver test-host test-app test-installer test-unsigned protocol-check dsp-build sign verify verify-unsigned release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
+.PHONY: help clean build run dev reset bundle install-deps test test-dsp test-dsp-tsan test-driver test-host test-app test-installer test-unsigned protocol-check dsp-build sign verify verify-unsigned release-verify release test-release quick rebuild dmg dmg-precheck verify-pkg verify-installer-pkg test-installer-gate verify-dmg verify-payload test-release-payload full-release changelog update-version version-check
 
 # Default target - show help
 help:
@@ -100,6 +100,7 @@ bundle:
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf packages/dsp/build
+	@rm -rf packages/dsp/build-tsan
 	@rm -rf packages/driver/build
 	@rm -rf packages/host/.build
 	@rm -rf apps/mac/SoundBridgeApp/.build
@@ -135,11 +136,13 @@ version-check:
 	@echo "Checking version consistency ($(VERSION))..."
 	@./tools/verify_version_consistency.sh --expect "$(VERSION)"
 
-# Verify there is exactly one protocol source and three identical copies of it
+# Verify every shared header has exactly one source and identical copies
 protocol-check:
 	@echo "Checking shared-memory protocol..."
 	@./tools/sync_shared_header.sh --check
 	@./tools/check_protocol_layout.sh
+	@echo "Checking DSP public headers..."
+	@./tools/sync_dsp_headers.sh --check
 
 # Build the DSP static library (required before the Host can link)
 dsp-build:
@@ -154,6 +157,21 @@ dsp-build:
 test-dsp: dsp-build
 	@echo "Running DSP tests..."
 	@cd packages/dsp/build && ctest --output-on-failure
+
+# Run the DSP suite under ThreadSanitizer (concurrency findings F-02 - F-05).
+#
+# Its own build directory because sanitizers are single-architecture (the
+# default DSP build is universal arm64;x86_64) and because Debug hardcodes
+# AddressSanitizer, which cannot be combined with ThreadSanitizer.
+test-dsp-tsan:
+	@echo "Running DSP tests under ThreadSanitizer..."
+	@cd packages/dsp && \
+	cmake -S . -B build-tsan \
+	  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	  -DSOUNDBRIDGE_DSP_SANITIZE=thread \
+	  -DBUILD_BRIDGE=OFF -DBUILD_TOOLS=OFF && \
+	cmake --build build-tsan --target soundbridge_dsp_tests && \
+	TSAN_OPTIONS=halt_on_error=1 ./build-tsan/tests/soundbridge_dsp_tests
 
 # Run the Driver's C++ unit tests
 #

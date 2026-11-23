@@ -19,9 +19,26 @@ namespace soundbridge {
  *
  * This is not a look-ahead limiter, so it's very low latency but may
  * still clip on very fast transients.
+ *
+ * Transfer function, with T = threshold and K = 0.8 * T:
+ *
+ *     |x| <= K   ->  y = x
+ *     |x| >  K   ->  y = K + (T - K) * s / (1 + s),  s = (|x| - K) / (T - K)
+ *
+ * Properties: continuous at the knee (y(K) = K), strictly monotonic, sign
+ * symmetric, and bounded by T for every finite input. |y| <= T is enforced
+ * explicitly, because evaluating the curve in `float` for very large inputs
+ * rounds to just above T (measured +1.2e-8 at |x| = 1e30).
+ *
+ * Only the threshold is stored. The knee start is derived per sample so a
+ * concurrent threshold change can never expose a threshold/knee pair taken
+ * from two different configurations.
  */
 class SoftLimiter {
 public:
+    /** Fraction of the threshold at which the knee begins. */
+    static constexpr float kKneeRatio = 0.8f;
+
     /**
      * @brief Initialize limiter
      *
@@ -38,9 +55,13 @@ public:
      */
     void setThreshold(float threshold_db) {
         threshold_ = std::pow(10.0f, threshold_db / 20.0f);
-        // Knee width for smooth transition (starts softening at 80% of threshold)
-        knee_start_ = threshold_ * 0.8f;
     }
+
+    /** @brief Currently configured linear threshold. */
+    float threshold() const { return threshold_; }
+
+    /** @brief Linear level at which the soft knee begins. */
+    float kneeStart() const { return threshold_ * kKneeRatio; }
 
     /**
      * @brief Process one sample (in-place)
@@ -53,19 +74,34 @@ public:
             return 0.0f;
         }
 
+        // The knee is derived from the single threshold field, never stored.
+        const float threshold = threshold_;
+        const float knee_start = threshold * kKneeRatio;
+
         // Below knee: pass through
-        if (abs_input <= knee_start_) {
+        if (abs_input <= knee_start) {
             return input;
         }
 
-        // Above knee: apply rational soft-limiting curve.
-        // Curve: x / (1 + |x|) in normalized knee space.
-        const float scaled = (abs_input - knee_start_) / (threshold_ - knee_start_);
-        const float limited = knee_start_ + (threshold_ - knee_start_) *
-                             (scaled / (1.0f + scaled));
+        // Above knee: apply the rational soft-limiting curve in double
+        // precision. In `float`, (|x| - K) / (T - K) overflows to +Inf for
+        // |x| > ~1.7e38 and the curve then evaluates Inf / (1 + Inf) = NaN —
+        // the limiter would return NaN for a *finite* input.
+        const double knee = static_cast<double>(knee_start);
+        const double width = static_cast<double>(threshold) - knee;
+        const double scaled = (static_cast<double>(abs_input) - knee) / width;
+        double limited = knee + width * (scaled / (1.0 + scaled));
+
+        // Never let the curve report a level above the configured threshold.
+        const double ceiling = static_cast<double>(threshold);
+        if (!(limited <= ceiling)) {   // also catches a NaN `limited`
+            limited = ceiling;
+        }
+
+        const float magnitude = static_cast<float>(limited);
 
         // Preserve sign
-        return (input < 0.0f) ? -limited : limited;
+        return (input < 0.0f) ? -magnitude : magnitude;
     }
 
     /**
@@ -90,8 +126,9 @@ public:
     }
 
 private:
+    // Single source of truth for the limiter configuration; the knee start is
+    // derived from it, never stored alongside it.
     float threshold_ = 0.99f;    // ~-0.1 dB
-    float knee_start_ = 0.792f;  // 80% of threshold
 };
 
 /**

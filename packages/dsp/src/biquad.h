@@ -15,6 +15,15 @@ namespace soundbridge {
 static constexpr float PI = 3.14159265358979323846f;
 
 /**
+ * @brief Highest band frequency allowed, as a fraction of the sample rate.
+ *
+ * 0.45 rather than 0.5 leaves margin before the shelf poles reach z = -1 at
+ * fs/2; at 0.5 the coefficients are still finite but critically placed, and at
+ * any rate slightly above it the state diverges. See calculateCoeffs().
+ */
+static constexpr float kMaxNormalisedFrequency = 0.45f;
+
+/**
  * @brief Biquad filter coefficients
  */
 struct BiquadCoeffs {
@@ -44,11 +53,32 @@ public:
     }
 
     /**
-     * @brief Reset filter state (clear delay line)
+     * @brief Clear the delay line only, leaving a coefficient transition in
+     *        flight untouched.
+     *
+     * This is the "the stream restarted" reset. The engine uses it for
+     * soundbridge_dsp_reset(): a reset must not cancel a coefficient change
+     * whose target has already been recorded in the applied configuration
+     * baseline, because the filter would then sit permanently at whatever
+     * interpolated coefficient set it happened to hold - the change-detection
+     * comparison would see "already at the target" and no later update would
+     * put it right.
      */
-    void reset() {
+    void resetHistory() {
         state_left_ = {};
         state_right_ = {};
+    }
+
+    /**
+     * @brief Full reset: clear the delay line and cancel any coefficient
+     *        transition.
+     *
+     * Used by init() and by anything that deliberately wants to discard the
+     * update in flight. A caller that wants the filter to still land on the
+     * coefficients it was ramping towards wants resetHistory() instead.
+     */
+    void reset() {
+        resetHistory();
         transition_remaining_ = 0;
     }
 
@@ -68,9 +98,19 @@ public:
      * @brief Set coefficients from band configuration (instant, no smoothing)
      */
     void setCoeffs(const soundbridge_band_t& band, float sample_rate) {
-        BiquadCoeffs c = calculateCoeffs(band, sample_rate);
-        if (isFinite(c)) {
-            coeffs_ = c;
+        setCoeffsInstant(calculateCoeffs(band, sample_rate));
+    }
+
+    /**
+     * @brief Apply already-computed coefficients instantly, cancelling any ramp.
+     *
+     * The engine precomputes coefficients on the publishing thread and hands
+     * them to the audio thread in one configuration snapshot, so this is the
+     * entry point the processing path uses.
+     */
+    void setCoeffsInstant(const BiquadCoeffs& coeffs) {
+        if (isFinite(coeffs)) {
+            coeffs_ = coeffs;
         } else {
             setCoeffsFlat();
         }
@@ -88,12 +128,22 @@ public:
      * @param transition_samples Number of samples to interpolate over (~10ms)
      */
     void setCoeffsSmooth(const soundbridge_band_t& band, float sample_rate, int transition_samples) {
-        BiquadCoeffs c = calculateCoeffs(band, sample_rate);
-        if (!isFinite(c)) {
+        rampCoeffsTo(calculateCoeffs(band, sample_rate), transition_samples);
+    }
+
+    /**
+     * @brief Ramp towards already-computed coefficients.
+     *
+     * Same interpolation as setCoeffsSmooth(), without the coefficient
+     * calculation. A ramp started while another is in flight continues from the
+     * interpolated current value, so back-to-back updates stay continuous.
+     */
+    void rampCoeffsTo(const BiquadCoeffs& target, int transition_samples) {
+        if (!isFinite(target)) {
             setCoeffsFlat();
             return;
         }
-        target_coeffs_ = c;
+        target_coeffs_ = target;
 
         if (transition_samples <= 0) {
             coeffs_ = target_coeffs_;
@@ -108,6 +158,16 @@ public:
         coeffs_delta_.a1 = (target_coeffs_.a1 - coeffs_.a1) * inv_n;
         coeffs_delta_.a2 = (target_coeffs_.a2 - coeffs_.a2) * inv_n;
         transition_remaining_ = transition_samples;
+    }
+
+    /**
+     * @brief Coefficients a band would use at @p sample_rate, without touching state.
+     *
+     * Public so a publisher can build a whole configuration off the audio
+     * thread; the result is re-checked by setCoeffsInstant()/rampCoeffsTo().
+     */
+    static BiquadCoeffs computeCoeffs(const soundbridge_band_t& band, float sample_rate) {
+        return calculateCoeffs(band, sample_rate);
     }
 
     /**
@@ -165,11 +225,16 @@ private:
         state.z1 = coeffs_.b1 * input - coeffs_.a1 * output + state.z2;
         state.z2 = coeffs_.b2 * input - coeffs_.a2 * output;
 
-        // Protect against NaN/Inf from filter state blowup
+        // Protect against NaN/Inf from filter state blowup.
+        //
+        // Reset the state so a blown-up section cannot stay blown up, and emit
+        // silence rather than the offending input: returning `input` would let a
+        // non-finite sample travel through every remaining stage and reach the
+        // output buffer untouched, which is the opposite of what this guard is for.
         if (!std::isfinite(output)) {
             state.z1 = 0.0f;
             state.z2 = 0.0f;
-            return input;
+            return 0.0f;
         }
 
         return output;
@@ -183,14 +248,30 @@ private:
      * high-frequency bandwidth cramping.
      * https://www.w3.org/TR/audio-eq-cookbook/
      */
-    BiquadCoeffs calculateCoeffs(const soundbridge_band_t& band, float sample_rate) {
+    static BiquadCoeffs calculateCoeffs(const soundbridge_band_t& band, float sample_rate) {
         BiquadCoeffs c;
 
-        const float freq = band.frequency_hz;
+        // Nyquist guard.
+        //
+        // preset_validate() only bounds a band to 20 Hz..20 kHz and never looks
+        // at the sample rate, so a preset legal at 48 kHz is illegal at 24 kHz:
+        // once the normalised frequency reaches pi (f == fs/2) the shelf
+        // coefficients put both poles on z = -1, and above it they move outside
+        // the unit circle and the filter state diverges exponentially. The
+        // per-sample non-finite guard in processSampleMono() only catches the
+        // symptom one sample at a time.
+        //
+        // Clamping here rather than in preset validation is deliberate: every
+        // coefficient path (apply_preset, update_band_gain, set_sample_rate)
+        // comes through this function, so one clamp covers all of them, and the
+        // clamp follows the rate when the rate changes.
+        const float rate = (sample_rate > 0.0f) ? sample_rate : 48000.0f;
+        const float max_freq = rate * kMaxNormalisedFrequency;
+        const float freq = std::fmin(std::fmax(band.frequency_hz, 1.0f), max_freq);
         const float gain_db = band.gain_db;
         const float Q = band.q_factor;
 
-        const float w0 = 2.0f * PI * freq / sample_rate;
+        const float w0 = 2.0f * PI * freq / rate;
         const float cos_w0 = std::cos(w0);
         const float sin_w0 = std::sin(w0);
 
@@ -306,5 +387,48 @@ private:
 };
 
 } // namespace soundbridge
+
+/**
+ * @brief Identity coefficients: the band passes its input through unchanged.
+ *
+ * Also what a disabled band slot carries. Keeping a disabled slot flat - rather
+ * than holding the last response it had - means a staging mistake (processing a
+ * band whose slot is not enabled) is silent instead of being a filter nobody
+ * asked for.
+ */
+inline soundbridge::BiquadCoeffs flatBiquadCoeffs() {
+    soundbridge::BiquadCoeffs c;
+    c.b0 = 1.0f;
+    c.b1 = 0.0f;
+    c.b2 = 0.0f;
+    c.a1 = 0.0f;
+    c.a2 = 0.0f;
+    return c;
+}
+
+/**
+ * @brief Coefficients for a band slot at @p sample_rate.
+ *
+ * Disabled bands get the identity; an enabled band whose coefficients came back
+ * non-finite gets the identity too, so a configuration is always applicable.
+ */
+inline soundbridge::BiquadCoeffs bandBiquadCoeffs(
+    const soundbridge_band_t& band,
+    float sample_rate
+) {
+    if (!band.enabled) return flatBiquadCoeffs();
+
+    const soundbridge::BiquadCoeffs c = soundbridge::Biquad::computeCoeffs(band, sample_rate);
+    return soundbridge::Biquad::isFinite(c) ? c : flatBiquadCoeffs();
+}
+
+/** @brief True when two coefficient sets are bit-for-bit equal. */
+inline bool biquadCoeffsEqual(
+    const soundbridge::BiquadCoeffs& a,
+    const soundbridge::BiquadCoeffs& b
+) {
+    return a.b0 == b.b0 && a.b1 == b.b1 && a.b2 == b.b2
+        && a.a1 == b.a1 && a.a2 == b.a2;
+}
 
 #endif // SOUNDBRIDGE_BIQUAD_H

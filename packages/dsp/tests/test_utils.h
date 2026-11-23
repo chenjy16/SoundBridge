@@ -21,10 +21,20 @@ struct TestStats {
     int failed = 0;
 };
 
-static TestStats g_test_stats;
+// One statistics object for the whole test suite.
+//
+// This MUST NOT be a header-scope `static`: that gives every translation unit
+// its own copy, so the assertion macros (expanded inside the test-case TUs)
+// would increment a different object from the one the runner inspects in
+// test_main.cpp. The suite would then report "0 passed, 0 failed" and exit 0
+// even when an assertion fails.
+inline TestStats& test_stats() {
+    static TestStats stats;
+    return stats;
+}
 
 // Test registry - using explicit function to avoid static init issues
-static std::vector<std::pair<std::string, std::function<void()>>>& get_test_registry() {
+inline std::vector<std::pair<std::string, std::function<void()>>>& get_test_registry() {
     static std::vector<std::pair<std::string, std::function<void()>>> registry;
     return registry;
 }
@@ -41,7 +51,7 @@ static std::vector<std::pair<std::string, std::function<void()>>>& get_test_regi
         if (!(condition)) { \
             std::cerr << "❌ FAIL: " << __FILE__ << ":" << __LINE__ << ": " \
                       << #condition << std::endl; \
-            g_test_stats.failed++; \
+            test_stats().failed++; \
             return; \
         } \
     } while(0)
@@ -57,7 +67,7 @@ static std::vector<std::pair<std::string, std::function<void()>>>& get_test_regi
                       << #b << " (" << _b << ") " \
                       << "within " << _epsilon << " (diff: " << std::abs(_a - _b) << ")" \
                       << std::endl; \
-            g_test_stats.failed++; \
+            test_stats().failed++; \
             return; \
         } \
     } while(0)
@@ -70,14 +80,14 @@ static std::vector<std::pair<std::string, std::function<void()>>>& get_test_regi
             std::cerr << "❌ FAIL: " << __FILE__ << ":" << __LINE__ << ": " \
                       << #a << " (" << _a << ") != " << #b << " (" << _b << ")" \
                       << std::endl; \
-            g_test_stats.failed++; \
+            test_stats().failed++; \
             return; \
         } \
     } while(0)
 
-#define PASS() g_test_stats.passed++
+#define PASS() test_stats().passed++
 
-static int run_all_tests() {
+inline int run_all_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running SoundBridge DSP Test Suite\n";
     std::cout << "========================================\n\n";
@@ -87,11 +97,11 @@ static int run_all_tests() {
 
     for (const auto& [name, func] : tests) {
         std::cout << "Running: " << name << "..." << std::flush;
-        int failed_before = g_test_stats.failed;
+        int failed_before = test_stats().failed;
 
         func();
 
-        if (g_test_stats.failed == failed_before) {
+        if (test_stats().failed == failed_before) {
             std::cout << " ✓" << std::endl;
         } else {
             std::cout << " ✗" << std::endl;
@@ -99,11 +109,11 @@ static int run_all_tests() {
     }
 
     std::cout << "\n========================================\n";
-    std::cout << "Results: " << g_test_stats.passed << " passed, "
-              << g_test_stats.failed << " failed\n";
+    std::cout << "Results: " << test_stats().passed << " passed, "
+              << test_stats().failed << " failed\n";
     std::cout << "========================================\n\n";
 
-    return (g_test_stats.failed == 0) ? 0 : 1;
+    return (test_stats().failed == 0) ? 0 : 1;
 }
 
 // ============================================================================
