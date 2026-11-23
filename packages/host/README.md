@@ -12,8 +12,9 @@ It discovers physical output devices, creates shared memory endpoints for the HA
 - Writes the driver control file (`/tmp/soundbridge-devices.txt`)
 - Starts heartbeat updates for driver/host health signaling
 - Starts a CoreAudio HAL output unit and renders `ring buffer -> DSP -> hardware`
-- Auto-switches system output to the matching proxy device and forwards proxy volume/mute to the physical device
+- Forwards proxy volume/mute changes to the physical device behind it
 - Monitors device list/default output changes and sleep/wake recovery hooks
+- Never changes the system default output; that switch belongs to the user and the App
 
 ## Architecture
 
@@ -22,9 +23,8 @@ SoundBridgeHost
   |- DeviceDiscovery      (enumerate + validate physical devices)
   |- DeviceRegistry       (tracks devices, writes /tmp/soundbridge-devices.txt)
   |- SharedMemoryManager  (creates /tmp/soundbridge-<ownerUID>-<deviceUID>, heartbeat timer)
-  |- ProxyDeviceManager   (proxy<->physical mapping, auto-select, volume/mute forwarding)
-  |- DSPProcessor         (CSoundBridgeDSP wrapper)
-  |- AudioRenderer        (reads ring buffer, processes DSP, writes output buffers)
+  |- ProxyDeviceManager   (proxy<->physical mapping, default-output ownership, volume/mute forwarding)
+  |- AudioRenderer        (reads ring buffer, runs EQ/gain inline in the callback, writes output buffers)
   |- AudioEngine          (HAL output unit setup/start/stop/switch)
   |- DeviceMonitor        (CoreAudio listeners for device/default-output changes)
   |- HostInstanceLock     (single-instance guard)
@@ -33,26 +33,26 @@ SoundBridgeHost
 
 ## Runtime Flow
 
-Startup sequence in `main.swift`:
+Startup sequence in `main.swift` (the `[Step N]` prefixes are the ones the process prints):
 
-1. Ensures app support/log directories exist
-2. Enumerates physical output devices and records validation status
-3. Resolves preferred output device and reads nominal sample rate
-4. Sets `SoundBridgeConfig.activeSampleRate`
-5. Registers device/default-output listeners
-6. Creates shared memory for devices
-7. Writes `/tmp/soundbridge-devices.txt`
-8. Starts host heartbeat timer
-9. Waits for driver proxy creation, then auto-selects proxy
-10. Initializes DSP (flat response, and updates sample rate when needed)
-11. Sets up/starts HAL output unit
-12. Installs signal handlers
+1. Acquires the single-instance lock; a second Host exits before creating or unlinking anything
+2. Ensures app support/log directories exist
+3. Installs signal handlers and starts sleep/wake monitoring
+4. Enumerates physical output devices and records validation status
+5. Registers device/default-output listeners (and the CoreAudio-rebuild recovery hooks)
+6. Resolves the preferred device and reads its nominal sample rate, then sets `SoundBridgeConfig.activeSampleRate`
+7. Creates shared memory for every device and publishes `/tmp/soundbridge-devices.txt` only once all mappings are available
+8. Starts the host heartbeat timer
+9. Waits for the driver's proxy device with a bounded deadline instead of a fixed sleep
+10. Resolves the proxy route without touching the system default output
+11. Adopts the committed volume state already written into the mapping
+12. Sets up and starts the HAL output unit (DSP runs inline in the render callback)
 
-Shutdown path:
+Shutdown path (`ShutdownSequence`, ordered and run-once):
 
-- Stops heartbeat and audio engine
-- Restores physical output device when possible
-- Removes control file and unmaps shared memory
+- Stops the heartbeat and the audio engine, then removes the HAL property listeners
+- Removes the control file and waits for the driver to detach before unmapping shared memory
+- Leaves the system default output exactly where the user put it
 - Leaves `coreaudiod` running (policy: no automatic audio-daemon restart)
 
 ## Device and Sample Rate Behavior
@@ -60,7 +60,7 @@ Shutdown path:
 - Supported nominal sample rates are snapped to one of:
   `44100, 48000, 88200, 96000, 176400, 192000`.
 - The operating sample rate is chosen at startup from the resolved physical output device.
-- Device change handling switches output device routing; current code does not perform a full end-to-end pipeline rebuild on every switch.
+- Device changes move the Host's own render route (`AudioEngine.switchDevice`); the system default output is never written, and not every switch rebuilds the whole pipeline.
 
 ## Paths and IPC
 
@@ -78,6 +78,7 @@ Shutdown path:
 | `defaultDurationMs` | 100 |
 | `heartbeatInterval` | 1.0s |
 | `deviceWaitTimeout` | 2.0s |
+| `proxyDiscoveryTimeout` | 5.0s |
 | `cleanupWaitTimeout` | 1.2s |
 | `physicalDeviceSwitchDelay` | 0.5s |
 | `wakeRecoveryDelay` | 1.5s |
