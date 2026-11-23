@@ -877,6 +877,14 @@ static inline uint32_t rf_bytes_per_sample(RFAudioFormat format) {
  * Check if both sides are connected and healthy
  */
 static inline bool rf_is_connection_healthy(const RFSharedAudio* mem) {
+    // "Connected" only means anything on a header both sides agree on. Without
+    // this check a stale, foreign or uninitialised mapping can report healthy
+    // because four unrelated words happen to be non-zero. rf_validate_header()
+    // also covers mem == NULL.
+    if (rf_validate_header(mem) != RF_VALIDATE_OK) {
+        return false;
+    }
+
     uint32_t driver_conn = atomic_load(&mem->driver_connected);
     uint32_t host_conn = atomic_load(&mem->host_connected);
 
@@ -1345,6 +1353,7 @@ static inline float rf_sanitize_volume_scalar(float value, float fallback) {
  * Acquire so that a reader who sees 1 also sees the published values.
  */
 static inline bool rf_is_volume_state_initialized(const RFSharedAudio* mem) {
+    if (mem == NULL) return false;
     return atomic_load_explicit(
         (_Atomic uint32_t*)&mem->state_initialized, memory_order_acquire) != 0u;
 }
@@ -1368,7 +1377,7 @@ static inline bool rf_is_volume_state_initialized(const RFSharedAudio* mem) {
 
 static inline bool rf_read_volume_state(const RFSharedAudio* mem,
                                         RFVolumeStateSnapshot* out) {
-    if (out == NULL) return false;
+    if (mem == NULL || out == NULL) return false;
 
     RFVolumeStateSnapshot snapshot = {0.0f, 0, 0u, 0u};
 
@@ -1533,7 +1542,11 @@ static inline bool rf_load_eq_snapshot_safe(const RFSharedAudio* mem, RFEQSnapsh
 }
 
 /**
- * Legacy reader (kept for backward compatibility, calls safe version).
+ * Legacy reader: discards the result of rf_load_eq_snapshot_safe().
+ *
+ * On failure `out` is left untouched, which for a zero-initialised snapshot
+ * means the caller would apply 0 dB on every band. New code must call
+ * rf_load_eq_snapshot_safe() and skip the update when it returns false.
  */
 static inline void rf_load_eq_snapshot(const RFSharedAudio* mem, RFEQSnapshot* out) {
     rf_load_eq_snapshot_safe(mem, out);
