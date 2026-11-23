@@ -104,6 +104,8 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 | [release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md](release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md) | 发布后验证摘要（英文）：下载完整性、安装、未签名驱动加载、功能、31 分钟稳定性、两项未测 | **冻结（发布后记录）** |
 | [release/SoundBridge-1.2.0-Release-Checklist.md](release/SoundBridge-1.2.0-Release-Checklist.md) | 发布检查单（每次发布复用） | 维护中 |
 | [release/SoundBridge-1.2.1-Product-Quality-Report.md](release/SoundBridge-1.2.1-Product-Quality-Report.md) | 未发布 1.2.1 工作的三项 P1 修复报告：根因、改动、测试与命令、NOT VERIFIED 清单 | 一次性记录（**未发布**） |
+| [release/SoundBridge-Hardware-Realtime-Operator-Runbook.md](release/SoundBridge-Hardware-Realtime-Operator-Runbook.md) | `tools/hardware-validation/` 的操作手册：前置条件、场景 H1–H8、执行步骤、停止条件与收尾检查 | 维护中 |
+| [release/SoundBridge-Hardware-Realtime-Result-Schema.json](release/SoundBridge-Hardware-Realtime-Result-Schema.json) | `sb-hw-validate` 输出 `result.json` 的结构定义与字段语义 | 维护中 |
 
 ## 4. 已发布资产（不要就地改写）
 
@@ -167,6 +169,31 @@ Driver 为 universal（`x86_64 arm64`）Release 构建。
 | 真机验证证据（安装、驱动加载、功能、31 分钟稳定性） | [release/SoundBridge-1.2.0-Final-Release-Report.md](release/SoundBridge-1.2.0-Final-Release-Report.md) |
 
 新的阶段性过程记录写在提交说明或本地归档里，不写进本目录。
+
+### 6.1 2026-11-23 移出的第二批（DSP / Host+CoreAudio / 硬件实时）
+
+同一规则适用于随后产生的三批阶段文档，共 10 份：仓库级审计
+`SoundBridge-API-Audit-Handbook.md` 与 `SoundBridge-Main-Flow-Walkthrough.md`；
+`release/` 下的 `SoundBridge-Core-Engineering-Audit.md`、
+`SoundBridge-DSP-Engine-Code-Audit-Report.md`、
+`SoundBridge-DSP-Engine-Remediation-Report.md`、
+`Host-CoreAudio-Realtime-Execution-Path.md`、
+`SoundBridge-Host-CoreAudio-Realtime-Validation-Report.md`、
+`SoundBridge-Host-CoreAudio-Integration-Findings.md`、
+`SoundBridge-Hardware-Realtime-Readiness-Assessment.md`、
+`SoundBridge-Hardware-Realtime-Validation-Report-A2A4.md`。
+
+其中的技术结论去向：
+
+| 曾由这批报告承载的内容 | 现行位置 |
+|---|---|
+| DSP 整改后的正确性与并发结论、统计字段与 ABI 承诺 | 代码与测试本身（`packages/dsp`）、[engineering/](engineering/)、[architecture](architecture/SoundBridge-1.2.0-Architecture.md) §10 |
+| Host 渲染路径的实时安全分类与测量结论 | [engineering/CallbackGate-Memory-Model.md](engineering/CallbackGate-Memory-Model.md) §10、`make test` 的 Host 套件 |
+| 硬件实时验证已执行 / 未执行的边界与数字 | [risks/Known-Limitations.md](risks/Known-Limitations.md) §2C、U-6、U-15 |
+| 验证工具的使用方式与输出格式 | [Operator Runbook](release/SoundBridge-Hardware-Realtime-Operator-Runbook.md)、[Result Schema](release/SoundBridge-Hardware-Realtime-Result-Schema.json) |
+
+**未执行的验证不因报告移出而消失**：采样率 / 缓冲区矩阵、设备移除、可听性与
+`p99.9` 的缺口一律登记在 [Known-Limitations](risks/Known-Limitations.md)。
 
 ## 7. 维护规则
 

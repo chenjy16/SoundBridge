@@ -1191,7 +1191,8 @@ func commandCollect(_ args: [String: String]) {
             "logSources": collector.sourceSummary(),
             "logSourceRule": "only lines emitted by \(LogCollector.expectedProcess) are treated "
                 + "as Host telemetry; every other process on this subsystem is counted and dropped",
-            "hostVersion": "see docs/release/SoundBridge-Hardware-Realtime-Readiness-Assessment.md"
+            "hostVersion": "not recorded by this harness; read it from the running "
+                + "Host's Info.plist if a run needs to name the build it measured"
         ]
     ]
     let jsonPath = (outDir as NSString).appendingPathComponent("result.json")

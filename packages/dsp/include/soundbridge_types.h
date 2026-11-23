@@ -165,9 +165,8 @@ typedef struct {
 
 #ifdef __cplusplus
 // The append-only policy above, made machine-checked. Appending a field means
-// updating the expected size here and the ABI note in
-// docs/release/SoundBridge-DSP-Engine-Remediation-Report.md; changing an offset
-// below means the policy was broken.
+// updating the expected size here; changing an offset below means the policy
+// was broken.
 static_assert(sizeof(soundbridge_stats_t) == 40,
               "soundbridge_stats_t changed size: read the ABI policy above "
               "before touching this assertion");

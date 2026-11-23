@@ -4,11 +4,10 @@ import AudioToolbox
 @testable import SoundBridgeHost
 import CSoundBridgeAudio
 
-// MARK: - Phase C gap coverage: sample-rate change and render-path churn
+// MARK: - Render-path gap coverage: sample-rate change and render-path churn
 //
-// The Phase C matrix is mostly covered by suites that already exist (see
-// `SoundBridge-Host-CoreAudio-Realtime-Validation-Report.md` §C). Two rows had no
-// test at all, and both are about the Host renderer rather than the engine:
+// Two rows of the realtime scenario matrix had no test at all, and both are
+// about the Host renderer rather than the engine:
 //
 //   1. `AudioRenderer.updateSampleRate` refuses to rebuild while a render
 //      callback is inside the mapping, and a refused rebuild changes nothing.

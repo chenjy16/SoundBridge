@@ -1,8 +1,11 @@
 # SoundBridge — Hardware Realtime Validation Operator Runbook
 
-**Phase:** F2 deliverable. **Status:** procedure prepared, **never executed**.
-**Applies to:** a supervised run on the machine described in
-`SoundBridge-Hardware-Realtime-Readiness-Assessment.md`.
+**Status:** executed once, on one device and one format — the scope, the numbers
+and the gaps are registered in
+[Known-Limitations §2C](../risks/Known-Limitations.md#2c-硬件实时验证登记2026-11-23).
+Every other scenario below is still unexecuted.
+**Applies to:** a supervised run on an Apple-silicon Mac with the driver
+installed, the proxy device present, and a physical output the operator can hear.
 
 This runbook is written for a human operator sitting at the machine. It assumes
 the operator can hear the output device. Every command below is either read-only
