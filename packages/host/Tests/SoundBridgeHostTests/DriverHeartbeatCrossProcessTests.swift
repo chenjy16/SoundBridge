@@ -16,7 +16,9 @@ import CSoundBridgeAudio
 //
 // Timing note: assertions are about *sample order*, not wall-clock ages. The
 // tracker counts consecutive unchanged samples, so a killed writer is detected by
-// taking more samples — no sleeping for a threshold.
+// taking more samples — no sleeping for a threshold. The one pause in test 2 is
+// not a threshold wait; it holds a race window open, and is explained where it
+// sits.
 
 final class DriverHeartbeatCrossProcessTests: XCTestCase {
 
@@ -225,20 +227,37 @@ final class DriverHeartbeatCrossProcessTests: XCTestCase {
         let child = try launchChild(["hold", mappingPath, "20", "3000"])
         XCTAssertTrue(waitForDriver())
 
-        var tracker = DriverConnectionTracker(driverStallSamples: 3)
+        let stallSamples = 3
+        var tracker = DriverConnectionTracker(driverStallSamples: stallSamples)
         XCTAssertEqual(tracker.observe(observe()), .connected)
         Thread.sleep(forTimeInterval: 0.1)
         advanceHostHeartbeat()
         XCTAssertEqual(tracker.observe(observe()), .connected)
         XCTAssertEqual(tracker.audioPipeline, .flowing)
 
+        // Hold the window open on purpose. The child writes every 20 ms, so a
+        // 50 ms pause here guarantees at least one increment lands after the
+        // last read above — exactly what a descheduled test thread produces on
+        // a loaded runner, and what made this test take 1.4 s and fail on CI
+        // while passing in 0.3 s locally. Without the pause the sampling below
+        // is never tested with a stale baseline, so a regression that samples
+        // one time too few would go unnoticed.
+        Thread.sleep(forTimeInterval: 0.05)
         XCTAssertEqual(kill(child.process.processIdentifier, SIGKILL), 0)
         _ = finish(child)
 
         // The counter is frozen now; more samples are the evidence. The Host's
         // own heartbeat keeps advancing, as it would in a live process.
+        //
+        // One sample more than the threshold, because the window between the
+        // read above and SIGKILL landing is not empty: the child writes every
+        // 20 ms, so an increment can land inside it. That increment makes the
+        // first post-kill sample a new baseline instead of a repeat, and
+        // sampling exactly `stallSamples` times would then only count
+        // `stallSamples - 1` unchanged samples. Sampling once more keeps this
+        // an assertion about order, not about winning a race with the writer.
         var status = SharedMemoryConnectionStatus.pending
-        for _ in 0..<3 {
+        for _ in 0..<(stallSamples + 1) {
             advanceHostHeartbeat()
             status = tracker.observe(observe())
         }
