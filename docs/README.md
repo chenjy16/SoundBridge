@@ -12,10 +12,12 @@
 > [release/SoundBridge-1.2.0-Final-Release-Report.md](release/SoundBridge-1.2.0-Final-Release-Report.md)；
 > 发布后仍未解决的问题见 [risks/Known-Limitations.md](risks/Known-Limitations.md) 的 §2A。
 >
-> **1.2.1 状态**：发布文档已按 1.2.1 定稿（本目录的
-> [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) 与 [RELEASE_NOTES.md](RELEASE_NOTES.md)）；
-> `VERSION` 已改为 `1.2.1`，13 个版本源同步通过（`verify_version_consistency.sh
-> --expect 1.2.1`）。尚未打 tag、尚未发布；发布流程与门禁见 §4。
+> **1.2.1 状态**：`v1.2.1` 已打 tag，版本说明标记为随 GitHub Release 发布；本目录的
+> [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) 与 [RELEASE_NOTES.md](RELEASE_NOTES.md)
+> 为 1.2.1 文档。版本号 `VERSION` 为 `1.2.1`，共享音频协议仍为 `0x00020200`。
+> 发布验证和未覆盖事项分别见
+> [1.2.1 质量报告](release/SoundBridge-1.2.1-Product-Quality-Report.md) 与
+> [Known Limitations](risks/Known-Limitations.md)。
 
 ---
 
@@ -67,8 +69,8 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 
 | 主题 | 权威文档 |
 |---|---|
-| 产品方向、Free/付费边界、阶段路线 | [product/ROADMAP.md](product/ROADMAP.md) §1–§2、§6 |
-| 应用级音量的架构候选与验证前提 | [product/ROADMAP.md](product/ROADMAP.md) §5、§7 |
+| 产品方向、Free/Pro 边界、DSP/校准/音频配置文件路线 | [product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md](product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md) |
+| 旧版产品路线图状态 | [product/ROADMAP.md](product/ROADMAP.md)（已被新产品规格取代） |
 | 系统组件与职责边界 | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2 |
 | 音频处理链路（格式转换 / SRC / 漂移补偿） | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2、[driver README](../packages/driver/README.md) |
 | 共享内存协议与 ABI | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §3、§10 |
@@ -98,7 +100,8 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 
 | 文档 | 内容 | 状态 |
 |---|---|---|
-| [product/ROADMAP.md](product/ROADMAP.md) | 产品路线图与产品规格：愿景、Free/付费边界、六阶段、应用级音量的架构前提与验证清单、指标缺口 | 维护中（无版本号与日期；结论随证据更新） |
+| [product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md](product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md) | 当前产品方向、已验证能力基线、Free/Pro 假设、竞争定位、DSP/校准/音频配置文件与版本路线 | 当前产品策略；提案和待验证项均有标注 |
+| [product/ROADMAP.md](product/ROADMAP.md) | 旧版路线图的弃用说明与新文档入口 | 已被新产品规格取代；不作为当前产品计划 |
 | [architecture/SoundBridge-1.2.0-Architecture.md](architecture/SoundBridge-1.2.0-Architecture.md) | 唯一现行架构说明：组件、共享内存、Ring、准入、退役、启动/停止、崩溃恢复、ABI | 维护中 |
 | [engineering/RingBuffer-Design.md](engineering/RingBuffer-Design.md) | Ring 契约、容量、内存序 | 维护中 |
 | [engineering/Admission-Ownership.md](engineering/Admission-Ownership.md) | Admission 状态机与 Producer 唯一性 | 维护中 |
