@@ -13,7 +13,7 @@ The former plan positioned per-application volume as the first paid capability
 and proposed Process Tap as a future architecture option. The current strategy
 repositions SoundBridge as **system-wide audio enhancement for macOS** and
 explicitly excludes per-application control, Process Tap, and migration to a
-FineTune-style Aggregate Device architecture.
+Aggregate Device-based architecture migration.
 
 The old plan's technical feasibility investigation was tied to that excluded
 product direction, so it is not carried forward as a roadmap item. The current

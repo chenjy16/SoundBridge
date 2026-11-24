@@ -3,6 +3,7 @@
 **Status:** Product direction proposal
 
 **Baseline inspected:** repository `main`, HEAD `3101abc`; latest release tag `v1.2.1`
+
 **Planning horizon:** release sequence is a hypothesis, without committed dates
 
 > This document establishes a proposed product direction from the repository
@@ -24,18 +25,12 @@ and a 10-band DSP engine presented through three tone controls. The product does
 not yet expose the DSP Engine's full parameter surface or a user-facing preset
 manager.
 
-The roadmap is Free + Pro, with essential system-wide processing available in
-Free and advanced processing/personalization evaluated for a one-time Pro
-purchase. A purchase price is not selected. The sequence is: stabilize and
-validate the current audio path; make the DSP Engine's existing parametric EQ
-usable; evaluate further DSP; add measurement-profile support only with clear
-data and licensing terms; then build device and listening profiles. Features
-remain proposals until they pass technical and user validation.
-
-The former product roadmap in [ROADMAP.md](ROADMAP.md) conflicted with this
-direction: it positioned per-application control as the first paid feature and
-described Process Tap as a future architecture option. It has now been marked as
-superseded and points here as the current product strategy.
+The roadmap is Free + Pro: essential system-wide processing stays in Free,
+while advanced processing and personalization are Pro candidates. Pro packaging remains undecided. The sequence is: stabilize and validate the current
+audio path; make the DSP Engine's existing parametric EQ usable; evaluate
+further DSP; add measurement-profile support only with clear data and licensing
+terms; then build device and listening profiles. Features remain proposals
+until they pass technical and user validation.
 
 ## 2. Vision and Positioning
 
@@ -96,7 +91,7 @@ basic menu-bar interface.
 
 - Per-application volume or mute.
 - Per-application EQ, capture, processing, routing, or Process Tap management.
-- FineTune-style Aggregate Device architecture.
+- Aggregate Device-based architecture migration.
 - Migration to a Process Tap-based architecture.
 - Replacing the existing audio topology to enable per-application features.
 - A professional DAW, studio mastering workflow, or general-purpose virtual
@@ -322,55 +317,16 @@ audio analysis. These are not commitments. Each paid candidate must answer:
 
 | Review question | Required evidence before commitment |
 |---|---|
-| Why would users pay? | Specific user job and repeated problem, supported by interviews/usability evidence. |
+| What user problem warrants Pro? | A specific repeated need, supported by interviews or usability evidence. |
 | Is the benefit meaningful? | Users can explain and successfully use the difference in a prototype. |
-| Is it already free elsewhere? | Current competitor tier and capability review, dated and sourced. |
-| Is SoundBridge differentiated? | Clear benefit tied to system-wide reliability, device-aware personalization, or simpler workflow—not feature-count claims. |
+| Is the benefit distinct and clear? | It should solve a specific user problem through system-wide reliability, device-aware personalization, or a simpler workflow. |
 | What ongoing cost does it create? | macOS compatibility, profile data rights/maintenance, support, licensing, packaging, and update costs. |
 | Can current architecture support it? | Source review, DSP tests, performance measurements, and required hardware validation. |
 
-Subscriptions are not the default. Consider a recurring fee only if SoundBridge
-introduces an ongoing service with recurring operating cost and recurring user
-benefit. The initial hypothesis is a one-time purchase, with a clear maintenance
-and update policy still to be decided.
+Pro packaging and ongoing maintenance policy remain undecided. Set them after
+the product scope and support obligations are clear.
 
-### 8.3 Pricing hypotheses
-
-Evaluate **USD 29.99, USD 34.99, and USD 39.99** as unvalidated one-time price
-hypotheses. No willingness-to-pay evidence was found in the repository, so this
-document does not claim a validated launch price. Provisional recommendation for
-testing: start interviews and price-sensitivity work at **USD 29.99** as the
-lowest-friction hypothesis, then compare it against the two higher points after
-the Pro value proposition and trial experience are concrete. This is a test
-order, not a launch-price decision.
-
-Move toward USD 34.99 or USD 39.99 only if user interviews, beta conversion
-behavior, and price tests show that buyers understand and value the added
-personalization/advanced DSP enough to offset unsigned distribution friction and
-limited developer support capacity. Price testing must avoid presenting an
-unimplemented feature as available.
-
-## 9. Competitive Positioning
-
-The following is a snapshot of first-party product descriptions reviewed on
-2026-11-24, not a full hands-on review. Vendor feature claims are attributed to
-those vendors. Pricing and packaging can change; verify again before a commercial
-decision.
-
-| Product | Verified positioning/features from primary source | Free/paid and price note | Implication for SoundBridge |
-|---|---|---|---|
-| FineTune | Free/open-source menu-bar app describing per-app volume, routing, 10-band EQ, AutoEQ correction and loudness compensation; its repository lists macOS 15+ and audio-capture permission. [Project repository](https://github.com/ronitsingh10/FineTune) | Project says free/open source; no purchase price. | Direct overlap in system audio utility space, but its per-app/tap path is outside SoundBridge scope. Do not compete on mixer features. Differentiate through the existing system-wide processing architecture, careful DSP quality, and device/profile workflow. |
-| SoundSource | Menu-bar audio control with system device settings, per-app adjustments/routing, built-in 10-band EQ, Audio Units, system-wide effects, Headphone EQ and shortcuts. [Product page](https://www.rogueamoeba.com/soundsource/) | Free trial with paid license; the current page reviewed did not expose a reliable numeric price in extracted content. | Strong incumbent with broad polish and effects. SoundBridge should not claim broader capability. A credible opening is focused, system-wide DSP and device personalization with simple controls. |
-| eqMac | System audio processing with basic and 10-band EQ free; expert EQ, App Mixer, spatial audio and other features in Pro; headphone reference presets are listed. [Features and pricing page](https://eqmac.app/) | Free tier plus monthly and lifetime Pro options; lifetime price was not visible in the inspected page text. | Several candidate SoundBridge Pro features already exist in the market, and some EQ/profile capabilities are free. A one-time price in the proposed $29.99–$39.99 range needs a clear differentiation and value test. |
-| Boom 3D | Vendor positions it as a system-wide audio enhancer/equalizer with 3D surround effects. [Product page](https://www.globaldelight.com/boom3d/index.html) | Vendor store search result showed a USD 49.99 listing alongside a discount; promotions can change, so treat the amount as a dated observation, not a stable price. [Store](https://www.globaldelight.com/store/) | Competes on enhancement/spatial effects. SoundBridge should validate any spatial feature before adding it and avoid copying effect breadth without evidence. |
-
-The defensible position is not “better than” these products. SoundBridge can
-credibly target users who want system-wide sound improvement through a
-purpose-built Driver/Host/DSP path, device-aware saved sound, transparent
-processing status, and a restrained native UI. Whether that is distinctive
-enough to support Pro pricing remains an open market question.
-
-## 10. Product UX and Navigation
+## 9. Product UX and Navigation
 
 The navigation below is a candidate information architecture, not a demand to
 build every section at once:
@@ -412,7 +368,7 @@ First-use flow should help a user: (1) install and select a working output,
 compare the result, and (5) save personal settings. Failure messages need a
 recovery step and must not imply the audio engine is processing when it is not.
 
-## 11. Version-Based Roadmap Hypothesis
+## 10. Version-Based Roadmap Hypothesis
 
 These version labels are planning hypotheses only. They do not change project
 version numbers or create delivery commitments. Phase 0 gates new feature work.
@@ -509,7 +465,7 @@ Effort estimates assume one primary developer and use S/M/L/XL relative scale.
   obvious; profile application is atomic; auto-switch only uses reliable device
   events, has override/fallback, and passes a hot-plug matrix.
 
-### 2.0 — SoundBridge Pro (conditional commercialization)
+### 2.0 — SoundBridge Pro (conditional launch)
 
 - **Objective:** package the validated system-wide experience as a coherent
   Free/Pro product.
@@ -518,20 +474,19 @@ Effort estimates assume one primary developer and use S/M/L/XL relative scale.
 - **Scope candidates:** entitlement boundaries; advanced EQ/effects and
   personalization that passed prior gates; polished onboarding; trial/purchase
   and license flow only after distribution feasibility review.
-- **Exclusions:** unvalidated features bundled to justify price; subscriptions
-  without a recurring service; per-app control; new audio architecture.
-- **Dependencies/effort:** pricing tests, licensing/distribution decision,
+- **Exclusions:** per-app control and new audio architecture.
+- **Dependencies/effort:** user validation, licensing/distribution decision,
   support/update policy, legal review of profile data, packaging; L/XL.
 - **Risks:** unsigned install friction, support burden, license/offline
-  behavior, price/value mismatch, update expectations.
+  behavior, unclear user value, update expectations.
 - **Acceptance / exit:** Free/Pro comparison reflects shipped functionality;
   buyers can try the product; licensing degrades gracefully offline if used;
   maintenance obligations and update policy are published; Pro adds value
   without degrading Free.
 
-## 12. DSP Feasibility and Audio Quality Requirements
+## 11. DSP Feasibility and Audio Quality Requirements
 
-### 12.1 Current engine surface
+### 11.1 Current engine surface
 
 Repository evidence shows an in-tree C/C++ DSP library with a C ABI and
 Objective-C++ bridge. It supports up to ten stereo Float32 EQ bands, seven
@@ -548,7 +503,7 @@ foundation evidence, but it does not establish cross-device frequency response,
 phase behavior, clipping perception, supported format coverage, or production
 quality in every environment.
 
-### 12.2 Processing and validation contract
+### 11.2 Processing and validation contract
 
 Before an algorithm is committed, specify:
 
@@ -569,7 +524,7 @@ I/O, or unbounded work in the callback; safe state publication/lifetime; bounded
 processing; and measured performance on supported hardware. “It compiles” is not
 an acceptance criterion.
 
-## 13. Quality and Reliability Acceptance
+## 12. Quality and Reliability Acceptance
 
 | Area | Product requirement | Evidence required |
 |---|---|---|
@@ -583,7 +538,7 @@ Every feature status must distinguish: **implemented**, **build verified**,
 **unit/integration-test verified**, **real-hardware verified**, and
 **user-experience verified**. These are separate evidence states.
 
-## 14. Product Metrics and Commercial Validation
+## 13. Product Metrics and Validation
 
 The project has no telemetry/account system identified in the current baseline.
 Do not silently add telemetry to measure adoption. Start with opt-in beta
@@ -597,8 +552,7 @@ needs an explicit privacy and product review.
 | Preset/profile reuse | Whether users return to a saved preset/profile and understand the active state. | Validate profile model and UX. |
 | Audio processing failure rate | Recorded underruns/recovery failures divided by measured playback time on a test rig; current counters do not normalize idle vs playback everywhere. | Reliability gate, not marketing metric. |
 | Crash-free sessions | Only measurable if users opt into crash reporting or provide logs; no telemetry currently. | Decide if a privacy-preserving reporting mechanism is justified. |
-| Free-to-Pro conversion/refunds | Purchase funnel, conversion, refund reason after a real launch; not measurable now. | Validate tier and price only after entitlement and checkout exist. |
-| Support burden | Issue type and developer time per user/release, collected from support records. | Check if price supports ongoing maintenance. |
+| Support burden | Issue type and developer time per user/release, collected from support records. | Check support capacity for ongoing maintenance. |
 
 ### Lightweight independent-developer validation plan
 
@@ -616,15 +570,11 @@ needs an explicit privacy and product review.
 5. **Feature preference:** compare concrete prototypes (parametric EQ,
    correction import, scenario profiles, analyzer) and ask users to rank by
    problem solved and expected frequency of use.
-6. **Price sensitivity:** after Pro features are demonstrable, test the three
-   candidate prices and trial/purchase flow. Separate stated preference from
-   actual purchase behavior; do not treat a survey as validated willingness to
-   pay.
 
 No large marketing budget, paid acquisition funnel, or enterprise sales motion
 is assumed.
 
-## 15. Risks and Open Questions
+## 14. Risks and Open Questions
 
 | Risk / question | Why it matters | Next evidence/action |
 |---|---|---|
@@ -633,54 +583,10 @@ is assumed.
 | DSP library capability exceeds current user-facing product | Users may infer supported controls or guarantees from the engine API. | Keep engine/API facts separate from app capability; trace and verify actual Host processing defaults before exposing controls. |
 | EQ settings per device may not be enough for model correction | Device identity, variants, and target curves can be ambiguous. | Prototype schema and matching without committing to a catalog. |
 | External headphone data rights and maintenance | Import/catalog value depends on reliable data and terms. | Review candidate dataset terms, attribution, update cadence, and redistribution permissions before implementation. |
-| Competitors offer free EQ and profiles | A paid EQ feature alone may not support the proposed price. | Validate differentiator and willingness to pay; keep basic EQ useful in Free. |
-| Unsigned distribution limits conversion | Gatekeeper friction may overwhelm product value for some users. | Test install and purchase journey with target users; decide signing/notarization policy separately. |
+| Unsigned distribution adds setup friction | Gatekeeper prompts may block otherwise interested users. | Test setup with target users; document the installation experience. |
 | Future profile automation can surprise users | Device events and manual selection can conflict. | Ship manual profiles first; define clear override and fallback before automation. |
 | Current telemetry is absent | Product adoption and crash-free metrics cannot be claimed. | Use opt-in qualitative research first; decide separately whether local/opt-in analytics is justified. |
 | Solo-developer capacity | Broad DSP, data, UI, commerce, and compatibility work can exceed support capacity. | Limit each release to one primary user outcome and gate by prior phase evidence. |
-
-## 16. Final Product Decisions
-
-The following are the proposed direction for this specification. They should be
-reviewed as product decisions; they do not change code or release policy.
-
-- Position SoundBridge as system-wide audio enhancement for macOS.
-- Keep the current Driver + Host + Shared Memory/SPSC Ring Buffer + DSP Engine
-  topology as the foundation.
-- Treat the in-tree DSP Engine as the central proprietary product asset.
-- Keep per-app volume/mute/EQ/routing/capture and Process Tap out of scope.
-- Do not plan FineTune-style Aggregate Device migration.
-- Organize product work around Professional DSP, Headphone/Speaker Calibration,
-  and Intelligent Audio Profiles.
-- Use Free + Pro as the monetization hypothesis; evaluate one-time purchase
-  first, without selecting a final price yet.
-- Make advanced system-wide processing and personalization the candidate paid
-  value, while retaining essential basic system-wide sound control and
-  maintenance in Free.
-- Stabilize and validate the existing audio path before broad feature expansion.
-- Treat measurement-based automatic calibration as out of scope until the
-  measurement workflow, dependencies, and accuracy requirements are designed.
-- Treat 1.3/1.4/1.5/1.6/2.0 as planning labels only; do not change version
-  numbers or tags from this document.
-
-## 17. Decision Register
-
-| Decision | Direction |
-|---|---|
-| Product positioning | System-wide Audio Enhancement for macOS |
-| Core architecture | Preserve existing Driver + Host + Shared Memory + SPSC Ring Buffer + DSP Engine |
-| DSP Engine | Core proprietary product asset |
-| App-level control | Out of scope |
-| Process Tap | Out of scope |
-| FineTune architecture migration | Not planned |
-| Primary product pillars | Professional DSP / Calibration / Audio Profiles |
-| Monetization | Free + Pro; one-time purchase is the initial hypothesis |
-| Primary paid value | Advanced system-wide audio processing and personalization |
-| Development strategy | Stabilize the current architecture, then expand DSP capabilities |
-| Automatic measurement calibration | Out of scope unless separately designed and approved |
-| Final price | Not selected; test USD 29.99, 34.99, and 39.99 hypotheses |
-
-Any change to these decisions requires an explicit product strategy review.
 
 ## Appendix A — Baseline References
 
@@ -691,9 +597,3 @@ Any change to these decisions requires an explicit product strategy review.
 - [DSP library README](../../packages/dsp/README.md), public API, and tests
 - [Menu bar UI](../../apps/mac/SoundBridgeApp/Sources/Views/MenuBarView.swift)
 - [Basic EQ UI](../../apps/mac/SoundBridgeApp/Sources/Views/BasicEQView.swift)
-
-Competitive product information was checked against vendor/project pages on
-2026-11-24: [FineTune](https://github.com/ronitsingh10/FineTune),
-[SoundSource](https://www.rogueamoeba.com/soundsource/), [eqMac](https://eqmac.app/),
-and [Boom 3D](https://www.globaldelight.com/boom3d/index.html). Recheck claims,
-compatibility, prices, and licensing before a commercial decision.
