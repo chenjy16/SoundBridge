@@ -510,7 +510,7 @@ No Apple Developer ID certificate is required for development or release.
 | Document | What it answers |
 |---|---|
 | [docs/README.md](docs/README.md) | Index of engineering documentation, product strategy, and per-release reports |
-| [Product roadmap and specification](docs/product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md) | Proposed system-wide audio enhancement direction, verified capability baseline, Free/Pro hypotheses, and DSP/calibration/profile roadmap |
+| [Product roadmap and specification](docs/product/ROADMAP.md) | Proposed system-wide audio enhancement direction, verified capability baseline, Free/Pro hypotheses, and DSP/calibration/profile roadmap |
 | [INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md) | Install, verify, troubleshoot, uninstall, roll back |
 | [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | What changed in the current release, upgrade and downgrade notes |
 | [Architecture](docs/architecture/) | Components, shared memory, ring buffer, admission, retirement, recovery |

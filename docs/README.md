@@ -69,8 +69,7 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 
 | 主题 | 权威文档 |
 |---|---|
-| 产品方向、Free/Pro 边界、DSP/校准/音频配置文件路线 | [product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md](product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md) |
-| 旧版产品路线图状态 | [product/ROADMAP.md](product/ROADMAP.md)（已被新产品规格取代） |
+| 产品方向、Free/Pro 边界、DSP/校准/音频配置文件路线 | [product/ROADMAP.md](product/ROADMAP.md) |
 | 系统组件与职责边界 | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2 |
 | 音频处理链路（格式转换 / SRC / 漂移补偿） | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2、[driver README](../packages/driver/README.md) |
 | 共享内存协议与 ABI | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §3、§10 |
@@ -100,8 +99,7 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 
 | 文档 | 内容 | 状态 |
 |---|---|---|
-| [product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md](product/SOUNDBRIDGE-PRODUCT-ROADMAP-AND-SPECIFICATION.md) | 当前产品方向、已验证能力基线、Free/Pro 假设、竞争定位、DSP/校准/音频配置文件与版本路线 | 当前产品策略；提案和待验证项均有标注 |
-| [product/ROADMAP.md](product/ROADMAP.md) | 旧版路线图的弃用说明与新文档入口 | 已被新产品规格取代；不作为当前产品计划 |
+| [product/ROADMAP.md](product/ROADMAP.md) | 当前产品方向、能力基线、Free/Pro 假设、DSP/校准/音频配置文件与版本路线 | 当前产品策略；提案和待验证项均有标注 |
 | [architecture/SoundBridge-1.2.0-Architecture.md](architecture/SoundBridge-1.2.0-Architecture.md) | 唯一现行架构说明：组件、共享内存、Ring、准入、退役、启动/停止、崩溃恢复、ABI | 维护中 |
 | [engineering/RingBuffer-Design.md](engineering/RingBuffer-Design.md) | Ring 契约、容量、内存序 | 维护中 |
 | [engineering/Admission-Ownership.md](engineering/Admission-Ownership.md) | Admission 状态机与 Producer 唯一性 | 维护中 |
