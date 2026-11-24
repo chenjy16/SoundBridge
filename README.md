@@ -1,124 +1,84 @@
 <p align="center">
-  <img src="docs/images/menu-bar-panel.jpg" alt="The SoundBridge menu bar panel: LG ULTRAGEAR+ (SoundBridge) selected, volume at 87%, EQ on with Bass 11.7 dB, Mids 1.3 dB and Treble -2.2 dB, plus Reconnect Audio, Restart Host, Uninstall Driver and Quit" width="520">
+  <img src="docs/images/menu-bar-panel.jpg" alt="The SoundBridge menu bar panel: the display's (SoundBridge) proxy device selected, volume at 87%, and EQ enabled with Bass, Mids and Treble values" width="520">
 </p>
 
 <p align="center">
-  <sub>Captured on the 1.2.0 validation machine: an LG UltraGear over DisplayPort, with its (SoundBridge) proxy device selected as the output.</sub>
+  <sub>The menu bar panel, with an LG UltraGear's (SoundBridge) proxy device selected as the output.</sub>
 </p>
 
 <h1 align="center">SoundBridge</h1>
 
 <p align="center">
-  <b>Volume control and EQ for HDMI / DisplayPort displays on macOS</b><br>
-  <sub>1.2.1 · macOS 13+ · universal · unsigned build: not notarized, no auto-update</sub>
+  <b>System-wide volume control and 10-band EQ for HDMI and DisplayPort audio on macOS</b><br>
+  <sub>macOS 13 or later · universal build · unsigned: not notarized, no automatic updates</sub>
 </p>
 
 <p align="center">
   <a href="https://github.com/chenjy16/SoundBridge/releases">Download</a> ·
   <a href="#install">Install</a> ·
   <a href="#why-soundbridge">Why SoundBridge?</a> ·
-  <a href="#architecture">Architecture</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#verification">Verification</a> ·
   <a href="#documentation">Documentation</a>
 </p>
 
 ---
 
-## What it is
+## Introduction
 
-A macOS menu bar app that gives HDMI and DisplayPort outputs a working volume
-control and a 10-band tone stage. The system volume slider, the volume keys and
-mute act on the display, and the audio is processed in software before it reaches
-the physical device. No kext and no privileged daemon: a virtual CoreAudio HAL
-device plus a small background host process.
+SoundBridge is a macOS menu bar app that gives HDMI and DisplayPort outputs a
+working volume control and a 10-band tone stage. The system volume slider, the
+volume keys and mute control the display's output level, and the audio is
+processed in software before it reaches the physical device.
 
-## Install
+It is built for outputs that arrive at a fixed volume — the case where macOS
+greys out the volume slider and the only remaining control is the monitor's own
+buttons or on-screen menu.
 
-![Four steps: download the PKG, double-click and approve the admin prompt, allow it once in Privacy and Security, then select the SoundBridge output](docs/images/install-first-run.svg)
-
-1. **Download [`SoundBridge-1.2.1.pkg`](https://github.com/chenjy16/SoundBridge/releases)**
-   — the package carries the app **and** the HAL driver. (The DMG carries the app
-   only and never writes to `/Library/Audio/Plug-Ins/HAL/`.)
-2. **Double-click the package** and approve the administrator prompt. Quit
-   SoundBridge first if an older copy is running. The driver is replaced as a
-   transaction, with a backup and a rollback.
-3. **Allow it once.** macOS will refuse the first launch of unsigned software —
-   *"SoundBridge" cannot be opened because Apple cannot check it for malicious
-   software*, or on Apple silicon *"SoundBridge" is damaged and can't be opened*.
-   Both mean "unsigned", not "broken". Open **System Settings → Privacy &
-   Security**, find SoundBridge in the security section and click **Open Anyway**.
-   On macOS 13 and 14 you can also right-click the app → **Open** → **Open**. If
-   macOS blocks the package before Installer appears, allow that the same way.
-4. **Open `SoundBridge.app`**, then select **`<your display> (SoundBridge)`** as
-   the system output. The slider, the volume keys and mute now drive the display;
-   the menu bar switches between displays when there is more than one.
-
-Nothing here needs Gatekeeper or SIP turned off. If your Mac is managed by an
-organisation that forbids unsigned software, this release cannot be installed —
-see [Unsigned distribution](#unsigned-distribution).
-
-Upgrading from 1.1.x **must** use the PKG: the shared-memory protocol changed to
-`0x00020200`, and an old driver paired with the new app produces no audio.
-
-> Step 3 is Apple's documented path for unsigned software. Both validation rounds
-> ran the install from the `installer` command line, so the exact dialog sequence
-> is documented here rather than measured — see
-> [Verification status](#verification-status). Troubleshooting, uninstall and
-> rollback: [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
+There is no kernel extension and no privileged daemon: a virtual CoreAudio HAL
+device plus a background Host process owned by your user account.
 
 ## Why SoundBridge?
 
 Many monitors receive audio over HDMI or DisplayPort but expose no hardware
-volume control. macOS detects that and greys out the volume slider for that
-output; the keyboard volume keys do nothing. The only workaround is to change the
-volume inside each app, and some apps offer no volume control at all.
+volume control. macOS detects that and disables the volume slider for that
+output; the keyboard volume keys do nothing. The remaining workaround is to
+change the volume inside each app, and some apps offer no volume control at all.
 
 **Unlike MonitorControl, which depends on the display supporting the DDC/CI
 protocol, SoundBridge works through a system-level virtual audio device — so it
 takes effect even when the TV, an older monitor or a dock has no hardware volume
 control at all.**
 
-| | DDC/CI tools (e.g. MonitorControl) | SoundBridge 1.2.1 |
+| | DDC/CI tools (e.g. MonitorControl) | SoundBridge |
 |---|---|---|
 | Where the volume is applied | In the display, via DDC/CI commands over the video cable | In software, inside the audio path |
 | Display must support DDC/CI volume | Yes | No — nothing is asked of the display |
-| Outputs that work | Those that answer DDC/CI on the active link | Any HDMI / DisplayPort output macOS enumerates, including audio that arrives through a dock or adapter |
+| Outputs that work | Those that answer DDC/CI on the active link | HDMI / DisplayPort outputs macOS enumerates, including audio that arrives through a dock or adapter |
 | Tone control | Whatever the display offers | 10-band EQ with Bass / Mids / Treble macros |
 | Kernel extension | None | None |
 
 The comparison is about how each tool controls volume. DDC/CI tools do things
-1.2.1 does not — brightness, contrast, input switching — and are the better
+SoundBridge does not — brightness, contrast, input switching — and are the better
 choice when your display does implement DDC/CI and you want the change made on
 the hardware side.
 
-### How it works
-
-- macOS routes audio into the SoundBridge proxy device, so the system volume
-  slider and the volume keys become usable again.
-- The driver that implements the proxy device hands the audio frames to a user
-  process through a shared-memory ring buffer.
-- That process (the Host) applies the volume gain and the EQ, then renders the
-  result to the real HDMI/DisplayPort device.
-
-The physical device keeps receiving the same audio format; nothing is intercepted
-in the kernel.
-
 ## Features
 
-Implemented in 1.2.1:
-
 - **System-wide volume control** for fixed-volume HDMI/DisplayPort outputs. The
-  slider and the keyboard volume keys act on the display.
-- **Mute / unmute** from the menu bar and from the system.
-- **The menu bar reports what the device accepted, not what was requested.** A
-  volume or mute change is written to the proxy and then read back; the slider
-  and the toggle move only once the device agrees. A write that is accepted and
-  then dropped is logged and never shown as applied, so the UI cannot drift away
-  from the audio path. A change made while nothing is playing is committed to
-  shared memory and is still in effect when playback starts, and it survives a
-  Host restart or a driver reconnection without being reset.
-- **Linear-in-decibel volume taper** (48 dB), so every step of the slider
-  changes loudness by the same amount; gain changes are smoothed to avoid
-  clicks.
+  slider and the keyboard volume keys control the level sent to the display.
+- **Mute and unmute** from the menu bar and from the system.
+- **The menu bar reports what the proxy device accepted, not what was
+  requested.** A volume or mute change is written to the proxy and then read
+  back; the slider and the toggle follow the value the device reports. A write
+  that is accepted and then dropped is logged and never shown as applied. A
+  change made while nothing is playing is committed to shared memory and is still
+  in effect when playback starts, and it survives a Host restart or a driver
+  reconnection without being reset.
+- **A 48 dB range with a decibel taper at the device.** The driver exposes 48 raw
+  volume steps over 48 dB, so one step is one decibel; gain changes are smoothed
+  to avoid clicks.
 - **10-band EQ engine** exposed as three macro controls — Bass, Mids, Treble —
   plus a reset. Adjustments are applied inside the audio render callback while
   audio is playing, and the settings are kept per output device: they are
@@ -130,81 +90,29 @@ Implemented in 1.2.1:
   when you pick it.
 - **Guided onboarding** that points at the official installer package and
   verifies that the installed driver matches this app build.
-- **Universal binary** (Apple silicon + Intel in one build).
-- **No kext, no privileged daemon.** The driver is a user-space AudioServerPlugIn
-  loaded by `coreaudiod`; the Host runs as your user.
+- **Universal build** (Apple silicon and Intel in one binary).
+- **No kernel extension, no privileged daemon.** The driver is a user-space
+  AudioServerPlugIn loaded by `coreaudiod`; the Host runs as your user.
 
-Not in 1.2.1 — do not expect these:
+Not supported: EQ presets, per-band frequency or Q editing, and spectrum
+displays. The EQ is three macro controls over a fixed 10-band layout.
 
-- EQ presets, per-band frequency/Q editing, or spectrum displays. The EQ is three
-  macro controls over a fixed 10-band layout.
-- **An automatic update channel.** There is no EdDSA key pair, no published
-  appcast, an empty `SUPublicEDKey`, and nothing polls for updates. `Sparkle`
-  ships in the bundle only because the app links it at launch; it is not a
-  disabled-but-ready updater. You upgrade by installing a newer PKG.
-- **Code signing or notarization.** Apple is not involved in this release: no
-  Developer ID, no explicit `codesign` step, no `notarytool`, no stapling. Every
-  install and every upgrade needs the one-time approval in step 3 of
-  [Install](#install). This is a deliberate, permanent choice for the project —
-  see [Unsigned distribution](#unsigned-distribution).
+## Installation
 
-## Architecture
+### Download
 
-```mermaid
-flowchart LR
-    APPS["macOS applications"] --> CA["CoreAudio<br/>coreaudiod"]
-    CA --> DRV["HAL virtual driver<br/>SoundBridgeDriver.driver"]
-    DRV -->|"ring buffer write<br/>single producer"| SHM[("Shared memory<br/>320 B header + SPSC ring")]
-    SHM -->|"ring buffer read<br/>single consumer"| HOST["SoundBridgeHost"]
-    HOST --> DSP["DSP<br/>volume gain + 10-band EQ"]
-    DSP --> PHYS["Physical output<br/>HDMI / DisplayPort"]
-    UI["SoundBridge<br/>menu bar app"] -->|"EQ + volume fields"| SHM
-    HOST -->|"device list<br/>control file"| DRV
-```
-
-Shared memory lives at `/tmp/soundbridge-<ownerUID>-<deviceUID>`: a 320-byte
-header followed by a single-producer/single-consumer ring buffer of stereo
-Float32 frames. The driver is the only producer, the Host is the only consumer,
-and the menu bar app only writes control fields (volume, mute, EQ).
-
-| Component | Language | Location | Role |
-|---|---|---|---|
-| Menu bar app | Swift / SwiftUI | `apps/mac/SoundBridgeApp/` | UI, onboarding, driver detection, EQ and volume state |
-| HAL driver | C++ | `packages/driver/` | Proxy AudioServerPlugIn inside `coreaudiod`; format conversion and ring-buffer write |
-| Host | Swift | `packages/host/` | Creates the shared memory, reads the ring buffer, renders to the physical device |
-| DSP | C / C++ | `packages/dsp/` | Volume gain and 10-band EQ, C ABI, used by the Host |
-
-The full design — admission and drain, mapping retirement, quarantine, crash
-recovery, real-time constraints and the exact ABI — is in
-[docs/architecture/SoundBridge-1.2.0-Architecture.md](docs/architecture/SoundBridge-1.2.0-Architecture.md)
-and [docs/engineering/](docs/engineering/).
-
-## Requirements
-
-- macOS 13.0 (Ventura) or later — this is the deployment target in the package
-  manifests and in the bundle `Info.plist`; it is not a claim that every such
-  version has been tested.
-- An HDMI or DisplayPort audio output. Thunderbolt displays with audio work the
-  same way.
-- Administrator rights for the one-time driver installation.
-- A universal build is produced, but only Apple silicon has been exercised. See
-  [Verification status](#verification-status).
-
-Verified platform: macOS 27.2.1 (build 26B131), arm64.
-
-## Download
-
-All published artifacts are on GitHub Releases:
+Every release is published on GitHub Releases:
 
 <https://github.com/chenjy16/SoundBridge/releases>
 
-For 1.2.1 the release carries:
+A release carries:
 
 | File | Contents | Use it when |
 |---|---|---|
-| `SoundBridge-1.2.1.pkg` | App **and** HAL driver | First install, or any upgrade. This is the supported path. |
-| `SoundBridge-1.2.1.dmg` | App only | You only want to replace the app. It never writes to `/Library/Audio/Plug-Ins/HAL/`. |
+| `SoundBridge-*.pkg` | App **and** HAL driver | First install, or any upgrade. This is the supported path. |
+| `SoundBridge-*.dmg` | App only | You only want to replace the app. It never writes to `/Library/Audio/Plug-Ins/HAL/`. |
 | `SHA256SUMS.txt` | Checksums of the files above | Verifying the download |
+| `INSTALLATION_GUIDE.md`, `RELEASE_NOTES.md` | The release's own installation steps and change list | Reading before you install |
 
 Check a download before installing:
 
@@ -212,70 +120,91 @@ Check a download before installing:
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-## Uninstall
+### Install
 
-Menu bar → **Uninstall Driver**, or `tools/uninstall_driver.sh` (`--dry-run`
-prints the plan and changes nothing). Both apply the same policy: read
-`CFBundleIdentifier`, refuse anything that is not `com.soundbridge.driver`,
-refuse a symlink or a foreign bundle, and then remove exactly one constant path.
+1. **Download the PKG** from
+   [the latest release](https://github.com/chenjy16/SoundBridge/releases). The
+   package carries the app **and** the driver; the DMG carries the app only and
+   never writes to `/Library/Audio/Plug-Ins/HAL/`.
+2. **Double-click the package** and approve the administrator prompt. Quit
+   SoundBridge first if an older copy is running. The driver is replaced as a
+   transaction, with a backup and a rollback.
+3. **Allow it once.** macOS refuses the first launch of unsigned software —
+   *"SoundBridge" cannot be opened because Apple cannot check it for malicious
+   software*, or on Apple silicon *"SoundBridge" is damaged and can't be opened*.
+   Both mean "unsigned", not "broken". Open **System Settings → Privacy &
+   Security**, find SoundBridge in the security section and click **Open Anyway**.
+   If macOS blocks the package before Installer appears, allow that the same way.
+   See [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper)
+   for what this does and does not guarantee.
+4. **Open `SoundBridge.app`**, then select **`<your display> (SoundBridge)`** as
+   the system output. The slider, the volume keys and mute now control the
+   display's output level; the menu bar switches between displays when there is
+   more than one.
 
-The script works in four phases and reports them as four separate facts, because
-they are four different things: driver files removed from disk, driver unloaded
-from `coreaudiod`, the CoreAudio device gone, and `coreaudiod` restarted. It
-performs the first and says plainly that it did not do the other three. Before
-removing anything it stops a running Host — only processes whose executable and
-owner match this installation, with a bounded wait and a `SIGKILL` escalation
-against that same pid — and releases the runtime IPC files
-(`/tmp/soundbridge-<uid>-*` and the device control file). Running it twice is a
-no-op, running it with nothing installed says so and exits 0, and a failure exits
-non-zero and names what it could not do.
+Nothing here needs Gatekeeper or SIP turned off. If your Mac is managed by an
+organisation that forbids unsigned software, this release cannot be installed —
+see [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper).
 
-Kept on purpose: your EQ and volume settings, the logs, and the app itself. Also
-kept, and only reported: the PKG receipt and the installer transaction logs.
-`coreaudiod` is never signalled, so the loaded copy stays resident until it is
-restarted or the machine reboots. See
-[Known limitations](docs/risks/Known-Limitations.md) OBS-3.
+Install the app and the driver from the same release, and upgrade with the PKG
+rather than the DMG. The two speak a versioned shared-memory protocol, and a
+driver older than the app does not produce audio. The installer checks the
+protocol before it replaces anything and refuses a downgrade.
 
-Full steps, troubleshooting and rollback:
-[docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
+> Step 3 is Apple's documented path for unsigned software. Installs on the
+> validation machine were performed with the `installer` command line, so the
+> dialog sequence itself is documented here rather than measured — see
+> [Verification](#verification). Troubleshooting, uninstall and rollback:
+> [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
 
-## Unsigned distribution
+### First launch
 
-Read this before installing. It is the honest description of what 1.2.1 is:
+1. Launch SoundBridge and follow the onboarding.
+2. If the driver is missing or does not match this app build, the onboarding
+   opens the installer package from the same release. Install it, then choose
+   **Check Again**.
+3. Select the SoundBridge proxy device in **System Settings → Sound**.
+4. Select your physical HDMI or DisplayPort output in the SoundBridge menu bar.
+5. Adjust volume, mute and EQ from the menu bar.
 
-- 1.2.1 does **not** use a Developer ID certificate.
-- It does **not** use an ad-hoc signature. There is no explicit `codesign --sign`
-  step anywhere in the build or the release workflow.
-- It is **not** notarized by Apple. No `notarytool`, no stapling.
-- Gatekeeper therefore **rejects** both the app and the package
-  (`spctl` reports `rejected / source=no usable signature`). This is the expected
-  result, not a build failure.
-- To open them you approve each one once in **System Settings → Privacy &
-  Security → Open Anyway** (macOS 13 and 14 also accept right-click →
-  **Open**). This is step 3 of [Install](#install); it is Apple's documented path
-  for unsigned software, and it is the friction every install of this project has,
-  not a defect in the build.
-- **Do not** disable Gatekeeper or SIP to install SoundBridge. Nothing in this
-  project requires it, and the release validation was performed with both
-  enabled.
-- Loading an unsigned HAL driver is **environment-dependent**. macOS has changed
-  how it treats unsigned plug-ins across releases, and managed or MDM-controlled
-  machines may refuse them outright. On the release validation machine — SIP
-  enabled, Gatekeeper enabled, macOS 27.2.1 — the unsigned driver **was** loaded
-  by `coreaudiod`, with the load confirmed in the system log. That is one machine,
-  and it does not generalise to every macOS version or every hardware/security
-  configuration.
+### Unsigned distribution and Gatekeeper
+
+SoundBridge is distributed without an Apple Developer ID signature and without
+Apple notarization. This is a deliberate, permanent distribution policy, not an
+unfinished step, and it is the honest description of what every release is:
+
+- No Developer ID certificate.
+- No ad-hoc signature either: there is no explicit `codesign --sign` step
+  anywhere in the build or the release workflow.
+- No notarization: no `notarytool`, no stapling.
+- Gatekeeper therefore **rejects** both the app and the package (`spctl` reports
+  `rejected / source=no usable signature`). That is the expected result, not a
+  build failure.
 - **There is no automatic update, and nothing is waiting to be switched on.**
   Sparkle needs an EdDSA key pair and a published appcast; this project has
   neither. `SUPublicEDKey` is empty, `SUEnableAutomaticChecks` is false, no
   `appcast.xml` is generated or uploaded, and `make sign` and
-  `tools/generate_appcast.sh` exist only to refuse (exit 2). The `SUFeedURL` left
-  in `Info.plist` is not an update channel — the driver-compatibility notice reads
-  it to derive a link to the releases page, and no appcast is ever served from it.
-  `Sparkle.framework` stays in the bundle because the app links it at launch.
-  Upgrades are a downloaded PKG.
+  `tools/generate_appcast.sh` exist only to refuse (exit 2). The `SUFeedURL` in
+  `Info.plist` is not an update channel — the driver-compatibility notice reads
+  it to derive a link to the releases page, and no appcast is ever served from
+  it. `Sparkle.framework` stays in the bundle because the app links it at
+  launch. Upgrades are a downloaded PKG.
+- **Do not** disable Gatekeeper or SIP to install SoundBridge. Nothing in this
+  project requires it, and release validation was performed with both enabled.
 - If your organisation enforces a policy that forbids unsigned software, this
   release cannot be installed at all.
+
+The approval flow is not identical on every macOS version or for both package
+types. Apple documents **System Settings → Privacy & Security → Open Anyway** as
+the path for unsigned software; the GUI dialog has not been exercised on the
+validation machine.
+
+Loading an unsigned HAL driver is **environment-dependent**. macOS has changed
+how it treats unsigned plug-ins across releases, and managed or MDM-controlled
+machines may refuse them outright. On the validation machine — SIP enabled,
+Gatekeeper enabled — the unsigned driver **was** loaded by `coreaudiod`, with the
+load confirmed in the system log. That is one machine, and it does not generalise
+to every macOS version or every hardware and security configuration.
 
 The only signature material inside the artifacts is what the toolchain and one
 dependency add on their own:
@@ -289,106 +218,247 @@ dependency add on their own:
 Neither is a Developer ID signature, and neither is a statement that Gatekeeper
 will accept the software.
 
-## Verification status
+## How It Works
 
-### 1.2.1
+SoundBridge uses a virtual audio driver and a separate Host process to control and
+process audio before it reaches the physical output device.
 
-The automated suites were run on the release tree and all passed: Host 411 tests
-(10 skipped), App 298, DSP 1 `ctest` target, driver 3, install transaction 168,
-uninstall lifecycle 99, unsigned policy 97, release payload 244. The uninstall
-suite runs the real script against a temporary root.
+### Audio path
 
-On the validation machine, each of the three fixed defects was checked by hand:
+```mermaid
+flowchart LR
+    APPS["macOS applications"] --> CA["CoreAudio<br/>coreaudiod"]
+    CA --> DRV["HAL virtual driver<br/>SoundBridgeDriver.driver"]
+    DRV -->|"ring buffer write<br/>single producer"| SHM[("Shared memory<br/>320 B header + SPSC ring")]
+    SHM -->|"ring buffer read<br/>single consumer"| HOST["SoundBridgeHost"]
+    HOST --> DSP["DSP<br/>volume gain + 10-band EQ"]
+    DSP --> PHYS["Physical output<br/>HDMI / DisplayPort"]
+    UI["SoundBridge<br/>menu bar app"] -->|"EQ + volume fields"| SHM
+    HOST -->|"device list<br/>control file"| DRV
+```
 
-- **OBS-1** — a volume written as 0.55 (which the device quantises to 0.5625) is
-  read back, committed (`state_revision` 2 → 3), and still 0.5625 after an app
-  restart; mute commits on its own revision.
-- **OBS-2** — Bass dragged 11.7 dB → 4.9 dB is stored as 4.913412, and the panel
-  still reads 4.9 dB after quitting and reopening the app.
-- **OBS-3** — a real uninstall reports the four facts separately and exits 0:
-  files removed, no Host running, no IPC files left, receipt kept, `coreaudiod`
-  never signalled. Neither the helper nor `coreaudiod` restarted. Reinstalling
-  with the published 1.2.0 PKG restored the driver, the proxy device and its
-  volume.
+### Audio processing flow
 
-A 30-minute realtime run (169,686 callbacks, 0 over budget, max 322 µs, p99
-72–74 µs, 0 underruns) carries the harness verdict **`INCOMPLETE — REQUIRED
-HARDWARE EVIDENCE MISSING`**. It is quoted that way on purpose: device-removal
-recovery and the in-run default-output restore marker were never exercised, and
-`p99.9` is not observable. It supports "no callback exceeded its deadline on this
-device at this format under this load" and nothing more. Teardown after the run
-was clean — the Host exited with the app, both proxies went away, both mappings
-and the control file were removed, the default output was unchanged and
-independently re-read, and neither `coreaudiod` nor the driver process restarted.
+1. macOS routes application audio to the SoundBridge virtual output device.
+2. The HAL driver receives the audio and writes it into a shared-memory ring
+   buffer.
+3. The Host process reads the frames from that ring buffer.
+4. Volume gain, mute and the optional DSP chain are applied.
+5. The result is rendered to the selected physical output device.
 
-**Still unverified in 1.2.1:** sample-rate and buffer-size matrices, device
-removal while playing, the subjective EQ result, and thermally stressed runs. The
-full record is [the release notes](docs/RELEASE_NOTES.md) §4 and §5.
+The physical output keeps its own format and sample rate, and nothing is
+intercepted in the kernel. The menu bar app writes control fields only — volume,
+mute and EQ — and never touches the audio frames.
 
-### 1.2.0
+### Components
 
-**Verified on the release validation machine** (macOS 27.2.1, arm64, SIP and
-Gatekeeper both enabled, no signing of any kind):
+| Component | Language | Role |
+|---|---|---|
+| Menu bar app | Swift / SwiftUI | User interface, onboarding, driver detection, EQ and volume state |
+| HAL driver | C++ | Proxy AudioServerPlugIn inside `coreaudiod`; format conversion and ring-buffer write |
+| Host | Swift | Creates the shared memory, reads the ring buffer, renders to the physical device |
+| DSP | C / C++ | Volume gain and 10-band EQ behind a C ABI, used by the Host |
 
-- GitHub download integrity — the published PKG, DMG and `SHA256SUMS.txt` match
-  the authoritative local hashes.
-- Package installation and payload integrity — the installed app matches the
-  package payload file for file (109/109), and the installed driver is identical
-  to the copy embedded in the app.
-- HAL driver loading — the unsigned driver was loaded by `coreaudiod`
-  (`HALS_RemotePlugInRegistrar` log entries, driver process running).
-- Audio playback — roughly 47.8k frames per second of real audio, with the
-  tester confirming that sound was audible.
-- Volume and mute control — volume 60 → 0.5942, 20 → 0.1914, 88 → 0.8789 through
-  the proxy device, mute and unmute both directions.
-- Runtime EQ control — the EQ sequence counter advanced 0 → 10 and all ten band
-  gains matched the values requested in the UI (+8 / 0 / −8 dB).
-- Host restart and driver reconnection — App quit, relaunch, new session, driver
-  reconnected automatically on the first attempt.
-- 31 minutes of continuous playback — 89,320,455 frames, no underrun growth
-  during playback, zero overruns, zero format mismatches, zero render callbacks
-  over budget, no memory growth.
+## Requirements
 
-**Not yet verified:**
+- macOS 13.0 (Ventura) or later. This is the deployment target in the package
+  manifests and in the bundle `Info.plist`; it is not a claim that every such
+  version has been tested.
+- An HDMI or DisplayPort audio output.
+- Administrator rights for the one-time driver installation.
+- A universal build is produced, but only Apple silicon has been exercised. See
+  [Verification](#verification).
 
-- Device removal and re-enumeration (unplugging HDMI/DP while playing) — skipped
-  by the tester in this round.
-- The double-click PKG path through the Gatekeeper approval dialog — the release
-  was installed with the `installer` command line.
-- Any macOS version other than the one above, and any Intel Mac. The binaries are
-  universal, but only Apple silicon has been run.
-- Multi-device concurrency, playback longer than 31 minutes, and low-buffer or
-  high-load conditions.
-- EQ persistence across restarts — this was the 1.2.0 defect OBS-2. 1.2.1 fixes
-  it and the fix was re-measured on a display; see [1.2.1](#121) above.
+Verified platform: macOS 27.2.1 (build 26B131), arm64.
 
-Every number above is a measurement from that one machine on that one day. It is
-evidence that the release works, not a performance guarantee for other
-configurations. The full record, with the raw log references, is
-[docs/release/SoundBridge-1.2.0-Final-Release-Report.md](docs/release/SoundBridge-1.2.0-Final-Release-Report.md).
-Open issues and untested areas are tracked in
+### Hardware considerations
+
+SoundBridge targets outputs whose audio arrives over HDMI or DisplayPort at a
+fixed volume. What it can do on a given machine depends on the Mac model and
+architecture, the macOS version, the display's firmware and audio
+implementation, the connection path (direct cable, dock or adapter), the
+negotiated sample rate and buffer size, and any other installed audio driver or
+virtual device. Not every HDMI or DisplayPort device has been validated, and two
+devices that look identical on paper can behave differently. The configurations
+that were measured are listed under [Verification](#verification).
+
+## Verification
+
+SoundBridge is verified at three levels that are kept explicitly separate:
+automated suites, physical hardware measurements, and everything that remains
+unverified.
+
+### Automated verification
+
+`make test` runs the whole suite. It covers:
+
+- DSP signal processing and numerical correctness, including concurrency and
+  live configuration updates.
+- The shared-memory protocol: header layout, field offsets, and the single-source
+  rule for the four header copies.
+- Host audio rendering, callback-lifecycle and device-management behaviour.
+- Driver and Host integration across a process boundary.
+- Installer transaction, rollback and uninstall behaviour.
+- The unsigned release policy: no signing, notarization or appcast can creep back
+  into the build, the workflow or `tools/`.
+
+Test counts and the exact commands for a given release are recorded in that
+release's report rather than here, because they change with every release.
+
+Package and payload integrity are checked separately, because they need a built
+bundle: `make verify-payload` checks the packaged app and driver, and
+`make test-release-payload` breaks copies of the artifacts on purpose and asserts
+that the verifiers notice.
+
+### Hardware verification
+
+Physical validation, performed on 2026-11-23 with SIP and Gatekeeper enabled, has
+exercised:
+
+- Real CoreAudio routing through the SoundBridge proxy device.
+- Playback to a physical DisplayPort output at 48 kHz with a 512-frame buffer.
+- 30 minutes of continuous playback with callback monitoring: 169,686
+  callbacks, none over budget, maximum 322 µs, p99 72–74 µs, no underruns.
+- A 4× CPU-load phase in the middle of that window, with no underrun or overrun
+  increase.
+- Graceful shutdown and resource cleanup: the Host exited with the app, the proxy
+  devices disappeared, the mappings and control file were removed, and neither
+  `coreaudiod` nor the driver process restarted.
+
+That run carries the harness verdict
+**`INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING`**. It is quoted that way on
+purpose: device-removal recovery and the in-run default-output restore marker
+were never exercised, and p99.9 is not observable. It supports "no callback
+exceeded its deadline on this device, at this format, under this load" and
+nothing more.
+
+### Verification limitations
+
+Software tests and limited hardware tests do not establish a universal real-time
+guarantee. The following still need evidence:
+
+- Complete p99.9 callback latency.
+- Sample-rate and buffer-size matrices beyond 48 kHz and 512 frames.
+- Device removal and re-enumeration while playing.
+- Extended-duration and thermally stressed runs.
+- Additional hardware, macOS versions and Intel Macs.
+- Application-specific audio behaviour and real-world listening tests.
+
+Every measurement quoted here comes from a single machine and a single day. The
+reports under [docs/release/](docs/release/) hold the raw record, and
+[docs/risks/Known-Limitations.md](docs/risks/Known-Limitations.md) holds the
+register of what is still open.
+
+## Known Limitations
+
+- **Coverage is narrow by design of the evidence, not of the product.** Measured:
+  one DisplayPort device, 48 kHz, 512-frame buffer, one macOS version, Apple
+  silicon. Unmeasured: other formats and buffer sizes, device removal while
+  playing, thermal stress, Intel Macs.
+- **No universal real-time guarantee.** Callback behaviour under arbitrary system
+  load has not been formally bounded.
+- **The EQ is three macro controls.** No per-band editing, no presets, no
+  spectrum display.
+- **Loading an unsigned driver is environment-dependent.** See
+  [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper).
+- **PKG and DMG packaging is not byte-reproducible**, although the binaries are.
+- **The uninstaller keeps the PKG receipt and the installer transaction state**;
+  see [Uninstallation](#uninstallation) for what is removed and what is kept.
+
+The project prioritises audio correctness, lifecycle safety and predictable
+failure handling over claiming universal compatibility. The full register, with
+severity and per-item status, is
 [docs/risks/Known-Limitations.md](docs/risks/Known-Limitations.md).
 
-## Documentation
+## Uninstallation
 
-| Document | What it answers |
-|---|---|
-| [docs/README.md](docs/README.md) | Index of all engineering documentation |
-| [INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md) | Install, verify, troubleshoot, uninstall, roll back |
-| [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | What changed in 1.2.1, upgrade and downgrade notes |
-| [Architecture](docs/architecture/SoundBridge-1.2.0-Architecture.md) | Components, shared memory, ring buffer, admission, retirement, recovery |
-| [Engineering notes](docs/engineering/) | Ring buffer contract, CallbackGate memory model, mapping retirement, shared-memory lifecycle |
-| [DEVELOPMENT_GUIDE.md](docs/development/DEVELOPMENT_GUIDE.md) | Toolchain, build, test, troubleshooting, contribution rules |
-| [Known limitations](docs/risks/Known-Limitations.md) | Known defects, known limits, untested areas, environment risks |
-| [Final release report](docs/release/SoundBridge-1.2.0-Final-Release-Report.md) | 1.2.0 release evidence: hashes, install, driver load, functional and stability results |
-| [1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md) | The three 1.2.0 defects and how 1.2.1 closes them: root cause, tests, commands run, and what is still unverified |
-| [Post-release validation addendum](docs/release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md) | What was verified after publication, and what was not |
-| [Release checklist](docs/release/SoundBridge-1.2.0-Release-Checklist.md) | What has to be checked before a release |
+Menu bar → **Uninstall Driver**, or `tools/uninstall_driver.sh` (`--dry-run`
+prints the plan and changes nothing). Both apply the same policy: read
+`CFBundleIdentifier`, refuse anything that is not `com.soundbridge.driver`,
+refuse a symlink or a foreign bundle, and then remove exactly one constant path.
 
-## Development
+The script removes the driver files and reports the other three states as
+separate facts: whether the driver was unloaded from `coreaudiod`, whether the
+CoreAudio device disappeared, and whether `coreaudiod` was restarted. It does the
+removal only, and says so. Before removing anything it stops a Host that belongs
+to this installation and releases the runtime IPC files
+(`/tmp/soundbridge-<uid>-*` and the device control file).
+Running it twice is a no-op, running it with nothing installed says so and exits
+0, and a failure exits non-zero and names what it could not do.
 
-Prerequisites: macOS 13+, Xcode command line tools, CMake, and the git
-submodules (the driver builds against [libASPL](https://github.com/gavv/libASPL)).
+Kept on purpose: your EQ and volume settings, the logs, and the app itself. Also
+kept, and only reported: the PKG receipt and the installer transaction logs.
+`coreaudiod` is never signalled, so the loaded copy stays resident until it is
+restarted or the machine reboots.
+
+### After uninstalling
+
+1. Pick your physical output again in **System Settings → Sound**. Nothing
+   switches it back for you — the Host does not restore the previous default
+   output on the way out.
+2. Play something and confirm it reaches the display or the built-in speakers.
+3. Restart audio apps that still hold a reference to the removed device.
+
+Do not delete `/tmp/soundbridge-<uid>-*` or the device control file by hand while
+a Host is running: the uninstaller releases them itself, and a hand-deleted
+mapping only leaves the next launch to rebuild it.
+
+Full steps, troubleshooting and rollback:
+[docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
+
+## Architecture and Repository Structure
+
+Shared memory lives at `/tmp/soundbridge-<ownerUID>-<deviceUID>`: a 320-byte
+header followed by a single-producer/single-consumer ring buffer of stereo
+Float32 frames. The driver is the only producer, the Host is the only consumer,
+and the menu bar app writes control fields (volume, mute, EQ). A mapping is
+retired and rebuilt when a device disappears and comes back, and the Host's
+startup, drain and teardown order is fixed.
+
+The repository is organised into independently maintained components:
+
+```text
+SoundBridge/
+├── apps/
+│   └── mac/
+│       └── SoundBridgeApp/     menu bar app (Swift package, SwiftUI)
+│
+├── packages/
+│   ├── driver/                 CoreAudio HAL virtual driver (C++, CMake)
+│   ├── dsp/                    DSP engine (C / C++, CMake, ctest suites)
+│   ├── host/                   Host process (Swift package with C shims)
+│   └── shared/include/         the single source of the shared protocol header
+│
+├── tools/                      build, packaging, verification, maintenance scripts
+├── docs/                       architecture, engineering, development, release, risks
+│
+├── Makefile
+├── VERSION
+├── LICENSE
+├── THIRD_PARTY_NOTICES.md
+└── README.md
+```
+
+The driver builds against [libASPL](https://github.com/gavv/libASPL), included as
+a git submodule under `packages/driver/vendor/`.
+
+The full design — admission and drain, mapping retirement, quarantine, crash
+recovery, real-time constraints and the exact ABI — is in
+[docs/architecture/](docs/architecture/) and [docs/engineering/](docs/engineering/).
+
+## Building from Source
+
+### Prerequisites
+
+macOS 13 or later, Xcode command line tools, CMake, Git, and a Swift toolchain
+compatible with the project.
+
+```bash
+xcode-select --install        # command line tools, if they are not installed
+brew install cmake            # if cmake is not already on PATH
+```
+
+### Clone and build
 
 ```bash
 git clone https://github.com/chenjy16/SoundBridge.git
@@ -399,65 +469,95 @@ make build          # DSP, driver, host and app; universal
 make run            # launch the built app from dist/
 ```
 
+### Tests
+
+```bash
+make test
+```
+
+### Common commands
+
 | Command | What it does |
 |---|---|
+| `make install-deps` | Check that CMake and the Swift toolchain are available |
 | `make build` | Protocol check, version sync, then build every component |
 | `make bundle` | Assemble `dist/SoundBridge.app` from built components |
 | `make run` | Open the existing bundle |
 | `make dev` | Reset local state, build, bundle and open (shows onboarding) |
 | `make quick` | Rebuild only the Swift components, universal |
-| `make test` | Protocol + version checks, then DSP, driver, host, app, installer (install transaction + uninstall lifecycle) and unsigned-policy suites |
+| `make test` | Protocol and version checks, then the DSP, driver, host, app, installer and unsigned-policy suites |
 | `make protocol-check` | Assert one shared-memory protocol source and identical header copies |
 | `make verify-unsigned` | Assert app, PKG and DMG are unsigned and no appcast exists |
+| `make rebuild` | Clean rebuild |
+| `make clean` | Remove build artifacts |
 
-Full details, per-component commands, test layout and troubleshooting are in
-[docs/development/DEVELOPMENT_GUIDE.md](docs/development/DEVELOPMENT_GUIDE.md).
+Refer to the Makefile and [docs/development/DEVELOPMENT_GUIDE.md](docs/development/DEVELOPMENT_GUIDE.md)
+for the exact behaviour of each target.
 
 Two rules matter when changing this codebase:
 
-- The shared-memory header is single-sourced. Changing a field means bumping the
-  protocol version and re-syncing all copies; `make protocol-check` fails
-  otherwise.
-- Nothing in the product may sign, notarize or auto-update. The unsigned
+- **The shared-memory header is single-sourced.** Changing a field means bumping
+  the protocol version and re-syncing all four copies; `make protocol-check`
+  fails otherwise.
+- **Nothing in the product may sign, notarize or auto-update.** The unsigned
   assertions are part of the test suite (`make test-unsigned`), and a signing
   command that creeps back into the build or the workflow fails them.
 
-## Project status
+No Apple Developer ID certificate is required for development or release.
 
-1.2.1 is a maintenance release: no new features, no new dependencies, and no
-protocol change (`0x00020200` is what 1.2.1 speaks, as it was for 1.2.0). It fixes
-the three defects 1.2.0 shipped with, and each fix was re-measured on a display —
-see [Verification status](#verification-status). 1.2.0 was released on 2026-11-21
-and validated end to end on one machine, as described under 1.2.0 above. The
-unsigned distribution is a deliberate, permanent choice for this project — not a
-beta marker — and is documented rather than worked around.
+## Documentation
 
-Fixed in 1.2.1:
+| Document | What it answers |
+|---|---|
+| [docs/README.md](docs/README.md) | Index of all engineering documentation, including per-release reports |
+| [INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md) | Install, verify, troubleshoot, uninstall, roll back |
+| [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | What changed in the current release, upgrade and downgrade notes |
+| [Architecture](docs/architecture/) | Components, shared memory, ring buffer, admission, retirement, recovery |
+| [Engineering notes](docs/engineering/) | Ring buffer contract, CallbackGate memory model, shared-memory lifecycle |
+| [DEVELOPMENT_GUIDE.md](docs/development/DEVELOPMENT_GUIDE.md) | Toolchain, build, test, troubleshooting, contribution rules |
+| [Known limitations](docs/risks/Known-Limitations.md) | Known defects, known limits, untested areas, environment risks |
+| [Hardware realtime runbook](docs/release/SoundBridge-Hardware-Realtime-Operator-Runbook.md) | How the hardware real-time validation is run and recorded |
+| [Release reports](docs/release/) | Per-release evidence: hashes, install, driver load, functional and stability results |
 
-- **OBS-1** — volume/mute writes could fail to commit when there was no I/O client
-  window open. Writes are now read back and the accepted state is committed to
-  shared memory, so setting them during playback is no longer required.
-- **OBS-2** — EQ slider values were not persisted across an app restart. The last
-  drag is now persisted per device.
-- **OBS-3** — uninstalling left the Host running and the runtime IPC files behind.
-  The uninstaller now stops only its own Host and releases those files.
+## Project Status
 
-Still open, unchanged by 1.2.1:
+SoundBridge is actively developed. It focuses on making fixed-volume HDMI and
+DisplayPort audio outputs usable through system-wide software volume control and
+equalization.
 
-- **OBS-4** — PKG/DMG packaging is not byte-reproducible, although the binaries
-  are.
-- Device removal and re-enumeration while playing, the Gatekeeper GUI approval
-  path, sample-rate and buffer-size matrices, and the subjective EQ result are
-  untested.
+Development priorities:
 
-The changes, the tests that cover them, every command that was run and every item
-still marked `NOT VERIFIED` are in the
-[1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md)
-and [the release notes](docs/RELEASE_NOTES.md).
+- Audio callback safety and predictable performance.
+- Driver and Host lifecycle correctness.
+- Shared-memory ownership and recovery.
+- Hardware compatibility.
+- Reliable installation and uninstallation.
+- Diagnostics and reproducible verification.
 
-There is no committed roadmap. Issues and measurements are recorded in
-[Known limitations](docs/risks/Known-Limitations.md), which is the single place
-where open problems are tracked.
+There is no committed roadmap. Open problems, measurements and untested areas are
+tracked in one place:
+[docs/risks/Known-Limitations.md](docs/risks/Known-Limitations.md). What each
+release changes is in its release notes, and what was measured for it is in its
+report under [docs/release/](docs/release/).
+
+## Contributing
+
+Bug reports, measurements and technical feedback are welcome. An issue that can
+be acted on usually carries:
+
+- the Mac model and architecture (`uname -m`), and the macOS version and build;
+- the display or audio device model, and how it is connected — direct cable, dock
+  or adapter;
+- the SoundBridge version, and which installer you used (PKG or DMG);
+- what you expected, what happened instead, and the steps that reproduce it;
+- the SoundBridge entries from `os.log`, and for a download problem the output of
+  `shasum -a 256 -c SHA256SUMS.txt`.
+
+Changes that touch the driver, the Host, the shared-memory protocol or the DSP
+engine need their test results attached and a note on what they do to real-time
+behaviour or to a lifecycle. Open an issue before a large architectural change:
+the protocol header is single-sourced across four components, so a change there
+is a change in all of them.
 
 ## License
 
@@ -473,9 +573,8 @@ product, using it in paid work, or selling it requires a separate written
 license from the copyright holder.
 
 The license applies to this repository from the commit that added it onward.
-Releases published before it, up to and including v1.2.0, were published
-without a license grant; if you need terms covering one of those versions,
-contact the copyright holder.
+Releases published before that commit were published without a license grant; if
+you need terms covering one of those versions, contact the copyright holder.
 
 Bundled third-party components keep their own licenses and are not covered by
 the PolyForm terms: libASPL is MIT (with Apple's sample-code licenses for the
@@ -483,3 +582,9 @@ files it derives from) and Sparkle is MIT. Their notices must be preserved in
 redistributions, and the downloads carry them: every bundle ships the license
 and [the third-party notices](THIRD_PARTY_NOTICES.md) in
 `SoundBridge.app/Contents/Resources/`.
+
+---
+
+<p align="center">
+  <sub>SoundBridge — system-wide audio control for HDMI and DisplayPort outputs on macOS.</sub>
+</p>
