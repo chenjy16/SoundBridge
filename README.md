@@ -99,73 +99,13 @@ displays. The EQ is three macro controls over a fixed 10-band layout.
 
 ## Installation
 
-### Download
+Download the latest release from [GitHub Releases](https://github.com/chenjy16/SoundBridge/releases).
+Use the **PKG** for a first install or upgrade; it includes the app and driver.
+The **DMG** contains only the app. Install both components from the same release
+and select the SoundBridge proxy output after installation.
 
-Every release is published on GitHub Releases:
-
-<https://github.com/chenjy16/SoundBridge/releases>
-
-A release carries:
-
-| File | Contents | Use it when |
-|---|---|---|
-| `SoundBridge-*.pkg` | App **and** HAL driver | First install, or any upgrade. This is the supported path. |
-| `SoundBridge-*.dmg` | App only | You only want to replace the app. It never writes to `/Library/Audio/Plug-Ins/HAL/`. |
-| `SHA256SUMS.txt` | Checksums of the files above | Verifying the download |
-| `INSTALLATION_GUIDE.md`, `RELEASE_NOTES.md` | The release's own installation steps and change list | Reading before you install |
-
-Check a download before installing:
-
-```bash
-shasum -a 256 -c SHA256SUMS.txt
-```
-
-### Install
-
-1. **Download the PKG** from
-   [the latest release](https://github.com/chenjy16/SoundBridge/releases). The
-   package carries the app **and** the driver; the DMG carries the app only and
-   never writes to `/Library/Audio/Plug-Ins/HAL/`.
-2. **Double-click the package** and approve the administrator prompt. Quit
-   SoundBridge first if an older copy is running. The driver is replaced as a
-   transaction, with a backup and a rollback.
-3. **Allow it once.** macOS refuses the first launch of unsigned software —
-   *"SoundBridge" cannot be opened because Apple cannot check it for malicious
-   software*, or on Apple silicon *"SoundBridge" is damaged and can't be opened*.
-   Both mean "unsigned", not "broken". Open **System Settings → Privacy &
-   Security**, find SoundBridge in the security section and click **Open Anyway**.
-   If macOS blocks the package before Installer appears, allow that the same way.
-   See [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper)
-   for what this does and does not guarantee.
-4. **Open `SoundBridge.app`**, then select **`<your display> (SoundBridge)`** as
-   the system output. The slider, the volume keys and mute now control the
-   display's output level; the menu bar switches between displays when there is
-   more than one.
-
-Nothing here needs Gatekeeper or SIP turned off. If your Mac is managed by an
-organisation that forbids unsigned software, this release cannot be installed —
-see [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper).
-
-Install the app and the driver from the same release, and upgrade with the PKG
-rather than the DMG. The two speak a versioned shared-memory protocol, and a
-driver older than the app does not produce audio. The installer checks the
-protocol before it replaces anything and refuses a downgrade.
-
-> Step 3 is Apple's documented path for unsigned software. Installs on the
-> validation machine were performed with the `installer` command line, so the
-> dialog sequence itself is documented here rather than measured — see
-> [Verification](#verification). Troubleshooting, uninstall and rollback:
-> [docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
-
-### First launch
-
-1. Launch SoundBridge and follow the onboarding.
-2. If the driver is missing or does not match this app build, the onboarding
-   opens the installer package from the same release. Install it, then choose
-   **Check Again**.
-3. Select the SoundBridge proxy device in **System Settings → Sound**.
-4. Select your physical HDMI or DisplayPort output in the SoundBridge menu bar.
-5. Adjust volume, mute and EQ from the menu bar.
+Unsigned distribution, first-launch approval, troubleshooting, uninstall and
+rollback steps are in the [installation guide](docs/INSTALLATION_GUIDE.md).
 
 ### Unsigned distribution and Gatekeeper
 
@@ -284,136 +224,25 @@ that were measured are listed under [Verification](#verification).
 
 ## Verification
 
-SoundBridge is verified at three levels that are kept explicitly separate:
-automated suites, physical hardware measurements, and everything that remains
-unverified.
-
-### Automated verification
-
-`make test` runs the whole suite. It covers:
-
-- DSP signal processing and numerical correctness, including concurrency and
-  live configuration updates.
-- The shared-memory protocol: header layout, field offsets, and the single-source
-  rule for the four header copies.
-- Host audio rendering, callback-lifecycle and device-management behaviour.
-- Driver and Host integration across a process boundary.
-- Installer transaction, rollback and uninstall behaviour.
-- The unsigned release policy: no signing, notarization or appcast can creep back
-  into the build, the workflow or `tools/`.
-
-Test counts and the exact commands for a given release are recorded in that
-release's report rather than here, because they change with every release.
-
-Package and payload integrity are checked separately, because they need a built
-bundle: `make verify-payload` checks the packaged app and driver, and
-`make test-release-payload` breaks copies of the artifacts on purpose and asserts
-that the verifiers notice.
-
-### Hardware verification
-
-Physical validation, performed on 2026-11-23 with SIP and Gatekeeper enabled, has
-exercised:
-
-- Real CoreAudio routing through the SoundBridge proxy device.
-- Playback to a physical DisplayPort output at 48 kHz with a 512-frame buffer.
-- 30 minutes of continuous playback with callback monitoring: 169,686
-  callbacks, none over budget, maximum 322 µs, p99 72–74 µs, no underruns.
-- A 4× CPU-load phase in the middle of that window, with no underrun or overrun
-  increase.
-- Graceful shutdown and resource cleanup: the Host exited with the app, the proxy
-  devices disappeared, the mappings and control file were removed, and neither
-  `coreaudiod` nor the driver process restarted.
-
-That run carries the harness verdict
-**`INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING`**. It is quoted that way on
-purpose: device-removal recovery and the in-run default-output restore marker
-were never exercised, and p99.9 is not observable. It supports "no callback
-exceeded its deadline on this device, at this format, under this load" and
-nothing more.
-
-### Verification limitations
-
-Software tests and limited hardware tests do not establish a universal real-time
-guarantee. The following still need evidence:
-
-- Complete p99.9 callback latency.
-- Sample-rate and buffer-size matrices beyond 48 kHz and 512 frames.
-- Device removal and re-enumeration while playing.
-- Extended-duration and thermally stressed runs.
-- Additional hardware, macOS versions and Intel Macs.
-- Application-specific audio behaviour and real-world listening tests.
-
-Every measurement quoted here comes from a single machine and a single day. The
-reports under [docs/release/](docs/release/) hold the raw record, and
-[docs/risks/Known-Limitations.md](docs/risks/Known-Limitations.md) holds the
-register of what is still open.
+Run `make test` for automated coverage. Release-specific test counts and hardware
+measurements are recorded in the [1.2.1 quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md)
+and other release reports; current unverified hardware scenarios are tracked in
+[Known Limitations](docs/risks/Known-Limitations.md).
 
 ## Known Limitations
 
-- **Coverage is narrow by design of the evidence, not of the product.** Measured:
-  one DisplayPort device, 48 kHz, 512-frame buffer, one macOS version, Apple
-  silicon. Unmeasured: other formats and buffer sizes, device removal while
-  playing, thermal stress, Intel Macs.
-- **No universal real-time guarantee.** Callback behaviour under arbitrary system
-  load has not been formally bounded.
-- **The EQ is three macro controls.** No per-band editing, no presets, no
-  spectrum display.
-- **Loading an unsigned driver is environment-dependent.** See
-  [Unsigned distribution and Gatekeeper](#unsigned-distribution-and-gatekeeper).
-- **PKG and DMG packaging is not byte-reproducible**, although the binaries are.
-- **The uninstaller keeps the PKG receipt and the installer transaction state**;
-  see [Uninstallation](#uninstallation) for what is removed and what is kept.
-
-The project prioritises audio correctness, lifecycle safety and predictable
-failure handling over claiming universal compatibility. The full register, with
-severity and per-item status, is
-[docs/risks/Known-Limitations.md](docs/risks/Known-Limitations.md).
+The current risk register, including hardware coverage, unsigned-driver
+compatibility and packaging limits, is maintained in
+[Known-Limitations](docs/risks/Known-Limitations.md). The current EQ controls are
+described under [Features](#features).
 
 ## Uninstallation
 
-Menu bar → **Uninstall Driver**, or `tools/uninstall_driver.sh` (`--dry-run`
-prints the plan and changes nothing). Both apply the same policy: read
-`CFBundleIdentifier`, refuse anything that is not `com.soundbridge.driver`,
-refuse a symlink or a foreign bundle, and then remove exactly one constant path.
-
-The script removes the driver files and reports the other three states as
-separate facts: whether the driver was unloaded from `coreaudiod`, whether the
-CoreAudio device disappeared, and whether `coreaudiod` was restarted. It does the
-removal only, and says so. Before removing anything it stops a Host that belongs
-to this installation and releases the runtime IPC files
-(`/tmp/soundbridge-<uid>-*` and the device control file).
-Running it twice is a no-op, running it with nothing installed says so and exits
-0, and a failure exits non-zero and names what it could not do.
-
-Kept on purpose: your EQ and volume settings, the logs, and the app itself. Also
-kept, and only reported: the PKG receipt and the installer transaction logs.
-`coreaudiod` is never signalled, so the loaded copy stays resident until it is
-restarted or the machine reboots.
-
-### After uninstalling
-
-1. Pick your physical output again in **System Settings → Sound**. Nothing
-   switches it back for you — the Host does not restore the previous default
-   output on the way out.
-2. Play something and confirm it reaches the display or the built-in speakers.
-3. Restart audio apps that still hold a reference to the removed device.
-
-Do not delete `/tmp/soundbridge-<uid>-*` or the device control file by hand while
-a Host is running: the uninstaller releases them itself, and a hand-deleted
-mapping only leaves the next launch to rebuild it.
-
-Full steps, troubleshooting and rollback:
-[docs/INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md).
+Use **Uninstall Driver** in the menu bar or run `tools/uninstall_driver.sh`.
+Removal behavior, retained data, recovery and rollback are documented in the
+[installation guide](docs/INSTALLATION_GUIDE.md).
 
 ## Architecture and Repository Structure
-
-Shared memory lives at `/tmp/soundbridge-<ownerUID>-<deviceUID>`: a 320-byte
-header followed by a single-producer/single-consumer ring buffer of stereo
-Float32 frames. The driver is the only producer, the Host is the only consumer,
-and the menu bar app writes control fields (volume, mute, EQ). A mapping is
-retired and rebuilt when a device disappears and comes back, and the Host's
-startup, drain and teardown order is fixed.
 
 The repository is organised into independently maintained components:
 

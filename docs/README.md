@@ -21,66 +21,16 @@
 
 ---
 
-## 1. 产品定位
+## 1. 项目概览与架构
 
-SoundBridge 是一个 macOS 菜单栏应用，为**固定音量**的 HDMI / DisplayPort
-显示器提供系统级软件音量控制与 EQ。
+SoundBridge 是 macOS 菜单栏音量与 EQ 工具，面向固定音量的 HDMI / DisplayPort
+输出。产品说明和当前能力见[根目录 README](../README.md)，产品方向见
+[产品路线图](product/ROADMAP.md)。
 
-系统把这些显示器的音量滑块置灰，因为设备本身不提供硬件音量。SoundBridge
-在应用与物理设备之间插入一个虚拟音频驱动（AudioServerPlugIn），把系统输出
-改道到该驱动，由 Host 进程做增益、EQ 与格式适配后再交给物理设备。用户看到的
-仍然是系统音量滑块与键盘音量键。
+工程架构、音频链路与组件职责以
+[SoundBridge 架构说明](architecture/SoundBridge-1.2.0-Architecture.md)为准；本索引不再复制架构图和链路细节。
 
-- 无内核扩展（不加载 kext）。
-- 分发：**完全未签名、未公证、无自动更新**（发布策略，见
-  [Known-Limitations](risks/Known-Limitations.md) L-13）。这不是 ad-hoc 签名。
-- 版本号 `VERSION` = `1.2.1`；共享音频协议版本 `0x00020200`。
-
-## 2. 架构总览
-
-```
-┌───────────────┐   preferences / control   ┌──────────────────┐
-│ SoundBridge   │──────────────────────────►│ SoundBridge Host │
-│ App (menu bar)│                           │ (user process)   │
-└───────┬───────┘                           └────┬────────┬────┘
-        │ mmap (EQ / volume state)               │        │ AudioUnit render
-        │                                        │        │
-        ▼                                        ▼        ▼
-  /tmp/soundbridge-<ownerUID>-<deviceUID>     DSP (EQ)  physical device
-        ▲                                        ▲
-        │ mmap + ring write                      │
-┌───────┴────────┐    HAL callback    ┌─────────┴──────────┐
-│ SoundBridge    │◄───────────────────│ coreaudiod /       │
-│ Driver (.driver)│   (libASPL)        │ apps audio output  │
-└────────────────┘                    └────────────────────┘
-```
-
-数据面是**一块文件映射的共享内存**：固定 320 字节头 + 二次幂帧数的单生产者
-单消费者（SPSC）Ring Buffer。Driver 是唯一 Producer，Host 是唯一 Consumer。
-
-音频主链：`coreaudiod` → libASPL `Device` → `OnWriteMixedOutput` →
-`rf_ring_write` → Host `AudioRenderer.render` → `rf_ring_read` → DSP / 增益 /
-反交织 → 物理设备。控制面：App 与 Host 通过同一块映射交换 EQ 与音量状态；
-Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状态。
-
-完整说明见 [architecture/SoundBridge-1.2.0-Architecture.md](architecture/SoundBridge-1.2.0-Architecture.md)。
-
-### 2.1 主题与文档对照
-
-| 主题 | 权威文档 |
-|---|---|
-| 产品方向、Free/Pro 边界、DSP/校准/音频配置文件路线 | [product/ROADMAP.md](product/ROADMAP.md) |
-| 系统组件与职责边界 | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2 |
-| 音频处理链路（格式转换 / SRC / 漂移补偿） | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2、[driver README](../packages/driver/README.md) |
-| 共享内存协议与 ABI | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §3、§10 |
-| Ring Buffer 契约 | [engineering/RingBuffer-Design.md](engineering/RingBuffer-Design.md) |
-| Producer 准入与所有权 | [engineering/Admission-Ownership.md](engineering/Admission-Ownership.md) |
-| Driver 回调准入与排空 | [engineering/Callback-Lifecycle.md](engineering/Callback-Lifecycle.md)、[CallbackGate-Memory-Model.md](engineering/CallbackGate-Memory-Model.md) |
-| Mapping 退役与 Quarantine | [engineering/Mapping-Retirement.md](engineering/Mapping-Retirement.md) |
-| Host / Driver 生命周期与崩溃恢复 | [engineering/SharedMemory-Lifecycle.md](engineering/SharedMemory-Lifecycle.md)、[architecture](architecture/SoundBridge-1.2.0-Architecture.md) §8–§9 |
-| 实时音频安全（回调内不得做什么） | [CallbackGate-Memory-Model.md](engineering/CallbackGate-Memory-Model.md) §10、[Known-Limitations](risks/Known-Limitations.md) §3.1 |
-
-### 2.2 ABI 速查
+## 2. ABI 速查
 
 | 项 | 值 |
 |---|---|
@@ -140,42 +90,10 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 
 ## 5. 验证状态
 
-### 5.1 1.2.1（当前工作树）
-
-| 层次 | 状态 | 证据 |
-|---|---|---|
-| 自动化全量回归 | `TEST_VERIFIED` | `make test` 退出码 0：Host 411（10 跳过）/ App 298 / DSP 1 / Driver 3 / 安装事务 168 / 卸载生命周期 99 / 未签名策略 97 / 发布载荷 244，零失败 |
-| OBS-1 音量与静音提交 | `REAL_MACOS_VERIFIED — 单机` | 写入 0.55 被设备量化为 0.5625，`state_revision` 2 → 3，重启后仍为 0.5625（[RELEASE_NOTES](RELEASE_NOTES.md) §4.3） |
-| OBS-2 EQ 持久化 | `REAL_MACOS_VERIFIED — 单机` | Bass 11.7 → 4.9 dB 落盘为 4.913412，重开 App 后界面仍为 4.9 |
-| OBS-3 卸载生命周期 | `REAL_MACOS_VERIFIED — 单机` + `TEST_VERIFIED`（脚本） | 真实卸载退出 0，四态分列，`coreaudiod` 与 helper 均未重启；用 1.2.0 发布 PKG 重装后驱动恢复 |
-| 硬件实时 30 分钟 | `INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING` | 169 686 callbacks，overBudget 0，p99 72–74 µs；C6 恢复与 C8 恢复标记未执行（[Known-Limitations](risks/Known-Limitations.md) §2C） |
-| 采样率与缓冲区矩阵、播放中设备移除、EQ 听感、`p99.9`、热状态 | `NOT_VERIFIED` | [RELEASE_NOTES](RELEASE_NOTES.md) §5 |
-
-`INCOMPLETE` 是 harness 的机器判定，不读作通过：本次只支持「该设备、该格式、
-该负载下没有回调超期」这一条结论。1.2.1 沿用 1.2.0 的协议版本 `0x00020200`。
-
-### 5.2 1.2.0（已发布）
-
-平台：macOS 27.2.1（`26B131`）/ arm64，Apple clang 21.0.0，Apple Swift 6.4.2；
-Driver 为 universal（`x86_64 arm64`）Release 构建。
-
-下表是「哪一层被验证」的分层结论；逐项原始证据在最终发布报告，面向读者的英文
-摘要在 [Post-Release Validation Addendum](release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md)。
-
-| 层次 | 状态 | 证据 |
-|---|---|---|
-| 协议 / Ring / 准入 / 退役（自动化） | `TESTS PASSED` | `make test` 内的 `check_protocol_layout.sh`、`sync_shared_header.sh --check` 与 Host 测试套件；机制见 [engineering/](engineering/) |
-| Host / App 全量回归 | `TEST_VERIFIED` | 1.2.0 发布前 `make test` 退出码 0，Host 379 / App 253（报告 §6）；该批次原始输出随阶段报告移出仓库（§6） |
-| 1.2.0 发布物真实性 | `VERIFIED` | 公开下载与本地权威哈希逐项一致 |
-| 安装与载荷一致性 | `VERIFIED` | `installer` 安装；109/109 文件字节一致 |
-| 未签名驱动加载 | `VERIFIED — 单机、限定环境` | `HALS_RemotePlugInRegistrar` + 驱动 PID（报告 §18） |
-| 功能 K1–K4 | `VERIFIED` | 播放、音量/静音、运行时 EQ（报告 §21） |
-| 恢复 K5a / K5b | `VERIFIED` | SIGTERM 有序停机；App 重启后驱动自动重连 |
-| 稳定性 K6 | `VERIFIED（31 分 01 秒）` | 89,320,455 帧，播放期零欠载/零溢出（报告 §22） |
-| 设备移除 / GUI 安装路径 / 其他 macOS 与 Intel | `NOT_VERIFIED` | [Known-Limitations](risks/Known-Limitations.md) §2A |
-
-**未验证项不因归档或发布而消失**，统一登记在
-[risks/Known-Limitations.md](risks/Known-Limitations.md)。
+逐版本的自动化测试结果和真机证据只维护在对应的发布报告中，避免索引页复制易过期的
+测试数量与测量数据。当前仍未验证的场景统一登记在
+[已知限制](risks/Known-Limitations.md)；其中 `INCOMPLETE` 表示硬件验证证据不完整，
+不代表通过。
 
 ## 6. 阶段报告（不在本仓库）
 
