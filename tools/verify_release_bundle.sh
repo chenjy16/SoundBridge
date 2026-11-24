@@ -241,6 +241,21 @@ else
     echo "Note: no .app bundle next to the driver; skipped App/Host checks"
 fi
 
+# ── 9. The bundle carries its own license terms ─────────────────────────────
+#
+# PolyForm Noncommercial requires anyone who receives the software to receive
+# the terms, or their URL, and libASPL's and Sparkle's MIT terms require their
+# notices to travel with binary distributions. `create_app_bundle.sh` copies
+# both into Contents/Resources; this reads the finished bundle, so a bundle
+# assembled by hand or by an older script is caught here rather than shipped.
+if [[ -n "$APP_BUNDLE" && -d "$APP_BUNDLE/Contents/MacOS" ]]; then
+    for notice in LICENSE THIRD_PARTY_NOTICES.md; do
+        if [[ ! -s "$APP_BUNDLE/Contents/Resources/$notice" ]]; then
+            check_fail "Contents/Resources/$notice is missing; the bundle does not carry its own license terms"
+        fi
+    done
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 if (( failures > 0 )); then

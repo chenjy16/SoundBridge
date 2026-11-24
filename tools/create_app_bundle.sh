@@ -533,6 +533,30 @@ else
     echo "  No resources directory found at $RESOURCES_DIR"
 fi
 
+# Ship the license and the third-party notices with the bundle.
+#
+# The PolyForm terms require that anyone who receives the software also
+# receives the terms, or their URL, and libASPL's and Sparkle's MIT terms
+# require their notices to travel with binary distributions. A bundle without
+# both is a compliance defect, so a missing source file stops the build instead
+# of producing a bundle that quietly leaves the terms behind.
+echo "  Copying license and third-party notices..."
+for notice in LICENSE THIRD_PARTY_NOTICES.md; do
+    if [ ! -f "$PROJECT_ROOT/$notice" ]; then
+        echo "  Error: $notice is missing from the repository root." >&2
+        echo "   The bundle has to ship it; see THIRD_PARTY_NOTICES.md." >&2
+        exit 1
+    fi
+    cp "$PROJECT_ROOT/$notice" "$APP_PATH/Contents/Resources/$notice"
+    # Read the copy back: a file that did not survive the copy is as absent as
+    # one that was never there, and the next step would not notice either.
+    if [ ! -s "$APP_PATH/Contents/Resources/$notice" ]; then
+        echo "  Error: $notice did not survive the copy into the bundle." >&2
+        exit 1
+    fi
+done
+echo "  LICENSE and THIRD_PARTY_NOTICES.md copied"
+
 # Copy Sparkle framework
 echo "  Copying Sparkle.framework..."
 mkdir -p "$APP_PATH/Contents/Frameworks"
@@ -586,6 +610,8 @@ echo "  - SoundBridgeApp (main executable)"
 echo "  - SoundBridgeHost (audio engine)"
 echo "  - SoundBridgeDriver.driver (HAL driver)"
 echo "  - Presets (EQ configurations)"
+echo "  - LICENSE (PolyForm Noncommercial 1.0.0)"
+echo "  - THIRD_PARTY_NOTICES.md (libASPL and Sparkle terms)"
 echo ""
 echo "To test the bundle:"
 echo "  open $APP_PATH"

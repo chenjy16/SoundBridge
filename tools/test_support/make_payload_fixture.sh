@@ -98,6 +98,13 @@ plist "$APP_PLIST" LSMinimumSystemVersion 14.4
 /bin/cp "$WORK/stub" "$APP/Contents/MacOS/SoundBridgeHost"
 /bin/chmod 755 "$APP/Contents/MacOS/SoundBridgeApp" "$APP/Contents/MacOS/SoundBridgeHost"
 
+# The shipped bundle carries its license and its third-party notices; the
+# fixture does too, so the release guard's check for them is exercised on the
+# fixture instead of failing every case that runs the guard.
+for notice in LICENSE THIRD_PARTY_NOTICES.md; do
+    /bin/cp "$ROOT_DIR/$notice" "$APP/Contents/Resources/$notice"
+done
+
 # --- driver bundle ----------------------------------------------------------
 DRIVER="$APP/Contents/Resources/SoundBridgeDriver.driver"
 mkdir -p "$DRIVER/Contents/MacOS"

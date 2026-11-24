@@ -442,4 +442,6 @@ contact the copyright holder.
 Bundled third-party components keep their own licenses and are not covered by
 the PolyForm terms: libASPL is MIT (with Apple's sample-code licenses for the
 files it derives from) and Sparkle is MIT. Their notices must be preserved in
-redistributions.
+redistributions, and the downloads carry them: every bundle ships the license
+and [the third-party notices](THIRD_PARTY_NOTICES.md) in
+`SoundBridge.app/Contents/Resources/`.
