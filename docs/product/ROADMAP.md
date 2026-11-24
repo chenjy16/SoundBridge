@@ -27,10 +27,11 @@ manager.
 
 The roadmap is Free + Pro: essential system-wide processing stays in Free,
 while advanced processing and personalization are Pro candidates. Pro packaging
-remains undecided. The sequence is: stabilize and validate the current audio path; make the DSP Engine's existing parametric EQ usable; evaluate
-further DSP; add measurement-profile support only with clear data and licensing
-terms; then build device and listening profiles. Features remain proposals
-until they pass technical and user validation.
+remains undecided. The sequence is to stabilize and validate the current audio
+path; make the DSP Engine's existing parametric EQ usable; evaluate further
+DSP; add measurement-profile support only with clear data and licensing terms;
+then build device and listening profiles. Features remain proposals until they
+pass technical and user validation.
 
 ## 2. Vision and Positioning
 
@@ -578,6 +579,7 @@ is assumed.
 
 | Risk / question | Why it matters | Next evidence/action |
 |---|---|---|
+| Former roadmap conflicted with this strategy | Its historical plan promoted app-level volume as a paid MVP and Process Tap as future architecture. | This document is now the current product strategy; the former plan remains in Git history. |
 | Audio path still has unclosed validation items | Reliability is a prerequisite for sound-quality claims. | Prioritize Known-Limitations U-1, U-3/U-5, U-6/U-7, U-11/U-13, and Driver RT findings. |
 | DSP library capability exceeds current user-facing product | Users may infer supported controls or guarantees from the engine API. | Keep engine/API facts separate from app capability; trace and verify actual Host processing defaults before exposing controls. |
 | EQ settings per device may not be enough for model correction | Device identity, variants, and target curves can be ambiguous. | Prototype schema and matching without committing to a catalog. |
