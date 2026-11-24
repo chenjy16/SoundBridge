@@ -423,12 +423,23 @@ where open problems are tracked.
 
 ## License
 
-**No license is declared for this repository.** As of 1.2.0 there is no
-`LICENSE` file, and nothing in this project states terms under which the source
-or the binaries may be used, modified or redistributed. The source is public;
-that is not the same as being licensed.
+SoundBridge is **source-available, not open source**. The source, and the
+binaries built from it, are licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). You may read, run, modify and
+share them for any noncommercial purpose: personal use, study, hobby projects,
+research, and use by charities, educational institutions, public research
+bodies, public safety and health bodies, and government institutions.
 
-If you need a license to use SoundBridge, treat the current state as
-"all rights reserved" until the project adds one. Do not assume MIT, Apache-2.0
-or any other license, and do not redistribute the artifacts on the assumption
-that one applies.
+Commercial use is not granted by that license. Shipping SoundBridge in a
+product, using it in paid work, or selling it requires a separate written
+license from the copyright holder.
+
+The license applies to this repository from the commit that added it onward.
+Releases published before it, up to and including v1.2.0, were published
+without a license grant; if you need terms covering one of those versions,
+contact the copyright holder.
+
+Bundled third-party components keep their own licenses and are not covered by
+the PolyForm terms: libASPL is MIT (with Apple's sample-code licenses for the
+files it derives from) and Sparkle is MIT. Their notices must be preserved in
+redistributions.
