@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | **未发布**。本文只记录工作树中的实现与证据 |
+| 状态 | **未发布**。本文只记录工作树中的实现与证据；2026-11-24 的真机与文档修订见 §6.4.1 |
 | 日期 | 2026-11-22 |
 | 仓库 | `/Users/chenjianyu/CodeGeeXProjects/SoundBridge` |
 | HEAD | `fc09aee` — *Release 1.2.0: unsigned distribution workflow*（`tag: v1.2.0`, `origin/main`） |
@@ -371,6 +371,30 @@ Swift gate（8 例）：脚本删除的路径与 `DriverUninstallPolicy` 一致�
 - App 重启 / Host 重启 / 驱动重连后 EQ 数值与听感保持（P1-2）；
 - 真实卸载 → 系统设备消失 → 重装 → 恢复（P1-3）；
 - 双击 PKG 的 Gatekeeper 批准路径、Intel Mac、macOS 13/14。
+
+### 6.4.1 修订（2026-11-24）：真机结果与后续文档改写
+
+§6.4 写于 2026-11-22，当时确实没有真机操作。2026-11-23 在验证机（macOS 27.2.1,
+arm64，SIP 与 Gatekeeper 开启）上补做了观测，结论以
+[RELEASE_NOTES](../RELEASE_NOTES.md) §4.2 / §4.3 为准：
+
+| 项 | 2026-11-23 结果 |
+|---|---|
+| P1-1 无播放会话时的音量/静音提交 | 已测：写 0.55 被设备量化为 0.5625，`state_revision` 2 → 3，重启后仍为 0.5625；静音走独立 revision |
+| P1-2 EQ 持久化 | 已测：Bass 11.7 → 4.9 dB 落盘为 4.913412，重开 App 后界面仍为 4.9 |
+| P1-3 卸载 → 重装 | 已测：真实卸载退出 0，四态分列，`coreaudiod` 与 helper 均未重启；用 1.2.0 发布 PKG 重装后驱动、代理设备与音量恢复 |
+| 双击 PKG 的 Gatekeeper 批准路径、Intel Mac、macOS 13/14 | **仍未执行** |
+| 硬件实时 30 分钟 | 已执行一次；harness 判定 `INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING`（C6、C8 未执行），见 [Known-Limitations](../risks/Known-Limitations.md) §2C |
+
+§6.5 描述的文档改动也已被 1.2.1 定稿取代：`RELEASE_NOTES.md` 整篇重写为 1.2.1（不再有
+「没有 1.2.1 发布」的提示），`INSTALLATION_GUIDE.md` 的版本、许可与卸载章节同步到 1.2.1，
+`docs/README.md` §4 改为「1.2.0 上传件的历史哈希 + 1.2.1 定稿状态」。本节以上原始结论
+保留不改。
+
+同日 `VERSION` 由 `1.2.0` 改为 `1.2.1`，`tools/update_versions.sh 1.2.1` 同步了 App /
+Driver / Host 的 `Info.plist`、驱动 `VERSION` 与驱动 `CMakeLists.txt`，
+`verify_version_consistency.sh --expect 1.2.1` 的 13 个源全部 PASS。§8 记录的是
+2026-11-22 的状态：协议版本、头大小、Bundle ID 与部署目标在这次改动中都没有变。
 
 ### 6.5 文档改动（Stage H）
 

@@ -10,7 +10,7 @@
 
 <p align="center">
   <b>Volume control and EQ for HDMI / DisplayPort displays on macOS</b><br>
-  <sub>1.2.0 · macOS 13+ · universal · unsigned build: not notarized, no auto-update</sub>
+  <sub>1.2.1 · macOS 13+ · universal · unsigned build: not notarized, no auto-update</sub>
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@ device plus a small background host process.
 
 ![Four steps: download the PKG, double-click and approve the admin prompt, allow it once in Privacy and Security, then select the SoundBridge output](docs/images/install-first-run.svg)
 
-1. **Download [`SoundBridge-1.2.0.pkg`](https://github.com/chenjy16/SoundBridge/releases)**
+1. **Download [`SoundBridge-1.2.1.pkg`](https://github.com/chenjy16/SoundBridge/releases)**
    — the package carries the app **and** the HAL driver. (The DMG carries the app
    only and never writes to `/Library/Audio/Plug-Ins/HAL/`.)
 2. **Double-click the package** and approve the administrator prompt. Quit
@@ -59,7 +59,7 @@ see [Unsigned distribution](#unsigned-distribution).
 Upgrading from 1.1.x **must** use the PKG: the shared-memory protocol changed to
 `0x00020200`, and an old driver paired with the new app produces no audio.
 
-> Step 3 is Apple's documented path for unsigned software. The 1.2.0 validation
+> Step 3 is Apple's documented path for unsigned software. Both validation rounds
 > ran the install from the `installer` command line, so the exact dialog sequence
 > is documented here rather than measured — see
 > [Verification status](#verification-status). Troubleshooting, uninstall and
@@ -77,7 +77,7 @@ protocol, SoundBridge works through a system-level virtual audio device — so i
 takes effect even when the TV, an older monitor or a dock has no hardware volume
 control at all.**
 
-| | DDC/CI tools (e.g. MonitorControl) | SoundBridge 1.2.0 |
+| | DDC/CI tools (e.g. MonitorControl) | SoundBridge 1.2.1 |
 |---|---|---|
 | Where the volume is applied | In the display, via DDC/CI commands over the video cable | In software, inside the audio path |
 | Display must support DDC/CI volume | Yes | No — nothing is asked of the display |
@@ -86,7 +86,7 @@ control at all.**
 | Kernel extension | None | None |
 
 The comparison is about how each tool controls volume. DDC/CI tools do things
-1.2.0 does not — brightness, contrast, input switching — and are the better
+1.2.1 does not — brightness, contrast, input switching — and are the better
 choice when your display does implement DDC/CI and you want the change made on
 the hardware side.
 
@@ -104,7 +104,7 @@ in the kernel.
 
 ## Features
 
-Implemented in 1.2.0:
+Implemented in 1.2.1:
 
 - **System-wide volume control** for fixed-volume HDMI/DisplayPort outputs. The
   slider and the keyboard volume keys act on the display.
@@ -134,7 +134,7 @@ Implemented in 1.2.0:
 - **No kext, no privileged daemon.** The driver is a user-space AudioServerPlugIn
   loaded by `coreaudiod`; the Host runs as your user.
 
-Not in 1.2.0 — do not expect these:
+Not in 1.2.1 — do not expect these:
 
 - EQ presets, per-band frequency/Q editing, or spectrum displays. The EQ is three
   macro controls over a fixed 10-band layout.
@@ -198,12 +198,12 @@ All published artifacts are on GitHub Releases:
 
 <https://github.com/chenjy16/SoundBridge/releases>
 
-For 1.2.0 (released 2026-11-21) the release carries:
+For 1.2.1 the release carries:
 
 | File | Contents | Use it when |
 |---|---|---|
-| `SoundBridge-1.2.0.pkg` | App **and** HAL driver | First install, or any upgrade. This is the supported path. |
-| `SoundBridge-1.2.0.dmg` | App only | You only want to replace the app. It never writes to `/Library/Audio/Plug-Ins/HAL/`. |
+| `SoundBridge-1.2.1.pkg` | App **and** HAL driver | First install, or any upgrade. This is the supported path. |
+| `SoundBridge-1.2.1.dmg` | App only | You only want to replace the app. It never writes to `/Library/Audio/Plug-Ins/HAL/`. |
 | `SHA256SUMS.txt` | Checksums of the files above | Verifying the download |
 
 Check a download before installing:
@@ -241,9 +241,9 @@ Full steps, troubleshooting and rollback:
 
 ## Unsigned distribution
 
-Read this before installing. It is the honest description of what 1.2.0 is:
+Read this before installing. It is the honest description of what 1.2.1 is:
 
-- 1.2.0 does **not** use a Developer ID certificate.
+- 1.2.1 does **not** use a Developer ID certificate.
 - It does **not** use an ad-hoc signature. There is no explicit `codesign --sign`
   step anywhere in the build or the release workflow.
 - It is **not** notarized by Apple. No `notarytool`, no stapling.
@@ -291,6 +291,42 @@ will accept the software.
 
 ## Verification status
 
+### 1.2.1
+
+The automated suites were run on the release tree and all passed: Host 411 tests
+(10 skipped), App 298, DSP 1 `ctest` target, driver 3, install transaction 168,
+uninstall lifecycle 99, unsigned policy 97, release payload 244. The uninstall
+suite runs the real script against a temporary root.
+
+On the validation machine, each of the three fixed defects was checked by hand:
+
+- **OBS-1** — a volume written as 0.55 (which the device quantises to 0.5625) is
+  read back, committed (`state_revision` 2 → 3), and still 0.5625 after an app
+  restart; mute commits on its own revision.
+- **OBS-2** — Bass dragged 11.7 dB → 4.9 dB is stored as 4.913412, and the panel
+  still reads 4.9 dB after quitting and reopening the app.
+- **OBS-3** — a real uninstall reports the four facts separately and exits 0:
+  files removed, no Host running, no IPC files left, receipt kept, `coreaudiod`
+  never signalled. Neither the helper nor `coreaudiod` restarted. Reinstalling
+  with the published 1.2.0 PKG restored the driver, the proxy device and its
+  volume.
+
+A 30-minute realtime run (169,686 callbacks, 0 over budget, max 322 µs, p99
+72–74 µs, 0 underruns) carries the harness verdict **`INCOMPLETE — REQUIRED
+HARDWARE EVIDENCE MISSING`**. It is quoted that way on purpose: device-removal
+recovery and the in-run default-output restore marker were never exercised, and
+`p99.9` is not observable. It supports "no callback exceeded its deadline on this
+device at this format under this load" and nothing more. Teardown after the run
+was clean — the Host exited with the app, both proxies went away, both mappings
+and the control file were removed, the default output was unchanged and
+independently re-read, and neither `coreaudiod` nor the driver process restarted.
+
+**Still unverified in 1.2.1:** sample-rate and buffer-size matrices, device
+removal while playing, the subjective EQ result, and thermally stressed runs. The
+full record is [the release notes](docs/RELEASE_NOTES.md) §4 and §5.
+
+### 1.2.0
+
 **Verified on the release validation machine** (macOS 27.2.1, arm64, SIP and
 Gatekeeper both enabled, no signing of any kind):
 
@@ -323,10 +359,8 @@ Gatekeeper both enabled, no signing of any kind):
   universal, but only Apple silicon has been run.
 - Multi-device concurrency, playback longer than 31 minutes, and low-buffer or
   high-load conditions.
-- EQ persistence across restarts, which currently does not behave as expected —
-  see OBS-2 in [Known limitations](docs/risks/Known-Limitations.md). The 1.2.1
-  fixes described under [Project status](#project-status) address this; they have
-  not been re-measured.
+- EQ persistence across restarts — this was the 1.2.0 defect OBS-2. 1.2.1 fixes
+  it and the fix was re-measured on a display; see [1.2.1](#121) above.
 
 Every number above is a measurement from that one machine on that one day. It is
 evidence that the release works, not a performance guarantee for other
@@ -341,13 +375,13 @@ Open issues and untested areas are tracked in
 |---|---|
 | [docs/README.md](docs/README.md) | Index of all engineering documentation |
 | [INSTALLATION_GUIDE.md](docs/INSTALLATION_GUIDE.md) | Install, verify, troubleshoot, uninstall, roll back |
-| [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | What changed in 1.2.0, upgrade notes |
+| [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) | What changed in 1.2.1, upgrade and downgrade notes |
 | [Architecture](docs/architecture/SoundBridge-1.2.0-Architecture.md) | Components, shared memory, ring buffer, admission, retirement, recovery |
 | [Engineering notes](docs/engineering/) | Ring buffer contract, CallbackGate memory model, mapping retirement, shared-memory lifecycle |
 | [DEVELOPMENT_GUIDE.md](docs/development/DEVELOPMENT_GUIDE.md) | Toolchain, build, test, troubleshooting, contribution rules |
 | [Known limitations](docs/risks/Known-Limitations.md) | Known defects, known limits, untested areas, environment risks |
 | [Final release report](docs/release/SoundBridge-1.2.0-Final-Release-Report.md) | 1.2.0 release evidence: hashes, install, driver load, functional and stability results |
-| [1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md) | The three P1 fixes in the unreleased 1.2.1 work: root cause, tests, commands run, and what is still unverified |
+| [1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md) | The three 1.2.0 defects and how 1.2.1 closes them: root cause, tests, commands run, and what is still unverified |
 | [Post-release validation addendum](docs/release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md) | What was verified after publication, and what was not |
 | [Release checklist](docs/release/SoundBridge-1.2.0-Release-Checklist.md) | What has to be checked before a release |
 
@@ -390,32 +424,36 @@ Two rules matter when changing this codebase:
 
 ## Project status
 
-1.2.0 was released on 2026-11-21 and validated end to end on one machine, as
-described above. The unsigned distribution is a deliberate, permanent choice for
-this project — not a beta marker — and is documented rather than worked around.
+1.2.1 is a maintenance release: no new features, no new dependencies, and no
+protocol change (`0x00020200` is what 1.2.1 speaks, as it was for 1.2.0). It fixes
+the three defects 1.2.0 shipped with, and each fix was re-measured on a display —
+see [Verification status](#verification-status). 1.2.0 was released on 2026-11-21
+and validated end to end on one machine, as described under 1.2.0 above. The
+unsigned distribution is a deliberate, permanent choice for this project — not a
+beta marker — and is documented rather than worked around.
 
-Open items at release time, none of them release blockers:
+Fixed in 1.2.1:
 
-- OBS-1 — volume/mute writes can fail to commit when there is no I/O client
-  window open; re-setting them during playback works (observed twice).
-- OBS-2 — EQ slider values are not persisted across an app restart; runtime EQ
-  control works.
-- OBS-3 — uninstalling leaves the PKG receipt and installer state behind and does
-  not restart `coreaudiod`.
-- OBS-4 — PKG/DMG packaging is not byte-reproducible, although the binaries are.
-- Device removal/re-enumeration and the Gatekeeper GUI approval path are untested.
+- **OBS-1** — volume/mute writes could fail to commit when there was no I/O client
+  window open. Writes are now read back and the accepted state is committed to
+  shared memory, so setting them during playback is no longer required.
+- **OBS-2** — EQ slider values were not persisted across an app restart. The last
+  drag is now persisted per device.
+- **OBS-3** — uninstalling left the Host running and the runtime IPC files behind.
+  The uninstaller now stops only its own Host and releases those files.
 
-**Fixes exist, but none of them is in a download yet.** OBS-1, OBS-2 and OBS-3
-have fixes in the 1.2.1 working tree: volume and mute writes are read back and the
-accepted state is committed to shared memory, the last EQ drag is persisted per
-device, and the uninstaller stops only its own Host and releases the runtime IPC
-files. None of it has been released or re-measured on a display, and `VERSION`,
-the bundle versions, the package version and the shared-memory protocol are
-unchanged — so **1.2.0 as published behaves exactly as described above**. The
-changes, the tests that cover them, every command that was run and every item
+Still open, unchanged by 1.2.1:
+
+- **OBS-4** — PKG/DMG packaging is not byte-reproducible, although the binaries
+  are.
+- Device removal and re-enumeration while playing, the Gatekeeper GUI approval
+  path, sample-rate and buffer-size matrices, and the subjective EQ result are
+  untested.
+
+The changes, the tests that cover them, every command that was run and every item
 still marked `NOT VERIFIED` are in the
-[1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md).
-OBS-4 and the untested areas are unchanged.
+[1.2.1 product-quality report](docs/release/SoundBridge-1.2.1-Product-Quality-Report.md)
+and [the release notes](docs/RELEASE_NOTES.md).
 
 There is no committed roadmap. Issues and measurements are recorded in
 [Known limitations](docs/risks/Known-Limitations.md), which is the single place

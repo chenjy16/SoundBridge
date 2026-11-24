@@ -1,403 +1,360 @@
-# SoundBridge 1.2.0 — Release Notes
+# SoundBridge 1.2.1 — Release Notes
 
-发布日期：2026-11-21（GitHub Releases）
-发布类型：**正式发布（完全未签名、未公证；首次启动需按安装指南手动放行）**
-协议版本：`0x00020200`（131584）
+Published with the GitHub release for tag `v1.2.1`; the release page carries the date.
+Release type: **maintenance release — unsigned and not notarized, same policy as 1.2.0**
+Package version: `1.2.1` · App ↔ driver protocol: `0x00020200` (131584), **unchanged**
 
-> **There is no 1.2.1 release.** Work on three P1 items exists in the working tree
-> and is described at the bottom of this file under
-> ["1.2.1 (unreleased)"](#121-unreleased). The 1.2.0 notes below are unchanged, and
-> no 1.2.0 validation result is restated or revised there.
+Written in English because this file is published as a release asset.
 
 ---
 
-## 0. 这份文档怎么读
+## 0. How to read this document
 
-每条结论都带证据等级。同一个功能可以有多个等级，只有最高等级的那句话才算「已验证」。
+Every claim carries an evidence level. A feature can have several; only the strongest
+one is what a sentence may rely on.
 
-| 等级 | 含义 |
+| Level | Meaning |
 |---|---|
-| **REAL_MACOS_VERIFIED** | 在真实 macOS 上、用真实构建产物、按用户路径执行并记录输出 |
-| **TEST_VERIFIED** | 自动化测试覆盖并通过（单元/集成/脚本断言） |
-| **SOURCE_VERIFIED** | 只读源码、脚本、产物结构确认，未运行 |
-| **NOT_VERIFIED** | 没有任何证据；本文不暗示它可用 |
+| **REAL_MACOS_VERIFIED** | Run on a real macOS machine with real build artifacts, following the user's path, with the output recorded |
+| **TEST_VERIFIED** | Covered by an automated suite that passes |
+| **SOURCE_VERIFIED** | Read from source, scripts or artifact structure; not run |
+| **NOT_VERIFIED** | No evidence. Nothing in this document implies it works |
 
-**本版本已完成首次真机验证。** P4 Batch 3A 在真实 macOS 27.2.1 上按用户路径完成了
-PKG 安装 → 启动 → 播放 → 音量 / Mute / EQ → 30 分钟基线共 8 项验证（见 §4.1）。
-那次验证用的是**带 ad-hoc 签名的 RC**；P4 Batch 7 改为完全未签名后，尚未在新产物上
-重跑，故 §4.1 中与签名有关的结论带明确归属标注。
-仍未验证的事项（卸载/重装闭环、热插拔、低 buffer、8 小时、多设备、14.4、x86_64、
-未签名驱动的实际加载）在 §5 逐条列出。**不得**把本版本描述为「音频质量已通过测量」——
-EQ 只有用户主观听感确认，没有频响/相位数据。
+Numbers are measurements from one machine on one day. They are evidence that this
+release works there, not a performance guarantee for other hardware, other sample
+rates, or a longer session.
 
----
-
-## 1. 这一版是什么
-
-1.2.0 是第一个**同时分发 App 和 HAL 驱动**的版本。此前只分发 App 的 DMG，重装 App
-并不能替换 `/Library/Audio/Plug-Ins/HAL/` 里的驱动，于是「装了新版、驱动还是旧版」
-在用户侧无法自查。
-
-两条渠道，用途不同：
-
-| 文件 | 内容 | 用途 |
-|---|---|---|
-| `SoundBridge-1.2.0.pkg` | App + 驱动 | **安装与升级的唯一受支持路径** |
-| `SoundBridge-1.2.0.dmg` | 仅 App | 只替换 App，或查看包内容 |
-
-两个包都是 **完全未签名**：没有 Developer ID 签名，没有 ad-hoc 签名，PKG 没有签名，
-整个发布没有经过 Apple notarization。`spctl` 对两者都报
-`rejected / source=no usable signature`，这是设计上的预期状态，不是构建失败。首次运行
-App 与 PKG 都需要一次手动放行，步骤见
-[INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) 第 5 节。
-
-本项目没有 Apple Developer Program 账号，因此**不提供也不会提供**任何签名或公证版本。
-唯一残留在二进制里的签名是链接器写入的 ad-hoc CodeDirectory（Apple silicon 要求它
-存在才能加载代码，见 [Known-Limitations](risks/Known-Limitations.md) L-13）。
+What 1.2.1 does **not** claim: that the audio path has been measured for frequency
+response or phase, that every sample rate and buffer size has been exercised, or that
+the app has been run on Intel Macs or on macOS 13/14. Section 5 lists the gaps
+individually.
 
 ---
 
-## 2. 从 1.1.x 升级
+## 1. This release
 
-**用 PKG，不要用 DMG。**
+1.2.1 is a maintenance release. It closes the three defects reported against 1.2.0
+(OBS-1 – OBS-3), closes a twenty-finding audit of the DSP core, and makes the
+shared-memory API refuse an invalid mapping instead of reporting it healthy. There
+are no new features, no protocol change, and no change to the install layout.
 
-协议从 `0x00020000` / `0x00020100` 变更到 `0x00020200`。旧驱动配 1.2.0 的 App 不会
-出声：App 会显示一条版本/协议不匹配的说明（只有文字，没有「一键修复」，也没有安装
-按钮），但不会自行替换驱动。
+It is also the first release that ships a license. 1.2.0 was published without one;
+1.2.1 ships `LICENSE` (PolyForm Noncommercial 1.0.0) and `THIRD_PARTY_NOTICES.md`
+inside the bundle — see §3.7.
 
-PKG 的 preinstall 在写入任何文件之前做版本门禁：
-
-| 已装状态 | 结果 |
-|---|---|
-| 更旧（含 1.1.2，没有 `SBAudioProtocolVersion` 键） | 升级，继续 |
-| 相同 | 重装，继续 |
-| 更新 | 拒绝，未写入任何文件 |
-| 协议更新 | 拒绝，不降级线格式 |
-| 声明了不认识的协议 | 拒绝 |
-
-安装前请退出 SoundBridge（见 [Known-Limitations](risks/Known-Limitations.md) P2-5：
-安装器不检查 App/Host 是否在运行）。
+**Install this over 1.2.0 with the PKG.** The preinstall gate compares bundle id,
+then protocol, then version: the protocol is identical and `1.2.1 > 1.2.0`, so the
+install is an in-place upgrade. The DMG cannot replace the driver and is not an
+upgrade path.
 
 ---
 
-## 3. 新增与变更
+## 2. Upgrade, downgrade, coexistence
 
-### 3.1 安装器（PKG）
+### 2.1 From 1.2.0
 
-- App 与驱动一起安装，驱动不再依赖用户手动拷贝。
-- 驱动替换是事务：校验载荷 → 暂存 → 校验副本 → 备份旧驱动 → 重命名换位 → 再次校验；
-  任一步失败则回滚，旧驱动保留或还原（`SOURCE_VERIFIED`，`tools/sb_install_transaction.sh`）。
-- 安装器与 App 都**不再** `killall coreaudiod`（`SOURCE_VERIFIED`）。
-- 静态校验：`make verify-installer-pkg`、`make verify-pkg`（`TEST_VERIFIED`）。
+Supported and tested as a path (`tools/test_installer_preinstall.sh` runs the
+package's own preinstall against temporary roots with a 1.2.0 driver present).
 
-### 3.2 App 不再自己安装驱动（P4 Batch 1A）
+1. Quit SoundBridge from the menu bar. A running Host keeps its old mapping after the
+   driver is replaced, until it exits on its own.
+2. Install `SoundBridge-1.2.1.pkg`.
+3. Your EQ and volume settings are kept: 1.2.1 reads the four per-band keys 1.2.0
+   wrote, migrates them into one dictionary per device, and re-sends the values to the
+   DSP on launch instead of waiting for a slider to move.
 
-这是 1.2.0 最重要的安全收敛：
+### 2.2 From 1.1.x
 
-- 删除 App 内的特权安装事务（`osascript` + `rm -rf`/`cp -R`/`mv` + `killall coreaudiod`）。
-  它无法回滚、会在磁盘写满时留下半份 bundle，并让所有进程的音频中断。
-- Onboarding 改为**引导用户打开正式 PKG**：定位同目录下的 `SoundBridge-*.pkg`，找不到
-  时指向 Release 页面，都没有时只说明文件名。
-- 安装成功后由 `DriverVersionGate` 读取文件系统判定，**App 不会在未验证结果时显示
-  安装成功**；从 Installer 返回后自动重查一次。
-- 全 App 源码中只剩**一条**特权命令（卸载），由单元测试逐文件锁定
-  （`DriverInstallBoundaryTests`，`TEST_VERIFIED`）。
+Unchanged from 1.2.0: the PKG is mandatory. The shared-memory protocol moved to
+`0x00020200` in 1.2.0, and an old driver paired with a new app produces no audio.
 
-### 3.3 统一卸载政策（P4 Batch 1A）
+### 2.3 Downgrading to 1.2.0
 
-App 内「Uninstall Driver」与 `tools/uninstall_driver.sh` 现在执行同一套政策
-（`DriverUninstallPolicy`）：
+`KNOWN` — 1.2.1 stores each device's EQ as one dictionary under
+`eq_<deviceUID>_state` and no longer writes 1.2.0's four keys. A 1.2.0 app therefore
+restores the last values **1.2.0** saved, not the ones you set in 1.2.1. Nothing is
+destroyed — the 1.2.1 dictionary stays in preferences, and upgrading again restores
+the newer values. Recorded as B-1 in
+[Known limitations](risks/Known-Limitations.md).
 
-| 规则 | 之前（App） | 现在（两者一致） |
-|---|---|---|
-| 删除前校验 `CFBundleIdentifier` | 不校验 | 必须为 `com.soundbridge.driver` |
-| 符号链接 | 直接 `rm -rf` | 拒绝 |
-| 删除范围 | HAL 路径 + `/tmp/soundbridge-*` 通配符 | 只删一个常量路径 |
-| 重启 `coreaudiod` | 无条件 `killall` | **从不**，只给出手动建议 |
-| Host 退出 | `killall SoundBridgeHost` | 先 `shutdown(intent: .uninstall)` 并等待 |
-| 卸载中 Host 被重启 | 可能 | supervisor 已上锁，不会 |
-| 删除后确认 | 无 | 路径消失才算成功 |
-
-保留：EQ 设置、音量状态、日志、App 本身。删除：驱动 bundle、引导状态。
-UI 确认框逐条列出这两组内容，文案与政策同源（`TEST_VERIFIED`）。
-
-### 3.4 HostSupervisor
-
-App 侧的 Host 生命周期由一个 supervisor 独占：启动、watchdog、退出、重启、去重。
-
-- Host 退出不再导致 App 退出（旧实现在 termination handler 里 `NSApp.terminate`）。
-- 状态机：`starting` → `running(pid:)` → `degraded` / `stopped`，并上报菜单栏。
-- 启动有 6.0 s watchdog：进程活着但没拿到实例锁会被终止，而不是被当作健康。
-- 有单元测试覆盖启动、超时、退避、降级与并发请求（`TEST_VERIFIED`）。
-
-### 3.5 Host-only Restart
-
-新增菜单项与 `HostRestartEntry` 闸门：只重启 Host，不重启 App、不重启 `coreaudiod`。
-
-- 卸载中、App 终止中、卸载进行中一律拒绝重启。
-- 重启请求合并，不会出现两个 Host 争锁。
-- 在真实 macOS 上执行过一次完整闭环（退出 → 重新拉起 → 拿锁 → 恢复音频路径），
-  `REAL_MACOS_VERIFIED`，范围仅限 Host 进程重启，不含真实音频听感。
-
-### 3.6 EQService
-
-App 的 EQ 只有一个写者。之前 `EQController` 由多个视图各自持有，最后写入者获胜，
-Host 的 `eq_sequence` 与实际值可能不一致。
-
-- `EQService.shared` 在 `SharedMemoryMappingManager.start()` 之前创建，先于任何视图。
-- 所有视图读写同一份状态，写入按序发布到共享内存（`TEST_VERIFIED`：
-  `EQLifecycleOwnershipTests`）。
-
-### 3.7 SharedMemoryMappingManager
-
-把「映射的 attach/retire/unmap」从视图与回调中抽出来，交给一个拥有队列的单一所有者。
-
-- 每代 mapping 只 unmaps 一次，且不在写者线程上 unmaps。
-- 停止时排空队列后才返回。
-- 卸载/退役不会排在自身后面（无自死锁）。
-- 覆盖并发租约、末次租约释放、退役后写入等场景（`TEST_VERIFIED`：
-  `SharedMemoryMappingManagerTests`、`SharedMemoryMappingUnmapThreadTests`、
-  `SharedMemoryMappingConcurrencyTests`）。
-
-### 3.8 EQ Mapping 自动恢复
-
-Host 重新发布映射（重启、CoreAudio 恢复）后，App 会把当前 EQ 重新写入新映射，而不是
-停在 `eq_sequence = 0`。
-
-- 触发点：`mappingPublished` + 版本/代际比对，不依赖视图是否打开。
-- 恢复失败会记录并保留 UserDefaults 中的值，下次发布再试。
-- 覆盖首次发布、Host 重启、代际变化与写失败重试（`TEST_VERIFIED`：
-  `EQRecoveryTests`）。
-
-### 3.9 Default Output 治理
-
-新增 `DefaultOutputHAL` / `DefaultOutputOwnership` / `DefaultOutputSwitch`：
-
-- 明确记录「默认输出设备由谁拥有」，避免 App 与系统设置互相覆盖。
-- 切换默认输出只在用户显式操作时发生，并有所有权校验；Host 不会隐式切走用户的设备。
-- 覆盖所有权判定、切换失败、设备消失与并发切换（`TEST_VERIFIED`：
-  `DefaultOutputGovernanceTests`、`DefaultOutputTrackingTests`、`DefaultOutputSwitchTests`）。
-
-### 3.10 RT 可观测性与渲染安全
-
-- 新增 `RFRealtimeTelemetry`：回调内只做无锁计数，读侧汇总。
-- `AudioRenderer` 去掉渲染回调内的字典锁、一次性分配与 `print`（H-1 – H-3 的主要部分）。
-- 覆盖回调计数、无分配路径与观测读侧（`TEST_VERIFIED`：`AudioRendererRTSafetyTests`、
-  `RTObservabilityTests`）。
-
-### 3.11 安装器与发布检查器
-
-- `verify_installer_pkg.sh`：载荷布局、preinstall 烘焙的版本/协议、事务脚本字节一致、
-  postinstall 交接（36 场景 / 168 断言，`TEST_VERIFIED`）。
-- `verify_pkg_contents.sh` / `verify_dmg_contents.sh` / `verify_release_payload.sh`：
-  三/四向驱动一致性、架构、Sparkle 结构、Host 版本证据。
-- `test_release_payload.sh`：先做破坏再断言检查器失败（244 断言，`TEST_VERIFIED`）。
-  本版本起使用**合成 fixture**，不再依赖 `dist/` 中任何历史发布产物。
-- `test_unsigned_release.sh`：68 项未签名发布策略检查（`TEST_VERIFIED`）。前半段静态
-  断言 workflow / Makefile / `tools/` 中不存在任何签名、公证或 appcast 调用；后半段用
-  临时 fixture 断言两个检查器**确实拒绝**已签名、带 `SUPublicEDKey` 或带 appcast 的
-  产物。取代了 1.1.x 的 `test_codesign_args.sh`（该脚本随签名功能一起删除）。
-- `verify_signatures.sh` / `verify_unsigned_release.sh`：断言产物未签名 —— bundle 未
-  封印、无签名身份、`SUPublicEDKey` 为空、PKG 无签名、DMG 无签名、无 appcast。前者在
-  `make verify` 中，后者在 release workflow 的 `Verify Unsigned Release` 步骤中执行。
-- `create_app_bundle.sh`：不再接受 `SPARKLE_ED_PUBLIC_KEY`。这个变量一旦被继承（旧的
-  CI secret、残留的 shell），更新通道会被悄悄重新启用，所以现在直接失败（exit 1），
-  并把 bundle 内的 `SUPublicEDKey` 强制置空后复查。
+Volume and mute survive a downgrade: they live in the shared-memory state block and
+in `volume-state.json`, whose shape did not change.
 
 ---
 
-## 4. 当前验证规模
+## 3. What changed
 
-以下数字来自 1.2.0 源码在当前工作区的实际运行结果。
+### 3.1 Volume and mute commit without a playback session (OBS-1)
 
-| 套件 | 规模 | 等级 |
-|---|---|---|
-| Host（`swift test`，`packages/host`） | **379 tests / 0 failures** | TEST_VERIFIED |
-| App（`swift test`，`apps/mac/SoundBridgeApp`） | **253 tests / 0 failures** | TEST_VERIFIED |
-| DSP（`make test-dsp`） | **33 tests** | TEST_VERIFIED |
-| 安装器静态检查 | **36 scenarios / 168 assertions** | TEST_VERIFIED |
-| 未签名发布策略 | **68 checks** | TEST_VERIFIED |
-| 发布载荷破坏测试 | **244 assertions**（含合成 fixture 构建） | TEST_VERIFIED |
-| 安装事务 / 安装门禁 | `make test-install-transaction`、`make test-installer-gate` | TEST_VERIFIED |
-| Protocol 布局与四份头副本 | `make protocol-check`、`tools/sync_shared_header.sh --check` | TEST_VERIFIED |
+At 1.2.0 a volume or mute write could return success and still not be in effect. The
+driver installs the volume control's committed value during `OnStartIO`, so a change
+made while nothing was playing stayed in the HAL control and the next playback
+handshake could adopt the older value; the UI had already moved.
 
-阶段的验证报告与批次记录不随仓库发布；上表数字的复现命令见
-[development/DEVELOPMENT_GUIDE.md](development/DEVELOPMENT_GUIDE.md)。
-
-上表数字于 2026-11-21 在提交 `710101c` 上重新实测：Host `swift test` 379 tests / 0 failures
-（rc=0），App `swift test` 253 tests / 0 failures（rc=0）。
-
-### 4.1 真实环境验证（P4 Batch 3A，2026-11-21，macOS 27.2.1）
-
-> **证据归属**：下表取自 P4 Batch 3A 的 RC 构建，该构建当时仍带 **ad-hoc 签名**。P4
-> Batch 7 已把发布策略改为完全未签名，**本表未在未签名产物上重跑**。第 3 行与第 5 行
-> 的签名相关描述只描述当时那个 RC，不适用于当前发布物；当前发布物的签名状态由
-> `tools/verify_signatures.sh` 与 `tools/verify_unsigned_release.sh` 断言，见 §3.11。
-
-| # | 项目 | 结果 | 关键证据 |
-|---|---|---|---|
-| 1 | RC 产物完整性 | PASS | PKG `42ae57b1…` / DMG `4d5da867…`；装后逐文件 diff 0 |
-| 2 | PKG 首次安装事务 | PASS | 首次安装分支命中；receipt 1.2.0 @19:24:02；`protocol 131584` |
-| 3 | 首次启动 / Gatekeeper | PASS（首启未被拦截） | 无 quarantine 属性；`spctl` rejected 为未公证的预期结果，**不宣称通过 Gatekeeper** |
-| 4 | App / Host / HAL 启动 | PASS | App 7693 → Host 7695（PPID 正确）；驱动由 `coreaudiod` 加载 |
-| 5 | 安装后签名完整性 | PASS（**仅对带 ad-hoc 签名的 RC**） | deep-strict 校验 exit 0；`TeamIdentifier=not set`。当前未签名产物上该检查必然失败，这是新策略下的预期值，不再作为发布门禁 |
-| 6 | 真实设备识别 | PASS | 两个代理设备，48 kHz / virtual |
-| 7 | 音量 / Mute / EQ | PASS | 音量 13 档轨迹；Mute 双向跳变 + 人耳确认；`eq_sequence` 2→14 |
-| 8 | 30 分钟播放基线 | PASS | **播放区间** underrun 增量 0、overrun 0、overBudget 0、max 120 µs、RSS 不增长 |
-
-边界：本表不等于卸载/重装、热插拔、`coreaudiod` 重启、低 buffer、8 小时、14.4、
-x86_64 通过；这些仍在 §5 列为未验证。计数器本身不区分空闲与播放期（Batch 3B O-3），
-因此本表只引用播放区间内的增量。**切换为未签名发布后，第 1–4、6–8 行的结论需要在新
-产物上重新取证（P-9）。**
-
----
-
-## 5. 明确未验证的事项
-
-下列事项仍缺真实环境证据。已取得部分证据的条目在「说明」中注明来源；未注明者即
-「还没有数据」。
-
-| 编号 | 未验证事项 | 说明 |
-|---|---|---|
-| **N-1** | **实际 EQ 听感** | 已有用户主观听感确认（Batch 3A §10：各频段调整与 Reset 可听辨、符合预期，30 分钟播放无爆音/断续）；**没有频响 / 相位 / 削波测量**，旁通/启用切换未单独取证。**不得**声称音质已通过测量。 |
-| **N-2** | **播放窗口 underrun** | 默认 buffer 下已有 30 分钟基线：underrun 增量 0、overrun 0、overBudget 0、max 120 µs（Batch 3A §11）。低 buffer / 高负载未测；计数器无法区分空闲与播放期（Batch 3B O-3）。 |
-| **N-3** | **真实卸载/重装闭环** | PKG **安装**已在真机验证（Batch 3A §R2.9#2）；「卸载 → 重装 → 恢复 EQ/音量」整条路径仍未在真实 macOS 上执行。 |
-| N-4 | 真实 HAL 设备移除（播放中拔 HDMI/DP） | 未执行；`quarantine` 计数无实测值。 |
-| N-5 | macOS 14.4 认证 | 当前只在 macOS 27.2.1 上运行过；14.4 未验证。 |
-| N-6 | x86_64 真机运行 | 只有 universal 构建产物，未在 Intel 机器上运行。 |
-| N-7 | 长时间稳定性（≥ 8 小时） | 未执行。 |
-| N-8 | 多设备并发 / 热插拔矩阵 | 未执行。 |
-| **N-9** | **未签名 HAL 驱动能否被 `coreaudiod` 加载** | **NOT_VERIFIED**。「驱动构建成功」「PKG 无签名且载荷校验通过」「`preinstall` 不调用签名工具」都**不能**证明系统会接受未签名驱动的加载。未在 macOS 14、未在任何 Intel Mac、未在受管控设备上验证。见 [INSTALLATION_GUIDE](INSTALLATION_GUIDE.md) §5.3。 |
-| **N-10** | **未签名 PKG 的真实安装全流程** | **NOT_VERIFIED**。手动批准 Gatekeeper 拦截、真实写入 HAL 目录、安装后首次发声，均未在未签名产物上执行。 |
-
-完整登记见 [Known-Limitations](risks/Known-Limitations.md) 的 B 类（U-1 – U-18，U-4 已关闭）与
-D 类（P-1 – P-9）。
-
----
-
-## 6. 已知限制（不影响本版本可安装）
-
-- Sparkle 自动更新**不存在**：`SUPublicEDKey` 为空，`appcast.xml` 从不发布，
-  `tools/generate_appcast.sh` 拒绝运行。请下载新 PKG 升级。
-- **发布物完全未签名、未公证**（L-13）：没有 Developer ID、没有 ad-hoc 签名、PKG 无
-  签名。App 与 PKG 首次打开都需要手动放行；受 MDM 策略禁止未签名软件的组织无法安装。
-- 安装器不检查 App/Host 是否在运行：安装前请手动退出（P2-5）。
-- DSP 采集侧测试计数器存在已知偏差（P2-1）：它不参与发布门禁，但读取该数字时需注意。
-- Driver 侧 RT-1 – RT-5、Host 侧残余 RT 问题仍未处理完：可能导致真实负载下的爆音/卡顿，
-  不影响内存安全。见 Known-Limitations C 类。
-- 只支持 64 位；只支持 arm64 / x86_64；Float64 输入 fail-closed。
-
----
-
-## 7. 安装与卸载
-
-- 安装：`SoundBridge-1.2.0.pkg`（详见 [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md)）。
-- 卸载：菜单栏 → **Uninstall Driver**，或 `tools/uninstall_driver.sh --dry-run` 先看计划。
-- 两者都不会重启 `coreaudiod`；需要重新加载时由用户自己注销/重启或手动执行。
-
----
-
-## 8. 发布结论
-
-**当前结论：产品层无发布阻断项；以下未验证事项作为已披露限制随本版本发布。**
-
-已披露限制（与 [发布检查单](release/SoundBridge-1.2.0-Release-Checklist.md) §8.2 一致）：
-
-- 卸载 → 重装闭环未验证（N-3；安装本身已验证）
-- 播放中拔出 HDMI/DP 未验证（N-4）
-- macOS 14.4 与 x86_64 真机未认证（N-5、N-6）
-- 低 buffer / 高负载 underrun 未测（N-2；默认 buffer 30 分钟已验证）
-- ≥ 8 小时稳定性、多设备并发未测（N-7、N-8）
-- EQ 听感仅用户主观确认，无测量数据（N-1）
-
-签名与分发：**完全未签名、未公证**（无 Developer ID、无 ad-hoc 签名、PKG 无签名），
-`spctl` 报 `rejected / source=no usable signature` 是预期状态；首次启动与 PKG 安装按
-[安装指南](INSTALLATION_GUIDE.md) 第 5 节手动放行，不关闭 Gatekeeper 与 SIP。未签名
-HAL 驱动是否会被 `coreaudiod` 加载仍为 NOT_VERIFIED（N-9），真实 Mac 验证计划见
-Known-Limitations P-9。
-
-原则不变：未验证项一律标注 NOT_VERIFIED，不写成 PASS。
-
----
-
-# 1.2.1 (unreleased)
-
-**This version has not been released.** `VERSION`, the app, driver and Host
-bundle versions, the package version and the shared-memory protocol
-(`0x00020200`) are unchanged. Nothing below has been run on a display, and no
-1.2.0 result is restated or revised here.
-
-This section is in English because release notes are user-facing. The 1.2.0 notes
-above are untouched.
-
-## What changed
-
-### Volume and mute commit without a playback session
-
-At 1.2.0 a write could return success and still not be in effect (OBS-1). The
-driver installs the volume control's committed value during `OnStartIO`, so a
-change made while nothing was playing stayed in the HAL control, and the next
-playback handshake could adopt the older value.
-
-- The app writes the property and then reads it back. The menu bar moves only to
-  what the device reports; a write that is accepted and then dropped is logged as
-  such and never shown as applied. For the SoundBridge proxy the tolerance is one
-  raw step of its 48-step taper, because the proxy quantises to its own steps. A
-  third-party device keeps HAL-status semantics, since it may quantise far more
-  coarsely and refusing its valid changes would be a regression.
-- The Host commits every accepted volume/mute change into the shared-memory
-  volume state block, so the value is already there when the driver next performs
-  the `OnStartIO` handshake, and it survives a Host restart or a driver
+- The Host now commits every accepted volume/mute change into the shared-memory
+  volume state block unconditionally, instead of only while forwarding to a physical
+  device that owns the default output. The value is therefore already in place when
+  the driver next runs `OnStartIO`, and it survives a Host restart or a driver
   reconnection.
+- The app writes the property and then reads it back. The menu bar moves only to what
+  the device reports; a write that is accepted and dropped is logged as such and never
+  displayed as applied.
+- For the SoundBridge proxy the tolerance is one raw step of its 48-step taper, because
+  the proxy quantises to its own steps. A third-party device keeps HAL-status
+  semantics: it may quantise more coarsely, and refusing its valid changes would be a
+  regression (B-3).
 
-### EQ settings persist, and are re-applied on launch
+### 3.2 EQ settings persist, and are re-applied on launch (OBS-2)
 
-At 1.2.0 the last position of a drag was not persisted (OBS-2): the throttled
-pipeline's save sat behind an early return, and releasing the slider advanced the
-cache without going through that pipeline, so the final value looked unchanged
-and was never written.
+At 1.2.0 the last position of a drag was never persisted: the only save sat behind the
+change check in the 30 Hz sink, and releasing the slider advanced the cache first, so
+the final value looked unchanged.
 
-- Each device's EQ is now one dictionary (`{bass, mids, treble, enabled}`) under
-  one key, `eq_<deviceUID>_state` (`eq_default_state` in production), so a crash
-  between two writes cannot mix the gains of one drag with the bypass flag of
-  another.
-- Restore validates field by field: an unusable field falls back to its default
-  and the other three survive; a non-finite gain is discarded, and a finite
-  out-of-range gain is clamped.
-- The four keys written by 1.2.0 are read once and rewritten in the current
-  shape, so upgrading does not flatten a device's EQ.
-- Reset persists immediately, and restored values are pushed to the DSP on
-  launch instead of waiting for a slider to move.
+- The sink saves whether or not it detected a change; release and reset save
+  explicitly.
+- Each device's EQ is one dictionary (`{bass, mids, treble, enabled}`) under one key,
+  written atomically, so a crash between two writes cannot mix one drag's gains with
+  another's bypass flag.
+- Restore validates field by field: an unusable field falls back to its default and the
+  other three survive; a non-finite gain is discarded; a finite out-of-range gain is
+  clamped to ±12 dB.
+- Restored values are pushed to the DSP on launch.
 
-Downgrade: once 1.2.1 has saved, 1.2.0 reads only its four old keys, which are no
-longer written, so it restores stale values.
+### 3.3 Uninstall lifecycle (OBS-3)
 
-### Uninstall lifecycle
+At 1.2.0 the uninstaller removed the driver bundle and nothing else: a running Host
+kept its mapping, runtime IPC files stayed in `/tmp`, and a single exit code could not
+distinguish "removed a file" from "the driver was already gone".
 
-At 1.2.0 the script removed the driver bundle and nothing else: it did not stop a
-running Host, left the runtime IPC files in `/tmp`, and could not distinguish a
-removed file from a reloaded driver (OBS-3).
-
-- Four phases in a fixed order — identify, stop, release IPC, remove. No phase
-  runs before identification succeeds.
-- Only processes whose executable is this installation's Host and whose owner is
+- Four phases in a fixed order — identify, stop, release IPC, remove. No phase runs
+  before identification succeeds: the bundle id must be `com.soundbridge.driver`, a
+  symlink or a foreign bundle is refused.
+- Only processes whose executable is this installation's Host **and** whose owner is
   you are signalled: `SIGTERM`, a bounded wait (default 5 s, `--timeout`), then
-  `SIGKILL` against that same pid. `--keep-host` skips the phase. An unreadable
-  process table is reported as "not verified", never as "nothing was running".
-- `/tmp/soundbridge-<uid>-*` and the device control file are released; a file that
+  `SIGKILL` against that same pid. `--keep-host` skips the phase; an unreadable process
+  table is reported as "not verified", never as "nothing was running".
+- `/tmp/soundbridge-<uid>-*` and the device control file are released. A file that
   cannot be removed is a failure, not a warning.
-- The report keeps four states apart — files removed from disk, driver unloaded
-  from `coreaudiod`, the CoreAudio device gone, `coreaudiod` restarted — and only
-  the first is performed.
-- The PKG receipt and the installer transaction logs are reported, never deleted.
-  EQ settings, volume state, logs and the app are kept.
-- Idempotent: a second run is a no-op, a machine with nothing installed exits 0,
-  and a failure exits non-zero naming the step it could not complete.
+- Four states are reported separately — files removed from disk, driver unloaded from
+  `coreaudiod`, the CoreAudio device gone, `coreaudiod` restarted. Only the first is
+  performed. `coreaudiod` is never signalled, so the loaded copy stays resident until
+  it is restarted or the machine reboots (B-2).
+- The PKG receipt and the installer transaction logs are reported, never deleted. EQ
+  settings, volume state, logs and the app are kept.
+- Idempotent: a second run is a no-op, a machine with nothing installed exits 0, and a
+  failure exits non-zero naming the step it could not complete.
 
-## Still unverified
+### 3.4 DSP core: twenty audit findings closed
 
-- None of this has been executed on a display: volume/mute commit without
-  playback, EQ restore after an app or Host restart, and a real uninstall of a
-  real driver. The commands that were run, and the test counts, are in the
-  [1.2.1 product-quality report](release/SoundBridge-1.2.1-Product-Quality-Report.md).
-- The 1.2.0 items marked `NOT_VERIFIED` above (N-1 … N-10) are unchanged.
+An audit of the DSP engine recorded twenty findings — two P1, seven P2, eleven P3 — and
+1.2.1 closes all twenty. The two P1 findings were structural, and both were fixed by
+changing the shape of the code rather than the symptom:
+
+- **The test suite could not fail.** A header-scope `static TestStats` gave every
+  translation unit its own counter, so a failing assertion incremented a copy the
+  runner never read. There is now one function-local object, and a two-translation-unit
+  failure-injection probe asserts that a failure is reported and that the process exits
+  non-zero.
+- **The setters advertised as queued, thread-safe and realtime-safe wrote biquad and
+  smoother state that the audio thread was reading and writing per sample.** There is
+  now a real queue: a bounded, lock-free, triple-buffered mailbox that publishes one
+  complete immutable configuration.
+
+The remaining eighteen findings are P2/P3 correctness, boundary and cleanup defects in
+the same engine. No struct layout changed and the protocol version is unchanged, so a
+1.2.1 driver and a 1.2.1 Host still interoperate with the 1.2.0 layout.
+
+### 3.5 Shared-memory API fails closed on an invalid mapping
+
+`rf_is_connection_healthy()` compared four non-zero words, so a stale, foreign or
+uninitialised mapping could report healthy because four unrelated values happened to be
+set. It now gates on header validation, which also covers a null pointer. The volume
+state readers reject a null mapping instead of dereferencing it, and the legacy
+`rf_load_eq_snapshot()` is documented as leaving the snapshot untouched on a failed
+read — for a zeroed snapshot that means 0 dB on every band — with callers pointed at
+the safe variant.
+
+### 3.6 Tests and validation tooling
+
+- **Host realtime suites**: in-process coverage for the render path — the callback's
+  realtime contract across the mapping, the EQ change detector, the DSP update and the
+  output buffer; the diagnostic counters and the callback histogram; and soak runs that
+  keep churn and concurrency going long enough for a leak, a drift or a stuck state to
+  appear. No device, driver or installed app is needed.
+- **Hardware validation harness** (`tools/hardware-validation/`): out-of-process tools
+  — device and format inventory, per-window callback timing, driver counters read from
+  the live mapping through a read-only mmap, operator markers, and the result JSON and
+  Markdown a run is reported from. The shipping code was not changed to produce
+  evidence. See §4.2 for the one run that has been performed and what its own verdict
+  was.
+- **Release guard**: the shipped bundle is now checked for the license files in §3.7,
+  so a bundle assembled by hand or by an older script fails verification instead of
+  being published.
+- Four one-off PoC probes under `tools/poc/` were deleted. Nothing referenced them; the
+  measurements they produced live in the architecture, engineering and Known-Limitations
+  documents, and `make protocol-check` still asserts the header layout on every build.
+
+### 3.7 License, first time
+
+1.2.0 was published without a license grant. From 1.2.1 the source **and the binaries
+built from it** are licensed under the
+[PolyForm Noncommercial License 1.0.0](../LICENSE): read, run, modify and share for any
+noncommercial purpose; commercial use requires a separate written license. It is
+source-available, not open source — the OSI definition forbids restricting field of use,
+and this license does restrict it.
+
+Every bundle now ships `LICENSE` and `THIRD_PARTY_NOTICES.md` in
+`SoundBridge.app/Contents/Resources/`. The notices reproduce the license text of the
+components that are linked into the artifacts: libASPL (MIT, plus the two Apple
+sample-code licenses for the files it derives from) and Sparkle (MIT, with the external
+licenses the project lists). The test-only dependencies are not linked into anything
+that ships and are named as such.
+
+Using 1.2.1 means accepting those terms. Releases up to and including 1.2.0 were
+published without a grant and are not retroactively covered.
+
+---
+
+## 4. Verification
+
+### 4.1 Automated
+
+Run on the release commit, on the validation machine (macOS 27.2.1, arm64, SIP and
+Gatekeeper both enabled). `make test` exited 0.
+
+| Suite | Result |
+|---|---|
+| Host (XCTest) | 411 tests, 10 skipped, 0 failures |
+| App (XCTest) | 298 tests, 0 failures |
+| DSP (CTest) | 1 target, 100% passed |
+| Driver (CTest) | 3 targets, 100% passed |
+| Install transaction | 168 scenarios, 0 failed |
+| Uninstall lifecycle (real script, sandbox root) | 99 assertions, 0 failed, 0 skipped |
+| Unsigned release policy | 97 checks, 0 failures |
+| Release payload (damage cases) | 244 assertions, 0 failed |
+
+The uninstall suite executes `tools/uninstall_driver.sh` for real against a temporary
+root, so removal, idempotence, refusals, the bounded Host stop with `SIGKILL`
+escalation and the IPC scope are covered without touching the machine.
+
+### 4.2 Hardware realtime run — one run, and it is not a pass
+
+A single end-to-end observation on a real link was performed on 2026-11-23: default
+output switched to the proxy device, real test tone played through it, 30 minutes of
+per-window collection, a CPU-load window in the middle, then restore and quit.
+
+| Field | Value |
+|---|---|
+| Device | `PHL 279M1RV (SoundBridge)`, 48 000 Hz / 512 frames, one format for the whole run |
+| Windows | 180 × 10 s |
+| Callbacks | 169 686; observed 93.7–93.8/s against an expected 93.75/s |
+| Deadline | 10 666.7 µs per window; `overBudget` summed over all windows = 0 |
+| Latency | p99 72–74 µs, max 322 µs |
+| Underruns | driver underrun = 0, ring overrun = 0 (read-only mmap of the live mapping) |
+| Load window | 4 × `yes` for 300 s, covering 31 windows / 29 531 callbacks; `overBudget` still 0 |
+
+**The harness verdict for that run is `INCOMPLETE — REQUIRED HARDWARE EVIDENCE
+MISSING`, and it must be quoted that way.** Two of its own criteria were never
+exercised: host/device recovery (no hotplug or degraded event occurred, and the H8
+scenario was not marked) and the in-run default-output restore marker. `p99.9` is not
+observable at all: the timing snapshot exposes p50/p95/p99/max only. So this run
+supports "no callback exceeded its deadline under this load, on this device, at this
+format", and nothing beyond that.
+
+Teardown was recorded separately after the run: the app quit normally, the Host exited
+with it within ~3 s, both proxy devices disappeared (7 devices → 5, zero proxies), both
+mappings and the device control file were removed by the app and Host themselves, the
+default output was still the physical display (`PHL 279M1RV`, device id 124,
+48000 Hz / 512 frames) and was re-verified by an independent read-back, and neither
+`coreaudiod` (pid 48791) nor the driver process (pid 48806) restarted at any point. No
+crash reports were written in the surrounding window.
+
+The registration of this run, with the identical numbers, is §2C of
+[Known limitations](risks/Known-Limitations.md).
+
+### 4.3 The three fixes, on the validation machine
+
+Each of the three defects in §3.1–§3.3 was reproduced against 1.2.0's behavior, then
+checked with 1.2.1 built from this commit and run on the validation machine:
+
+- **OBS-1** — with no I/O client and the proxy *not* the default output, a volume write
+  of 0.55 (which the device quantises to 0.5625) advanced `state_revision` 2 → 3, left
+  0.5625 in the shared-memory volume field and in `volume-state.json`, and was still
+  0.5625 after an app restart. Mute in the same conditions set `mute_state` = 1 and
+  advanced the revision 3 → 4.
+- **OBS-2** — Bass 11.7 dB → 4.9 dB was stored as 4.913412 under the device's single
+  dictionary key, and the panel still showed 4.9 dB after quitting and reopening the
+  app.
+- **OBS-3** — running `tools/uninstall_driver.sh` for real reported files removed, no
+  Host running, zero IPC files left, receipt kept, and `coreaudiod` never signalled,
+  exiting 0; neither the helper process nor `coreaudiod` restarted and audio was not
+  interrupted. Reinstalling with the published 1.2.0 PKG then restored the driver, the
+  proxy device and its volume.
+
+These are observations from one machine, recorded by hand, not an automated suite.
+The automated coverage that sits behind them is in §4.1.
+
+---
+
+## 5. Still unverified
+
+Stated as gaps, not as "works but untested":
+
+- **Sample rate and buffer size matrix** — 44.1 / 96 kHz and 128 / 256 / 1024 frames
+  were never run. Everything in §4.2 is 48 kHz / 512 frames.
+- **Device removal and re-enumeration while playing** (H8) — not executed. Same status
+  as U-1 in [Known limitations](risks/Known-Limitations.md).
+- **Audible symptoms under load** — no human listener confirmed absence of clicks or
+  dropouts. The counters say the callbacks met their deadline; they do not say what it
+  sounded like.
+- **p99.9 latency** — not observable with the current timing snapshot.
+- **Hot state and CPU readings** — no resolution: `pmset -g therm` recorded nothing and
+  the CPU column reads 0.0%.
+- **The double-click PKG path through the Gatekeeper approval dialog** — installation
+  was driven from the `installer` command line; the dialog sequence is documented from
+  Apple's instructions, not measured.
+- **Intel Macs and macOS 13/14** — universal binaries are produced; only Apple silicon
+  on macOS 27.2.1 has been run.
+- **Multi-device concurrency** and sessions longer than 30 minutes.
+- **Playback-time volume behavior with `driver_connected = 1`** — §4.3 covers the no-IO-
+  client case, which was the defect; the ordinary case worked at 1.2.0 and is unchanged.
+- **PKG/DMG byte reproducibility** — packaging is not reproducible even though the
+  binaries are (OBS-4, unchanged).
+
+---
+
+## 6. Known limitations that carry over
+
+Unchanged from 1.2.0 unless stated above; the full record is
+[Known limitations](risks/Known-Limitations.md).
+
+- The distribution is completely unsigned and not notarized. Gatekeeper rejects it by
+  design; you approve it once per artifact in **System Settings → Privacy & Security**.
+  There is no Developer ID and no auto-update channel: no EdDSA key, no appcast, and
+  `SUPublicEDKey` is empty.
+- The uninstaller does not delete the PKG receipt or installer state, and does not
+  restart `coreaudiod` (B-2).
+- The read-back tolerance of one raw step applies to the SoundBridge proxy only (B-3).
+- Downgrading to 1.2.0 reads stale EQ values (B-1).
+
+---
+
+## 7. Install and uninstall
+
+[INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) covers download verification, install,
+the one-time Gatekeeper approval, troubleshooting, uninstall and rollback.
+
+Menu bar → **Uninstall Driver** runs the four-phase uninstaller described in §3.3.
+`tools/uninstall_driver.sh --dry-run` prints the plan and changes nothing.
+
+---
+
+## 8. Release verdict
+
+1.2.1 fixes the three defects it targets, and their fixes are covered by automated
+suites and by hand on one machine. The DSP audit is closed. The known gaps are listed
+in §5 and are the same class as 1.2.0's: interaction with hardware and formats that
+have not been tried.
+
+It is **not** a claim that the audio path has been measured, that every supported
+format works, or that anything beyond one arm64 machine has been validated.

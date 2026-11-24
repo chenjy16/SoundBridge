@@ -1,8 +1,8 @@
-# SoundBridge 1.2.0 — 安装与卸载指南
+# SoundBridge 1.2.1 — 安装与卸载指南
 
 本文面向**从 GitHub Release 下载** SoundBridge 的用户，不需要本地编译。
 
-版本：`1.2.0` ｜ App/驱动协议：`0x00020200`（131584）
+版本：`1.2.1` ｜ App/驱动协议：`0x00020200`（131584，与 1.2.0 相同）
 
 ---
 
@@ -31,14 +31,19 @@ CodeDirectory：Apple silicon 要求它存在才允许加载代码。它不含�
 [Known-Limitations](risks/Known-Limitations.md) P2-5）：一个正在运行的 Host 会在驱动
 被替换后继续持有旧映射，直到它自己退出。菜单栏 → **Quit SoundBridge** 之后再安装。
 
+**许可（1.2.1 起）**：本版本按 [PolyForm Noncommercial License 1.0.0](../LICENSE)
+授权，非商业用途可用，商业用途需另行取得书面许可。1.2.0 及更早的发布当时没有附带
+许可。许可全文与第三方组件声明随 App 一起安装在
+`SoundBridge.app/Contents/Resources/` 下（`LICENSE`、`THIRD_PARTY_NOTICES.md`）。
+
 ---
 
 ## 1. 选择下载文件
 
 | 文件 | 适用场景 | 是否安装驱动 |
 |---|---|---|
-| `SoundBridge-1.2.0.pkg` | **推荐**。首次安装，或从旧版本升级 | 是 |
-| `SoundBridge-1.2.0.dmg` | 只想替换 App，或查看包内容 | 否 |
+| `SoundBridge-1.2.1.pkg` | **推荐**。首次安装，或从旧版本升级 | 是 |
+| `SoundBridge-1.2.1.dmg` | 只想替换 App，或查看包内容 | 否 |
 
 两者的关系，也是唯一需要记住的一条：
 
@@ -72,8 +77,8 @@ shasum -a 256 -c SHA256SUMS.txt
 ## 3. 用 PKG 安装（推荐路径）
 
 1. 退出 SoundBridge：菜单栏图标 → **Quit SoundBridge**。
-2. 双击 `SoundBridge-1.2.0.pkg`。
-3. 安装器显示 `SoundBridge 1.2.0`，点「继续」→「安装」。
+2. 双击 `SoundBridge-1.2.1.pkg`。
+3. 安装器显示 `SoundBridge 1.2.1`，点「继续」→「安装」。
 4. **管理员授权**：macOS 会要求输入一次管理员用户名与密码。
    - 这是安装器自身的授权，不是 SoundBridge 在后台提权。
    - 安装脚本只在 `/Library/Audio/Plug-Ins/HAL/` 与 `/Applications/` 写入，
@@ -102,12 +107,12 @@ shasum -a 256 -c SHA256SUMS.txt
 ## 4. 用 DMG 安装（仅替换 App）
 
 1. 退出 SoundBridge。
-2. 双击 `SoundBridge-1.2.0.dmg`，挂载出磁盘映像。
+2. 双击 `SoundBridge-1.2.1.dmg`，挂载出磁盘映像。
 3. 把 `SoundBridge.app` 拖到「应用程序」。
 4. 在 Finder 里推出该磁盘映像。
 5. 打开 `/Applications/SoundBridge.app`。
 
-如果这台机器上还没有 1.2.0 驱动，App 会显示安装引导并指向 PKG —— 它不会自己装。
+如果这台机器上还没有 1.2.1 驱动，App 会显示安装引导并指向 PKG —— 它不会自己装。
 
 ---
 
@@ -167,7 +172,7 @@ HAL 插件目录对代码签名的要求随 macOS 版本变化，且可能受本
   "/Library/Audio/Plug-Ins/HAL/SoundBridgeDriver.driver/Contents/Info.plist"
 ```
 
-期望输出 `1.2.0`。如果是 `1.1.x` 或更早，说明驱动没有被替换 —— 通常是用了 DMG 或
+期望输出 `1.2.1`。如果是 `1.1.x` 或更早，说明驱动没有被替换 —— 通常是用了 DMG 或
 安装被中断，请重新用 PKG 安装。
 
 ### 6.2 看协议版本
@@ -444,23 +449,23 @@ App 启动时跳过 updater 初始化并打印 `Update feed not configured`。�
 | 3 用 PKG 安装 | SOURCE_VERIFIED | 载荷布局与 preinstall 门禁由 `make verify-installer-pkg` 静态校验 |
 | 4 用 DMG 安装 | SOURCE_VERIFIED | DMG 只含 App |
 | 5 被系统拦下 | SOURCE_VERIFIED | 未签名产物的必然结果（`spctl` 报 `rejected / source=no usable signature`）；未在本版本上实测批准流程 |
-| 5.3 驱动能否被加载 | **NOT_VERIFIED** | 构建、PKG 结构与载荷校验通过，但 `coreaudiod` 是否接受未签名驱动未在真实 Mac 上验证 |
-| 6 确认驱动已安装 | TEST_VERIFIED（读取命令） | 命令在现有 1.1.x 驱动上执行过；1.2.0 的安装结果未验证 |
+| 5.3 驱动能否被加载 | REAL_MACOS_VERIFIED（单机） | 在验证机（macOS 27.2.1、SIP 与 Gatekeeper 均开启）上，未签名驱动被 `coreaudiod` 加载，驱动进程常驻；不是对其它系统版本或受管控设备的承诺 |
+| 6 确认驱动已安装 | TEST_VERIFIED（读取命令） | 命令在 1.1.x 与 1.2.0 驱动上执行过；1.2.1 的安装结果由 §4 的自动化门禁覆盖，未逐条手测 |
 | 7 声音设置 | SOURCE_VERIFIED | 设备选择由 CoreAudio 与菜单栏列表决定 |
 | 8.1 HDMI/DP 无声 | NOT_VERIFIED | 未在真实 HDMI/DP 设备上执行本版排查流程 |
 | 8.2 驱动未加载 | SOURCE_VERIFIED | 命令可用，未用于诊断真实加载失败 |
-| 9 卸载 | TEST_VERIFIED（脚本，沙盒执行） | `tools/test_uninstall_lifecycle.sh` 用 `--sandbox-root` 在临时目录树上**真实执行**脚本（19 组场景 / 99 断言，含真实进程 TERM → 有界等待 → SIGKILL 升级）；`UninstallLifecycleScriptTests` 锁定源码不变量。对真实 HAL 目录、真实 Host 与真实 `coreaudiod` 的卸载仍未执行 |
+| 9 卸载 | TEST_VERIFIED（脚本，沙盒执行）+ REAL_MACOS_VERIFIED（一次） | `tools/test_uninstall_lifecycle.sh` 用 `--sandbox-root` 在临时目录树上**真实执行**脚本（19 组场景 / 99 断言，含真实进程 TERM → 有界等待 → SIGKILL 升级）；`UninstallLifecycleScriptTests` 锁定源码不变量。对真实 HAL 目录的一次卸载也已执行：退出码 0，四态分列，helper 与 `coreaudiod` 均未重启，随后用发布 PKG 重装恢复 |
 | 10 恢复旧版驱动 | NOT_VERIFIED | 未执行 |
 | 11 自动更新 | SOURCE_VERIFIED | `SUPublicEDKey` 为空，无 appcast 发布，`generate_appcast.sh` 拒绝运行 |
 
 **未在以下环境验证**：macOS 14、任何 Intel Mac、任何启用了 MDM/受管控策略的设备。
 本版本的构建与结构校验只在 macOS 27.2.1（arm64）上完成。
 
-**尚未验证的三件事**（详见 [Release Notes](RELEASE_NOTES.md)）：
+**尚未验证的项**（详见 [Release Notes](RELEASE_NOTES.md) §5）：
 
-- 真实卸载/重装闭环
-- 播放窗口 underrun
-- 实际 EQ 听感
+- 采样率与缓冲区矩阵（44.1 / 96 kHz、128 / 256 / 1024 帧）
+- 播放中的设备移除与重新枚举
+- 实际 EQ 听感与负载下的可听症状（无人工听者确认）
 
 本指南不把未验证项写成已验证。真实设备上的完整走查仍列在
 [发布检查单](release/SoundBridge-1.2.0-Release-Checklist.md) §6。

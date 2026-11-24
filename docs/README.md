@@ -11,6 +11,11 @@
 > 发布验证机上完成端到端安装与运行验证。发布事实、权威哈希与原始证据见
 > [release/SoundBridge-1.2.0-Final-Release-Report.md](release/SoundBridge-1.2.0-Final-Release-Report.md)；
 > 发布后仍未解决的问题见 [risks/Known-Limitations.md](risks/Known-Limitations.md) 的 §2A。
+>
+> **1.2.1 状态**：发布文档已按 1.2.1 定稿（本目录的
+> [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) 与 [RELEASE_NOTES.md](RELEASE_NOTES.md)）；
+> `VERSION` 已改为 `1.2.1`，13 个版本源同步通过（`verify_version_consistency.sh
+> --expect 1.2.1`）。尚未打 tag、尚未发布；发布流程与门禁见 §4。
 
 ---
 
@@ -27,7 +32,7 @@ SoundBridge 是一个 macOS 菜单栏应用，为**固定音量**的 HDMI / Disp
 - 无内核扩展（不加载 kext）。
 - 分发：**完全未签名、未公证、无自动更新**（发布策略，见
   [Known-Limitations](risks/Known-Limitations.md) L-13）。这不是 ad-hoc 签名。
-- 版本号 `VERSION` = `1.2.0`；共享音频协议版本 `0x00020200`。
+- 版本号 `VERSION` = `1.2.1`；共享音频协议版本 `0x00020200`。
 
 ## 2. 架构总览
 
@@ -81,7 +86,7 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 | `audio_data` 起始偏移 | `320` |
 | Admission 块 | `admission_state` @256、`admission_epoch` @264、`producer_owner_token` @272、`admission_claim_seq` @280 |
 | 共享头副本 | 4 份，SHA-256 必须相同 |
-| 版本号 | `VERSION` = `1.2.0` |
+| 版本号 | `VERSION` = `1.2.1` |
 
 数值以 [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §10 为准，并由
 `tools/check_protocol_layout.sh`（C11 + C++17）与
@@ -103,7 +108,7 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 | [release/SoundBridge-1.2.0-Final-Release-Report.md](release/SoundBridge-1.2.0-Final-Release-Report.md) | 1.2.0 发布证据：哈希、安装、驱动加载、功能与稳定性 | **冻结（权威证据）** |
 | [release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md](release/SoundBridge-1.2.0-Post-Release-Validation-Addendum.md) | 发布后验证摘要（英文）：下载完整性、安装、未签名驱动加载、功能、31 分钟稳定性、两项未测 | **冻结（发布后记录）** |
 | [release/SoundBridge-1.2.0-Release-Checklist.md](release/SoundBridge-1.2.0-Release-Checklist.md) | 发布检查单（每次发布复用） | 维护中 |
-| [release/SoundBridge-1.2.1-Product-Quality-Report.md](release/SoundBridge-1.2.1-Product-Quality-Report.md) | 未发布 1.2.1 工作的三项 P1 修复报告：根因、改动、测试与命令、NOT VERIFIED 清单 | 一次性记录（**未发布**） |
+| [release/SoundBridge-1.2.1-Product-Quality-Report.md](release/SoundBridge-1.2.1-Product-Quality-Report.md) | 1.2.1 的三项 P1 修复报告：根因、改动、测试与命令、NOT VERIFIED 清单 | 一次性记录（1.2.1 的验收依据；§6.4 的 NOT VERIFIED 早于 2026-11-23 真机复核） |
 | [release/SoundBridge-Hardware-Realtime-Operator-Runbook.md](release/SoundBridge-Hardware-Realtime-Operator-Runbook.md) | `tools/hardware-validation/` 的操作手册：前置条件、场景 H1–H8、执行步骤、停止条件与收尾检查 | 维护中 |
 | [release/SoundBridge-Hardware-Realtime-Result-Schema.json](release/SoundBridge-Hardware-Realtime-Result-Schema.json) | `sb-hw-validate` 输出 `result.json` 的结构定义与字段语义 | 维护中 |
 
@@ -112,23 +117,40 @@ Driver 通过 `/tmp` 下的控制文件与 Host 交换设备列表与音量状�
 下面两份文档在发布时被 workflow 复制进 `dist/` 并随 GitHub Release 上传，其内容
 与用户下载到的文件字节一致。改动它们会让仓库与已发布资产不一致：
 
-| 文件 | 发布时 SHA-256 | 说明 |
+| 文件 | 1.2.0 发布时 SHA-256（历史） | 说明 |
 |---|---|---|
 | [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md) | `01ad029bedb2…b9a782` | 安装/卸载指南；§5.3 的「未签名驱动能否加载」写于发布前，其现状见 Known-Limitations U-17 |
 | [RELEASE_NOTES.md](RELEASE_NOTES.md) | `21d8105e54b5…ebf34a` | 1.2.0 变更说明；§4.1 与 §5 的 NOT_VERIFIED 结论写于发布前，现状见 Known-Limitations §2A |
 
-规则：**下一次发布（1.2.1）时**再更新这两份文档并重新上传；在此之前它们作为
-1.2.0 的历史快照保留，当前状态以 Known-Limitations 与最终发布报告为准。两个路径
-不得移动——`.github/workflows/release.yml` 直接读取 `docs/INSTALLATION_GUIDE.md` 与
-`docs/RELEASE_NOTES.md` 并校验版本号。
+规则：这两个路径**不得移动**——`.github/workflows/release.yml` 直接读取
+`docs/INSTALLATION_GUIDE.md` 与 `docs/RELEASE_NOTES.md`，复制进 `dist/`，并校验
+`RELEASE_NOTES.md` 中出现了 `VERSION` 的字符串。上表的哈希是 1.2.0 已上传件的
+记录，只增不改；每次发布都会用当时的仓库内容重新生成上传件。
 
-> **状态更新（未发布的 1.2.1 工作）**：为交付卸载流程与发布说明，
-> `INSTALLATION_GUIDE.md` §9（英文重写）与 `RELEASE_NOTES.md` 的
-> 「1.2.1 (unreleased)」一节已在工作树中写入，因此仓库内这两个文件**不再与上表
-> SHA-256 一致**。已发布的 1.2.0 版本仍以 GitHub Release 上传件为准，上表哈希作为
-> 历史记录保留。这次改写**未发布**，也不改动 1.2.0 的任何验证结论。
+> **状态（1.2.1 定稿）**：两份文档已在工作树中整篇改写为 1.2.1
+> （`RELEASE_NOTES.md` 为 1.2.1 的完整发布说明，`INSTALLATION_GUIDE.md` 的版本、
+> 许可与卸载章节同步到 1.2.1），因此仓库内这两个文件**不再与上表 SHA-256 一致**，
+> 这是预期状态：上表记录的是已发布的 1.2.0 上传件。1.2.1 发布时由 workflow 复制
+> 当前树里的版本，其 SHA-256 在发布记录中另行登记。`VERSION` 已改为 `1.2.1` 并同步
+> 了 App / Driver / Host 与驱动 CMake 版本；共享内存协议、Bundle ID 与安装布局未变。
 
 ## 5. 验证状态
+
+### 5.1 1.2.1（当前工作树）
+
+| 层次 | 状态 | 证据 |
+|---|---|---|
+| 自动化全量回归 | `TEST_VERIFIED` | `make test` 退出码 0：Host 411（10 跳过）/ App 298 / DSP 1 / Driver 3 / 安装事务 168 / 卸载生命周期 99 / 未签名策略 97 / 发布载荷 244，零失败 |
+| OBS-1 音量与静音提交 | `REAL_MACOS_VERIFIED — 单机` | 写入 0.55 被设备量化为 0.5625，`state_revision` 2 → 3，重启后仍为 0.5625（[RELEASE_NOTES](RELEASE_NOTES.md) §4.3） |
+| OBS-2 EQ 持久化 | `REAL_MACOS_VERIFIED — 单机` | Bass 11.7 → 4.9 dB 落盘为 4.913412，重开 App 后界面仍为 4.9 |
+| OBS-3 卸载生命周期 | `REAL_MACOS_VERIFIED — 单机` + `TEST_VERIFIED`（脚本） | 真实卸载退出 0，四态分列，`coreaudiod` 与 helper 均未重启；用 1.2.0 发布 PKG 重装后驱动恢复 |
+| 硬件实时 30 分钟 | `INCOMPLETE — REQUIRED HARDWARE EVIDENCE MISSING` | 169 686 callbacks，overBudget 0，p99 72–74 µs；C6 恢复与 C8 恢复标记未执行（[Known-Limitations](risks/Known-Limitations.md) §2C） |
+| 采样率与缓冲区矩阵、播放中设备移除、EQ 听感、`p99.9`、热状态 | `NOT_VERIFIED` | [RELEASE_NOTES](RELEASE_NOTES.md) §5 |
+
+`INCOMPLETE` 是 harness 的机器判定，不读作通过：本次只支持「该设备、该格式、
+该负载下没有回调超期」这一条结论。1.2.1 沿用 1.2.0 的协议版本 `0x00020200`。
+
+### 5.2 1.2.0（已发布）
 
 平台：macOS 27.2.1（`26B131`）/ arm64，Apple clang 21.0.0，Apple Swift 6.4.2；
 Driver 为 universal（`x86_64 arm64`）Release 构建。
@@ -164,7 +186,7 @@ Driver 为 universal（`x86_64 arm64`）Release 构建。
 | 协议 / Ring / 准入 / 退役的自动化结论 | [engineering/](engineering/) |
 | 默认输出治理、音量转发、音频主链 | [architecture](architecture/SoundBridge-1.2.0-Architecture.md) §2、§8–§9 |
 | EQ 映射恢复与持久化 | [architecture](architecture/SoundBridge-1.2.0-Architecture.md)、[Known-Limitations](risks/Known-Limitations.md) §2A / §2B |
-| 风险登记与关闭依据 | [risks/Known-Limitations.md](risks/Known-Limitations.md)（§0 关闭项、§2A 发布后登记、§2B 未发布工作） |
+| 风险登记与关闭依据 | [risks/Known-Limitations.md](risks/Known-Limitations.md)（§0 关闭项、§2A 发布后登记、§2B 1.2.1 对 OBS-1–OBS-3 的处理） |
 | 发布链、未签名策略、发布证据 | [release/](release/)、[Known-Limitations](risks/Known-Limitations.md) L-13 |
 | 真机验证证据（安装、驱动加载、功能、31 分钟稳定性） | [release/SoundBridge-1.2.0-Final-Release-Report.md](release/SoundBridge-1.2.0-Final-Release-Report.md) |
 
